@@ -1,0 +1,12 @@
+[package]
+name = "cfg-noodle"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+embedded-storage-async = "0.4.1"
+sequential-storage = { version = "4.0.1", features = ["std", "_test"] }
+tokio = { version = "1.44.2", features = ["macros", "rt-multi-thread", "time"] }
+
+# [patch.crates-io]
+# sequential-storage = { path = "../sequential-storage" }
