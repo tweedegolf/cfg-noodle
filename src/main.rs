@@ -1,5 +1,6 @@
 use std::{marker::PhantomData, ops::Range};
 
+use const_fnv1a_hash::fnv1a_hash_64;
 use embedded_storage_async::nor_flash::ErrorType;
 use minicbor::{
     Decode, Encode,
@@ -184,23 +185,116 @@ where
     }
 }
 
-impl<C, K, const P: usize, const BPW: usize, const PW: usize> Wrap<C, K, P, BPW, PW>
+impl<C, const P: usize, const BPW: usize, const PW: usize> Wrap<C, PathHash, P, BPW, PW>
 where
-    K: Key,
-    C: KeyCacheImpl<K>,
+    C: KeyCacheImpl<PathHash>,
 {
-    async fn fetch_datum<'a, T: Decode<()>>(
+    async fn fetch_datum<'a, T>(
         &mut self,
-        k: &str,
-    )
+        k: &PathHash,
+        buf: &'a mut [u8],
+    ) -> Result<Option<T>, Error<<MockFlashBase<P, BPW, PW> as ErrorType>::Error>>
+    where
+        T: Decode<'a, ()>,
+        T: Encode<()>,
+    {
+        let Self {
+            flash,
+            range,
+            cache,
+            _pd,
+        } = self;
+        let res =
+            map::fetch_item::<PathHash, Datum<T>, _>(flash, range.clone(), cache, buf, k).await;
+
+        match res {
+            Ok(Some(d)) => {
+                // todo: do anything with the header?
+                Ok(Some(d.body))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn store_datum<'a, T>(
+        &mut self,
+        k: &PathHash,
+        v: &T,
+        buf: &'a mut [u8],
+    ) -> Result<(), Error<<MockFlashBase<P, BPW, PW> as ErrorType>::Error>>
+    where
+        T: Decode<'a, ()>,
+        T: Encode<()>,
+    {
+        let Self {
+            flash,
+            range,
+            cache,
+            _pd,
+        } = self;
+        let dtm: DatumRef<'_, T> = DatumRef { hdr: CURRENT_HEADER, body: v };
+
+        // TODO: Any check we aren't clobbering an unrelated piece of data?
+        map::store_item(flash, range.clone(), cache, buf, k, &dtm).await
+    }
 }
 
 #[tokio::main]
 async fn main() {
-    inner_main().await;
+    // inner_main_1().await;
+    inner_main_2().await;
 }
 
-async fn inner_main() {
+async fn inner_main_2() {
+    const BYTES_PER_WORD: usize = 4;
+    const PAGE_WORDS: usize = 256;
+    const PAGES: usize = 4;
+
+    let mut buf = [0xFFu8; 4096];
+    let mut flash = WrapBuilder::new()
+        .with_pages::<PAGES>()
+        .with_bytes_per_word::<BYTES_PER_WORD>()
+        .with_page_words::<PAGE_WORDS>()
+        .with_key::<PathHash>()
+        .with_write_count_check(WriteCountCheck::Twice)
+        .with_alignment_check(true)
+        .without_shutoff()
+        .build(
+            NoCache::new(),
+            0..((BYTES_PER_WORD * PAGE_WORDS * PAGES) as u32),
+        );
+
+    let config = ConfigV1 {
+        brightness: 1.0,
+        volume: 23.0,
+    };
+    const CONFIG_PATH: PathHash = PathHash::from_str("settings/config");
+    let param = Outer {
+        param: Parameter { name: "billy" },
+    };
+    const PARAM_PATH: PathHash = PathHash::from_str("settings/parameters");
+
+    flash.store_datum(&CONFIG_PATH, &config, &mut buf).await.unwrap();
+    flash.store_datum(&PARAM_PATH, &param, &mut buf).await.unwrap();
+    println!("{}", hexdump(flash.flash.as_bytes()));
+
+    let v1 = flash.fetch_datum::<ConfigV1>(&CONFIG_PATH, &mut buf).await.unwrap().unwrap();
+    println!("{v1:?}");
+    let v1_1a = flash.fetch_datum::<ConfigV1_1a>(&CONFIG_PATH, &mut buf).await;
+    println!("{v1_1a:?}");
+    let v1_1b = flash.fetch_datum::<ConfigV1_1b>(&CONFIG_PATH, &mut buf).await.unwrap().unwrap();
+    println!("{v1_1b:?}");
+    let v1_1c = flash.fetch_datum::<ConfigV1_1c>(&CONFIG_PATH, &mut buf).await.unwrap().unwrap();
+    println!("{v1_1c:?}");
+    let wrong = flash.fetch_datum::<Outer>(&CONFIG_PATH, &mut buf).await;
+    println!("{wrong:?}");
+
+    let p = flash.fetch_datum::<Outer<'_>>(&PARAM_PATH, &mut buf).await.unwrap().unwrap();
+    println!("{p:?}");
+}
+
+async fn inner_main_1() {
     const BYTES_PER_WORD: usize = 4;
     const PAGE_WORDS: usize = 256;
     const PAGES: usize = 4;
@@ -274,55 +368,60 @@ struct Header {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct Path<'a> {
-    path: &'a [u8],
+struct PathHash {
+    len: u8,
+    hash: u64,
 }
 
-impl<'a> Path<'a> {
-    pub const fn from_str(s: &'a str) -> Self {
+impl PathHash {
+    pub const fn from_str(s: &str) -> Self {
         Self::try_from_str(s).expect("Expected a string less than 255 bytes long!")
     }
 
-    pub const fn from_slice(buf: &'a [u8]) -> Self {
+    pub const fn from_slice(buf: &[u8]) -> Self {
         Self::try_from_slice(buf).expect("Expected a string less than 255 bytes long!")
     }
 
-    pub const fn try_from_str(s: &'a str) -> Option<Self> {
+    pub const fn try_from_str(s: &str) -> Option<Self> {
         let buf = s.as_bytes();
-        if buf.len() > (u8::MAX as usize) {
-            return None;
-        }
-        Some(Self { path: buf })
+        Self::try_from_slice(buf)
     }
 
-    pub const fn try_from_slice(buf: &'a [u8]) -> Option<Self> {
+    pub const fn try_from_slice(buf: &[u8]) -> Option<Self> {
         if buf.len() > (u8::MAX as usize) {
             return None;
         }
-        Some(Self { path: buf })
+        let hash = fnv1a_hash_64(buf, None);
+        Some(Self {
+            len: buf.len() as u8,
+            hash,
+        })
     }
 }
 
-impl<'a> Key for Path<'a> {
+impl Key for PathHash {
     fn serialize_into(&self, buffer: &mut [u8]) -> Result<usize, map::SerializationError> {
-        let len = 1 + self.path.len();
-        if buffer.len() < len {
+        let Some((to_use, _remain)) = buffer.split_at_mut_checked(9) else {
             return Err(map::SerializationError::BufferTooSmall);
-        }
-        let to_use = &mut buffer[..len];
-        to_use[0] = self.path.len() as u8;
-        to_use[1..].copy_from_slice(self.path);
-        Ok(len)
+        };
+        to_use[0] = self.len;
+        to_use[1..].copy_from_slice(&self.hash.to_le_bytes());
+        Ok(9)
     }
 
     fn deserialize_from(buffer: &[u8]) -> Result<(Self, usize), map::SerializationError> {
-        let Some((len, rest)) = buffer.split_first() else {
+        let Some((now, _remain)) = buffer.split_at_checked(9) else {
             return Err(map::SerializationError::BufferTooSmall);
         };
-        if rest.len() != (*len as usize) {
-            return Err(map::SerializationError::InvalidFormat);
-        }
-        Ok((Self { path: rest }, buffer.len()))
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&now[1..9]);
+        Ok((
+            Self {
+                len: now[0],
+                hash: u64::from_le_bytes(buf),
+            },
+            9,
+        ))
     }
 }
 
@@ -331,37 +430,19 @@ struct Datum<T> {
     body: T,
 }
 
+struct DatumRef<'a, T> {
+    hdr: Header,
+    body: &'a T,
+}
+
 impl<'a, T> Value<'a> for Datum<T>
 where
     T: Encode<()>,
     T: Decode<'a, ()>,
 {
-    fn serialize_into(&self, buffer: &mut [u8]) -> Result<usize, map::SerializationError> {
-        // first serialize the header
-        let data = [
-            CURRENT_HEADER.magic,
-            CURRENT_HEADER.major,
-            CURRENT_HEADER.minor,
-            CURRENT_HEADER.trivial,
-        ];
-        let Some((now, later)) = buffer.split_at_mut_checked(data.len()) else {
-            return Err(map::SerializationError::BufferTooSmall);
-        };
-        now.copy_from_slice(&data);
-
-        // Then serialize the CBOR encoded data
-        let mut cursor = Cursor::new(later);
-        let res: Result<(), minicbor::encode::Error<EndOfSlice>> =
-            minicbor::encode(&self.body, &mut cursor);
-        match res {
-            Ok(()) => {}
-            Err(_e) => {
-                // We know this was an "end of slice" error
-                return Err(map::SerializationError::BufferTooSmall);
-            }
-        }
-        let used = now.len() + cursor.position();
-        Ok(used)
+    fn serialize_into(&self, _buffer: &mut [u8]) -> Result<usize, map::SerializationError> {
+        // TODO: we should always use DatumRef for serialization?
+        Err(map::SerializationError::InvalidData)
     }
 
     fn deserialize_from(buffer: &'a [u8]) -> Result<Self, map::SerializationError>
@@ -392,6 +473,48 @@ where
                 Err(map::SerializationError::InvalidData)
             }
         }
+    }
+}
+
+impl<'a, T> Value<'a> for DatumRef<'_, T>
+where
+    T: Encode<()>,
+    T: Decode<'a, ()>,
+{
+    fn serialize_into(&self, buffer: &mut [u8]) -> Result<usize, map::SerializationError> {
+        // first serialize the header
+        let data = [
+            CURRENT_HEADER.magic,
+            CURRENT_HEADER.major,
+            CURRENT_HEADER.minor,
+            CURRENT_HEADER.trivial,
+        ];
+        let Some((now, later)) = buffer.split_at_mut_checked(data.len()) else {
+            return Err(map::SerializationError::BufferTooSmall);
+        };
+        now.copy_from_slice(&data);
+
+        // Then serialize the CBOR encoded data
+        let mut cursor = Cursor::new(later);
+        let res: Result<(), minicbor::encode::Error<EndOfSlice>> =
+            minicbor::encode(self.body, &mut cursor);
+        match res {
+            Ok(()) => {}
+            Err(_e) => {
+                // We know this was an "end of slice" error
+                return Err(map::SerializationError::BufferTooSmall);
+            }
+        }
+        let used = now.len() + cursor.position();
+        Ok(used)
+    }
+
+    fn deserialize_from(_: &'a [u8]) -> Result<Self, map::SerializationError>
+    where
+        Self: Sized,
+    {
+        // TODO: we should always deser owned
+        Err(map::SerializationError::InvalidData)
     }
 }
 
