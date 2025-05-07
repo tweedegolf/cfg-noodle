@@ -23,7 +23,8 @@ service:
     * 32-64MHz, QSPI interface
         * read: 15-30MiB/s peak
             * Full `O(n)` 128k scan: 4-8ms
-            * Single `O(1)` 4k read: 3-5us
+            * Quick `O(log(n))` scan (5 pages): 0.64-1.28ms
+            * Single `O(1)` 4k read: 128-256us
         * sector (4k) erase: 50ms typ, 500ms max (end of lifespan), 8-80KiB/s
             * Full 128k erase: 1.6-16.0s
             * Might be faster with larger (64k/128k) erases
@@ -89,6 +90,37 @@ additional scoping. This is to be discussed.
     * littlefs handles this by reading-back after every write, and picking a new location if
       the write fails. This is less efficient than keeping a running table of bad blocks,
       but also less complex)
+* It should be possible to load all necessary configuration at boot, with a target boot time of
+  100-500ms.
+    * For example, if we have 64 items, and loading is always `O(n)`, this means we must perform
+      64 x full scans: 256-512ms
+    * For example, if we have 64 items, and loading is always `O(log(n)`, this means we must perform
+      64 x quick scans: 41-82ms
+    * For example, if we have 64 items, and we perform an initial `O(n)` scan followed by
+      64 x `O(1)` single reads: 12-24ms
+    * These numbers do NOT account for effects of "caching", if relevant to the underlying storage
+      library. Caching of keys and values could be performed, potentially hydrated in an initial
+      linear `O(n)` scan, speeding later reads/writes at the cost of more RAM usage for cache.
+    * These number do NOT account for any initial "mounting" or `fsck`-like repair operations which
+      may be necessary, nor the time required for any `mkfs`-like initialization on first boot.
+* Ideally after initial "hydration", we should limit or eliminate the need to re-load values from
+  flash.
+    * This design choice means that we would prefer statically reserving enough RAM space to store
+      ALL active configuration items, rather than an "ephemeral" configuration where only the
+      currently needed configuration items are "live"/"resident" in RAM/cache.
+* Care should be taken to avoid unnecessary writes, and likely support some kind of intelligent
+  or explicit limitiation of "flushes"
+    * The first aspect of this is avoiding "low efficiency" writes whenever possible, for example if
+      writing a single 16B value occupies a whole 4K page (with no ability to later append to the
+      same page).
+    * The second aspect of this is "debouncing" writes to flash, for example if a value is written
+      four times in 100ms, we would prefer to not to "flush" these writes to flash, even if it could
+      be done in a "high efficiency" manner, where all four writes would be made to the same page
+      if possible.
+    * This "flushing" behavior could be provided automatically by the underlying storage library,
+      or could be exposed to the application, allowing for manually flushing when reasonable.
+    * It should be possible to "force" a flush when necessary, even if doing so would be
+      sub-optimal, for example in the case of a shutdown event.
 
 ## Unknown Qualities
 
@@ -96,35 +128,11 @@ The following are unknown items that may help guide decisions made for implement
 
 ### How broad of a scope is "Configuration Storage"?
 
-Configuration data is often relatively small (e.g. 10s-100s of bytes), and is often "write once"
-(e.g. not appended to, like logs).
-
-This means that there may be significant space efficiencies by allowing files to be packed into a
-single page/sector (typical: 4K/64K for NOR flash), instead of allocating a minimum file size.
-
-However this also means that there might be significantly diminishing returns on supporting any kind
-of "delta" changes, where only a small portion of a file is updated, and we could avoid re-writing
-the whole file.
-
-However, it would be good to know if this is "just" for configuration, or if scope may expand to
-other "just one more thing" sort of use cases where we need some kind of non-volatile storage.
-
-This may impact whether we want a more-specialized solution optimized for configuration and tightly
-integrated, or a more-generalized file/kv store that may miss some potential room for optimization,
-but which has a more general API that is easier to use in different use cases.
+Note: This is now resolved, see "Order of magnitude numbers" above.
 
 ### What kind of access patterns are we expecting?
 
-Particularly with respect to the SIZE of files, how often MINOR changes are written (where it would
-be worth avoiding full-rewrites of a file), and how often TOTAL changes are written. Also validating
-that in general, we expect to READ configuration (much) more often than we WRITE configuration.
-
-This relates back to the previous question re: "scope broadness", but could still be a concern even
-for "just" configuration data.
-
-If we have a strong idea of what our access patterns are, we may be able to better optimize or
-simplify our storage service, however these optimizations or simplifications are mismatched to our
-actual access patterns, they may work against us instead of for us.
+Note: This is now resolved, see "Order of magnitude numbers" above.
 
 ### How to implement storage, and what "layers" do we expect?
 
