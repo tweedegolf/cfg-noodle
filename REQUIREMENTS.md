@@ -6,6 +6,47 @@ NOTE: See [embedded-services#267] for more discussion.
 
 We will need the ability to store non-volatile data for use with configuration or similar data.
 
+## Order of magnitude numbers
+
+The following numbers should be considered "typical"/"expected" for users of the configuration
+service:
+
+* Approximately 4KiB of "value" storage, excluding keys and serialization/storage overhead
+* Approximately 100-128KiB of assigned disk space reserved for configuration, assume 8x the
+  "resident" storage (important for estimating "free space" usable for wear leveling) after
+  considering key storage, serialization overhead, disk format overhead, etc.
+* Approximately 50-100 records
+* Typical "value"s stored are 16-128B each, with some outliers
+* Expected storage device is modern NOR flash, with:
+    * 100,000 erase cycles per page
+    * 4KiB erase sector
+    * 32-64MHz, QSPI interface
+        * read: 15-30MiB/s peak
+            * Full `O(n)` 128k scan: 4-8ms
+            * Single `O(1)` 4k read: 3-5us
+        * sector (4k) erase: 50ms typ, 500ms max (end of lifespan), 8-80KiB/s
+            * Full 128k erase: 1.6-16.0s
+            * Might be faster with larger (64k/128k) erases
+        * page (<= 256B) write: 500us typ, 5ms max (end of lifespan), 50-500KiB/s
+            * Full 128k write: 0.26-2.56s
+
+Assuming 128KiB of total space, 4KiB of resident values, and estimating a 4x overhead of "disk used"
+to "values" to account for upper bound of serialization, keys, and disk overhead, this means that
+we have an 8x "excess" of storage. This means we should estimate approximately 800k lifetime writes
+of full configuration values.
+
+With an upper product lifespan of 20 years (the retention lifespan of the flash part), this would
+mean that we have an acceptable page erase interval of once every 13 minutes for the full duration
+of the product.
+
+* `20 x 365.25 x 24 x 60` = 10,519,200 "lifetime minutes"
+* `8 x 100000` = 800,000 "lifetime page erases" (including excess storage space)
+* `10519200 / 800000` = 13.15 "minutes per page erase"
+
+These numbers are still vaguely "ideal", e.g. they assume all writes will efficiently utilize page
+space. This would be derated if writes were less efficient, e.g. if there is write amplification
+or sub-page writes. Averaging "one erase per hour" is probably reasonable, if latency is acceptable.
+
 ## Hard Requirements
 
 This service will need the following qualities ("Hard Requirements"):
@@ -14,15 +55,19 @@ This service will need the following qualities ("Hard Requirements"):
   * Should be compatible with other storage technologies
 * Support for basic create/read/update/delete operations
 * Ability to perform write/update operations in a power-loss-safe method without corruption
-  and minimal data loss (e.g. only unsynced changes at power loss are lost, no older/existing data is lost)
+  and minimal data loss (e.g. only unsynced changes at power loss are lost, no older/existing data
+  is lost)
 * Support for concurrent/shared firmware access
 * Support for "addressable" storage, e.g. a file path, storage key, etc.
 * Ability to mitigate impact of memory wear
 * Compatible with low-power operation
-* Ability to support "roll forward" and "roll backwards" operations associated with a firmware update or rollback.
+* Ability to support "roll forward" and "roll backwards" operations associated with a firmware
+  update or rollback.
     * This may entail a "schema change" or "migration" of stored data
-    * In the event of a firmware rollback, it should be possible to use data stored prior to the "migration"
-    * In the event of a firmware update, it should be possible to use data stored prior to the "migration"
+    * In the event of a firmware rollback, it should be possible to use data stored prior to the
+      "migration"
+    * In the event of a firmware update, it should be possible to use data stored prior to the
+      "migration"
 * Handling of Serialization/Deserialization steps, e.g. provide a "rust data" interface, translating
   to/from the "wire format" stored at rest
 
