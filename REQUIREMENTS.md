@@ -94,7 +94,7 @@ additional scoping. This is to be discussed.
   100-500ms.
     * For example, if we have 64 items, and loading is always `O(n)`, this means we must perform
       64 x full scans: 256-512ms
-    * For example, if we have 64 items, and loading is always `O(log(n)`, this means we must perform
+    * For example, if we have 64 items, and loading is always `O(log(n))`, this means we must perform
       64 x quick scans: 41-82ms
     * For example, if we have 64 items, and we perform an initial `O(n)` scan followed by
       64 x `O(1)` single reads: 12-24ms
