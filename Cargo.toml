@@ -10,5 +10,12 @@ minicbor = { version = "0.26.5", features = ["std", "derive"] }
 sequential-storage = { version = "4.0.1", features = ["std", "_test"] }
 tokio = { version = "1.44.2", features = ["macros", "rt-multi-thread", "time"] }
 
+cordyceps = "0.3.3"
+critical-section = { version = "1.2.0", features = ["std"] }
+mutex = { version = "1.0.0", features = ["std", "impl-critical-section"] }
+pin-project = "1.1.10"
+maitake-sync = { version = "0.2.1", features = ["std"] }
+
+
 # [patch.crates-io]
 # sequential-storage = { path = "../sequential-storage" }
