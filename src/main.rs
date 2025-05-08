@@ -22,7 +22,11 @@ async fn main() {
     sleep(Duration::from_secs(2)).await;
     let mut flash2 = HashMap::<String, Vec<u8>>::new();
     GLOBAL_LIST.process_writes(&mut flash2);
-    println!("{flash2:?}");
+    println!("NEW WRITES: {flash2:?}");
+    sleep(Duration::from_secs(2)).await;
+    let mut flash2 = HashMap::<String, Vec<u8>>::new();
+    GLOBAL_LIST.process_writes(&mut flash2);
+    println!("NEW WRITES: {flash2:?}");
 }
 
 static GLOBAL_LIST: PinList<CriticalSectionRawMutex> = PinList::new();
