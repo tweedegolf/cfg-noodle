@@ -235,7 +235,10 @@ where
             cache,
             _pd,
         } = self;
-        let dtm: DatumRef<'_, T> = DatumRef { hdr: CURRENT_HEADER, body: v };
+        let dtm: DatumRef<'_, T> = DatumRef {
+            hdr: CURRENT_HEADER,
+            body: v,
+        };
 
         // TODO: Any check we aren't clobbering an unrelated piece of data?
         map::store_item(flash, range.clone(), cache, buf, k, &dtm).await
@@ -271,22 +274,46 @@ pub async fn inner_main_2() {
     };
     const PARAM_PATH: PathHash = PathHash::from_str("settings/parameters");
 
-    flash.store_datum(&CONFIG_PATH, &config, &mut buf).await.unwrap();
-    flash.store_datum(&PARAM_PATH, &param, &mut buf).await.unwrap();
+    flash
+        .store_datum(&CONFIG_PATH, &config, &mut buf)
+        .await
+        .unwrap();
+    flash
+        .store_datum(&PARAM_PATH, &param, &mut buf)
+        .await
+        .unwrap();
     println!("{}", hexdump(flash.flash.as_bytes()));
 
-    let v1 = flash.fetch_datum::<ConfigV1>(&CONFIG_PATH, &mut buf).await.unwrap().unwrap();
+    let v1 = flash
+        .fetch_datum::<ConfigV1>(&CONFIG_PATH, &mut buf)
+        .await
+        .unwrap()
+        .unwrap();
     println!("{v1:?}");
-    let v1_1a = flash.fetch_datum::<ConfigV1_1a>(&CONFIG_PATH, &mut buf).await;
+    let v1_1a = flash
+        .fetch_datum::<ConfigV1_1a>(&CONFIG_PATH, &mut buf)
+        .await;
     println!("{v1_1a:?}");
-    let v1_1b = flash.fetch_datum::<ConfigV1_1b>(&CONFIG_PATH, &mut buf).await.unwrap().unwrap();
+    let v1_1b = flash
+        .fetch_datum::<ConfigV1_1b>(&CONFIG_PATH, &mut buf)
+        .await
+        .unwrap()
+        .unwrap();
     println!("{v1_1b:?}");
-    let v1_1c = flash.fetch_datum::<ConfigV1_1c>(&CONFIG_PATH, &mut buf).await.unwrap().unwrap();
+    let v1_1c = flash
+        .fetch_datum::<ConfigV1_1c>(&CONFIG_PATH, &mut buf)
+        .await
+        .unwrap()
+        .unwrap();
     println!("{v1_1c:?}");
     let wrong = flash.fetch_datum::<Outer>(&CONFIG_PATH, &mut buf).await;
     println!("{wrong:?}");
 
-    let p = flash.fetch_datum::<Outer<'_>>(&PARAM_PATH, &mut buf).await.unwrap().unwrap();
+    let p = flash
+        .fetch_datum::<Outer<'_>>(&PARAM_PATH, &mut buf)
+        .await
+        .unwrap()
+        .unwrap();
     println!("{p:?}");
 }
 

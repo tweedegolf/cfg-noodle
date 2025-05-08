@@ -84,7 +84,6 @@ pub struct PinList<R: ScopedRawMutex> {
     /// Header, which is the first field in `Node<T>`, which is repr-C, so we
     /// can cast this back to a `Node<T>` as needed
     list: BlockingMutex<R, List<NodeHeader>>,
-
     // TODO: We probably want to put one or two `WaitQueue`s here, one so
     // `PinListNode`s can fire off an "I need to be hydrated" wake, and one
     // so `PinListNode`s can fire off an "I have a pending write" wake.
@@ -335,7 +334,8 @@ impl<R: ScopedRawMutex> PinList<R> {
                     // Make a node pointer from a header pointer. This *consumes* the `Pin<&mut NodeHeader>`, meaning
                     // we are free to later re-invent other mutable ptrs/refs, AS LONG AS we still treat the data
                     // as pinned.
-                    let mut hdrptr: NonNull<NodeHeader> = NonNull::from(unsafe { Pin::into_inner_unchecked(node) });
+                    let mut hdrptr: NonNull<NodeHeader> =
+                        NonNull::from(unsafe { Pin::into_inner_unchecked(node) });
                     let nodeptr: NonNull<Node<()>> = hdrptr.cast();
 
                     // Does the "flash" have some data for us to push to the node?
@@ -348,10 +348,7 @@ impl<R: ScopedRawMutex> PinList<R> {
                         // TODO: right now we only read if `t` is uninhabited, so we don't care about dropping
                         // or overwriting the value. IF WE EVER want the ability to "reload from flash", we
                         // might want to think about drop!
-                        let res = (vtable.deserialize)(
-                            nodeptr,
-                            val.as_slice(),
-                        );
+                        let res = (vtable.deserialize)(nodeptr, val.as_slice());
 
                         // SAFETY: We can re-magic a reference to the header, because the NonNull<Node<()>>
                         // does not have a live reference anymore
@@ -424,16 +421,14 @@ impl<R: ScopedRawMutex> PinList<R> {
                 // yes, it needs writing
                 if let Some((vtable, key)) = vtable {
                     // See `process_reads` for the tricky safety caveats here!
-                    let mut hdrptr: NonNull<NodeHeader> = NonNull::from(unsafe { Pin::into_inner_unchecked(node) });
+                    let mut hdrptr: NonNull<NodeHeader> =
+                        NonNull::from(unsafe { Pin::into_inner_unchecked(node) });
                     let nodeptr: NonNull<Node<()>> = hdrptr.cast();
 
                     // Todo: use a provided scratch buffer
                     let mut buf = [0u8; 1024];
                     // Attempt to serialize
-                    let res = (vtable.serialize)(
-                        nodeptr,
-                        buf.as_mut_slice(),
-                    );
+                    let res = (vtable.serialize)(nodeptr, buf.as_mut_slice());
 
                     if let Ok(used) = res {
                         // "Store" in our "flash"
@@ -471,7 +466,8 @@ unsafe impl<T, R> Sync for PinListNode<T, R>
 where
     T: Send + 'static,
     R: ScopedRawMutex + 'static,
-{}
+{
+}
 
 impl<T, R> PinListNode<T, R>
 where
@@ -529,30 +525,31 @@ where
 
         // now spin until we have a value, or we know it is non-resident
         // This is like a nicer version of `poll_fn`.
-        self.state_change.wait_for(|| {
-            // We need the lock to look at ourself!
-            list.list.with_lock(|_ls| {
-                // We have the lock, we can gaze into the UnsafeCell
-                let nodeptr: *mut Node<T> = self.inner.get();
-                let noderef: &mut Node<T> = unsafe { &mut *nodeptr };
-                // Are we in a state with a valid T?
-                match noderef.header.state {
-                    State::Initial => false,
-                    State::NonResident => {
-                        // We are nonresident, we need to initialize
-                        noderef.t = MaybeUninit::new(T::default());
-                        noderef.header.state = State::DefaultUnwritten;
-                        true
-                    },
-                    State::DefaultUnwritten => todo!("shouldn't observe this in attach"),
-                    State::ValidNoWriteNeeded => {
-                        true
-                    },
-                    State::NeedsWrite => todo!("shouldn't observe this in attach"),
-                    State::WriteStarted => todo!("shouldn't observe this in attach"),
-                }
+        self.state_change
+            .wait_for(|| {
+                // We need the lock to look at ourself!
+                list.list.with_lock(|_ls| {
+                    // We have the lock, we can gaze into the UnsafeCell
+                    let nodeptr: *mut Node<T> = self.inner.get();
+                    let noderef: &mut Node<T> = unsafe { &mut *nodeptr };
+                    // Are we in a state with a valid T?
+                    match noderef.header.state {
+                        State::Initial => false,
+                        State::NonResident => {
+                            // We are nonresident, we need to initialize
+                            noderef.t = MaybeUninit::new(T::default());
+                            noderef.header.state = State::DefaultUnwritten;
+                            true
+                        }
+                        State::DefaultUnwritten => todo!("shouldn't observe this in attach"),
+                        State::ValidNoWriteNeeded => true,
+                        State::NeedsWrite => todo!("shouldn't observe this in attach"),
+                        State::WriteStarted => todo!("shouldn't observe this in attach"),
+                    }
+                })
             })
-        }).await.expect("waitcell should never close");
+            .await
+            .expect("waitcell should never close");
 
         // Store the pointer to the pinlist
         let ls: *const PinList<R> = list;
@@ -590,15 +587,13 @@ where
             match noderef.header.state {
                 State::Initial => todo!(),
                 State::NonResident => todo!(),
-                State::DefaultUnwritten => {},
-                State::ValidNoWriteNeeded => {},
-                State::NeedsWrite => {},
-                State::WriteStarted => {},
+                State::DefaultUnwritten => {}
+                State::ValidNoWriteNeeded => {}
+                State::NeedsWrite => {}
+                State::WriteStarted => {}
             }
             // yes!
-            unsafe {
-                noderef.t.assume_init_ref().clone()
-            }
+            unsafe { noderef.t.assume_init_ref().clone() }
         })
     }
 
@@ -618,9 +613,9 @@ where
             match noderef.header.state {
                 State::Initial => todo!("shouldn't observe"),
                 State::NonResident => todo!("shouldn't observe"),
-                State::DefaultUnwritten => {},
-                State::ValidNoWriteNeeded => {},
-                State::NeedsWrite => {},
+                State::DefaultUnwritten => {}
+                State::ValidNoWriteNeeded => {}
+                State::NeedsWrite => {}
                 State::WriteStarted => todo!("how to handle?"),
             }
             // We do a swap instead of a write here, to ensure that we
@@ -636,7 +631,6 @@ where
     }
 }
 
-
 impl<T, R: ScopedRawMutex> Drop for PinListNode<T, R> {
     fn drop(&mut self) {
         // If we DO want to be able to drop, we probably want to unlink from the list.
@@ -649,7 +643,6 @@ impl<T, R: ScopedRawMutex> Drop for PinListNode<T, R> {
         todo!("We probably don't actually need drop?")
     }
 }
-
 
 // --------------------------------------------------------------------------
 // impl NodeHeader
