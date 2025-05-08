@@ -11,22 +11,32 @@ pub mod hashmap;
 #[tokio::main]
 async fn main() {
     tokio::task::spawn(task_1(&GLOBAL_LIST));
+    tokio::task::spawn(task_2(&GLOBAL_LIST));
+    tokio::task::spawn(task_3(&GLOBAL_LIST));
 
     let mut flash = HashMap::<String, Vec<u8>>::new();
     flash.insert(
         "encabulator/config".to_string(),
         minicbor::to_vec(&EncabulatorConfigV1 { polarity: true }).unwrap(),
     );
+    flash.insert(
+        "grammeter/config".to_string(),
+        minicbor::to_vec(&GrammeterConfig { radiation: 100.0 }).unwrap(),
+    );
+    // no positron config
 
+    // give time for tasks to attach
+    sleep(Duration::from_millis(100)).await;
+    // process reads
     GLOBAL_LIST.process_reads(&flash);
-    sleep(Duration::from_secs(2)).await;
-    let mut flash2 = HashMap::<String, Vec<u8>>::new();
-    GLOBAL_LIST.process_writes(&mut flash2);
-    println!("NEW WRITES: {flash2:?}");
-    sleep(Duration::from_secs(2)).await;
-    let mut flash2 = HashMap::<String, Vec<u8>>::new();
-    GLOBAL_LIST.process_writes(&mut flash2);
-    println!("NEW WRITES: {flash2:?}");
+
+    for _ in 0..10 {
+        sleep(Duration::from_secs(1)).await;
+        let mut flash2 = HashMap::<String, Vec<u8>>::new();
+        GLOBAL_LIST.process_writes(&mut flash2);
+        println!("NEW WRITES: {flash2:?}");
+    }
+
 }
 
 static GLOBAL_LIST: PinList<CriticalSectionRawMutex> = PinList::new();
@@ -52,4 +62,50 @@ async fn task_1(list: &'static PinList<CriticalSectionRawMutex>) {
     println!("T1 Got {data:?}");
     sleep(Duration::from_secs(1)).await;
     ENCAB_CONFIG.write(&EncabulatorConfigV2 { polarity: true, spinrate: Some(100) });
+}
+
+//
+// TASK 2: Has config, current version
+//
+#[derive(Debug, Default, Encode, Decode, Clone)]
+struct GrammeterConfig {
+    #[n(0)] radiation: f32,
+}
+
+static GRAMM_CONFIG: PinListNode<GrammeterConfig, CriticalSectionRawMutex> = PinListNode::new("grammeter/config");
+async fn task_2(list: &'static PinList<CriticalSectionRawMutex>) {
+    GRAMM_CONFIG.attach(list).await.unwrap();
+    let data: GrammeterConfig = GRAMM_CONFIG.load();
+    println!("T2 Got {data:?}");
+    sleep(Duration::from_secs(3)).await;
+    GRAMM_CONFIG.write(&GrammeterConfig { radiation: 200.0 });
+}
+
+//
+// TASK 3: No config
+//
+#[derive(Debug, Encode, Decode, Clone)]
+struct PositronConfig {
+    #[n(0)] up: u8,
+    #[n(1)] down: u16,
+    #[n(2)] strange: u32,
+}
+
+impl Default for PositronConfig {
+    fn default() -> Self {
+        Self {
+            up: 10,
+            down: 20,
+            strange: 103,
+        }
+    }
+}
+
+static POSITRON_CONFIG: PinListNode<PositronConfig, CriticalSectionRawMutex> = PinListNode::new("positron/config");
+async fn task_3(list: &'static PinList<CriticalSectionRawMutex>) {
+    POSITRON_CONFIG.attach(list).await.unwrap();
+    let data: PositronConfig = POSITRON_CONFIG.load();
+    println!("T3 Got {data:?}");
+    sleep(Duration::from_secs(5)).await;
+    POSITRON_CONFIG.write(&PositronConfig { up: 15, down: 25, strange: 108 });
 }

@@ -16,7 +16,6 @@ use maitake_sync::WaitCell;
 use minicbor::encode::write::{Cursor, EndOfSlice};
 use minicbor::{Decode, Encode};
 use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
-use pin_project::{pin_project, pinned_drop};
 use std::collections::HashMap;
 use std::marker::PhantomPinned;
 use std::mem::MaybeUninit;
@@ -61,6 +60,9 @@ pub struct PinList<R: ScopedRawMutex> {
     /// generic lock interface, and uses a `WaitQueue`, which is an intrusive
     /// waker list, allowing for multiple wakers.
     ///
+    /// See `impl Drop for PinListNode` for more potential issues with an
+    /// async mutex.
+    ///
     /// The type parameter `R` allows us to be generic over kinds of mutex
     /// impls, allowing for use of a `std` mutex on `std`, and for things
     /// like `CriticalSectionRawMutex` or `ThreadModeRawMutex` on no-std
@@ -95,6 +97,179 @@ pub struct PinList<R: ScopedRawMutex> {
     // neads_write: WaitQueue,
 }
 
+/// PinListNode represents the storage of a single `T`, linkable to a `PinList`
+///
+/// Again, the name no longer makes sense. Sorry.
+///
+/// "end users" will interact with the PinListNode to retrieve and store changes
+/// to the configuration they care about. They will also `attach` it to the
+/// `PinList` to make it part of the "connected configuration system".
+pub struct PinListNode<T, R>
+where
+    T: 'static,
+    R: ScopedRawMutex + 'static,
+{
+    /// morally: Option<&'static PinList<R>>
+    /// We need to store the &'static PinList, which we might not get until runtime.
+    list: AtomicPtr<PinList<R>>,
+    /// This is a single waitcell which
+    state_change: WaitCell,
+
+    /// The following parts are "observable" in the linked list. We put it inside
+    /// an unsafecell, because it might be mutated "spookily" either through the
+    /// PinListNode handle, or via the linked list.
+    ///
+    /// Other items in `PinListNode` are only "visible" through the actual `PinListNode`
+    /// handle, not through the linked list.
+    inner: UnsafeCell<Node<T>>,
+}
+
+/// This is the actual "linked list node" that is chained to the list
+///
+/// There is trickery afoot! The linked list is actually a linked list
+/// of `NodeHeader`, and we are using repr(c) here to GUARANTEE that
+/// a pointer to a `Node<T>` is the SAME VALUE as a pointer to that
+/// node's `NodeHeader`. We will use this for type punning!
+#[repr(C)]
+pub struct Node<T> {
+    // LOAD BEARING: MUST BE THE FIRST ELEMENT IN A REPR-C STRUCT
+    header: NodeHeader,
+    // This type is !Unpin due to the heuristic from:
+    // <https://github.com/rust-lang/rust/pull/82834>
+    // TODO: I don't think this heuristic is necessarily true anymore? We
+    // should check this.
+    _pin: PhantomPinned,
+
+    // We generally want this to be in the tail position, because
+    t: MaybeUninit<T>,
+}
+
+/// The non-typed parts of a `Node<T>`.
+///
+/// The `NodeHeader` serves as the actual type that is linked together in
+/// the linked list, and is the primary interface the storage worker will
+/// use. It MUST be the first field of a `Node<T>`, so it is safe to
+/// type-pun a `NodeHeader` ptr into a `Node<T>` ptr and back.
+pub struct NodeHeader {
+    /// The doubly linked list pointers
+    links: list::Links<NodeHeader>,
+    /// The "key" of our "key:value" store.
+    ///
+    /// TODO: We should probably enforce that within the linked list, all
+    /// node `key`s are unique!
+    key: &'static str,
+    /// The current state of the node. THIS IS SAFETY LOAD BEARING whether
+    /// we can access the `T` in the `Node<T>`
+    state: State,
+    /// This is a reference back to the `WaitCell`, which can be used to
+    /// notify the Node owner that their data is now ready to read.
+    ///
+    /// We could maybe make this a `MaybeUninit`, since this is invalid
+    /// BEFORE we start the `attach`, but should be valid forever AFTER
+    /// the `attach` has completed.
+    ///
+    /// We can't just put the WaitCell in the `NodeHeader`, because we
+    /// want the node's owner to be able to `wait` on the cell without
+    /// holding the mutex.
+    ///
+    /// If we actually only ever need this in `attach`, maybe we just store
+    /// an Option<Waker> here instead? idk, there's maybe a better way than
+    /// this to do things.
+    state_change: Option<&'static WaitCell>,
+    /// This is the type-erased serialize/deserialize vtable that is
+    /// unique to each `T`, and will be used by the storage worker
+    /// to access the `t` indirectly for loading and storing.
+    vtable: VTable,
+}
+
+/// The current state of the `Node<T>`.
+///
+/// This is used to determine how to unsafely interact with other pieces
+/// of the `Node<T>`!
+///
+/// ## State transition diagram
+///
+/// ```text
+/// ┌─────────┐    ┌─────────────┐   ┌────────────────────┐
+/// │ Initial │─┬─▶│ NonResident │──▶│  DefaultUnwritten  │─┐
+/// └─────────┘ │  └─────────────┘   └────────────────────┘ │
+///             │                                           ▼
+///             │         ┌────────────────────┐     ┌────────────┐
+///             └────────▶│ ValidNoWriteNeeded │────▶│ NeedsWrite │◀─┐
+///                       └────────────────────┘     └────────────┘  │
+///                                  ▲                      │        │
+///                                  │                      ▼        │
+///                                  │              ┌──────────────┐ │
+///                                  └──────────────│ WriteStarted │─┘
+///                                                 └──────────────┘
+/// ```
+pub enum State {
+    /// The node has been created, but never "hydrated" with data from the
+    /// flash. In this state, we are waiting to be notified whether we can
+    /// be filled with data from flash, or whether we will need to initialize
+    /// using a default value or something.
+    ///
+    /// In this state, `t` is NOT valid, and is uninitialized. it MUST NOT be
+    /// read.
+    Initial,
+    /// We attempted to load from flash, but as far as we know, the data does
+    /// not exist in flash. The owner of the Node will need to initialize
+    /// this data, usually in the wait loop of `attach`.
+    ///
+    /// In this state, `t` is NOT valid, and is uninitialized. it MUST NOT be
+    /// read.
+    NonResident,
+    /// The value has been initialized using a default value (NOT from flash).
+    ///
+    /// TODO: Decide what our policy is for this: SHOULD we write default values
+    /// back to flash, or keep them out of flash until there has been an explict
+    /// change to the default value?
+    ///
+    /// In this state, `t` IS valid, and may be read at any time (by the holder
+    /// of the lock).
+    DefaultUnwritten,
+    /// The value has been initialized using a value from flash. No writes are
+    /// pending.
+    ///
+    /// In this state, `t` IS valid, and may be read at any time (by the holder
+    /// of the lock).
+    ValidNoWriteNeeded,
+    /// The value has been written, but these changes have NOT been flushed back
+    /// to the flash.
+    ///
+    /// In this state, `t` IS valid, and may be read at any time (by the holder
+    /// of the lock).
+    NeedsWrite,
+    /// The flush back to flash has started, but may not have completed yet
+    ///
+    /// TODO: this state needs some more design. Especially how we mark the state
+    /// if the owner of the node writes ANOTHER new value while we are waiting
+    /// for the flush to "stick".
+    ///
+    /// In this state, `t` IS valid, and may be read at any time (by the holder
+    /// of the lock).
+    WriteStarted,
+}
+
+/// A function where a type-erased (`void*`) node pointer goes in, and the
+/// proper `T` is serialized to the buffer
+type SerFn = fn(NonNull<Node<()>>, &mut [u8]) -> Result<usize, ()>;
+/// A function where the type-erased node pointer goes in, and we attempt
+/// to deserialize a T from the buffer.
+//
+// TODO: How to get "bytes consumed" in minicbor? Do we need a custom decoder?
+type DeserFn = fn(NonNull<Node<()>>, &[u8]) -> Result<(), ()>;
+
+#[derive(Clone, Copy)]
+pub struct VTable {
+    serialize: SerFn,
+    deserialize: DeserFn,
+}
+
+// --------------------------------------------------------------------------
+// impl PinList
+// --------------------------------------------------------------------------
+
 impl<R: ScopedRawMutex + ConstInit> PinList<R> {
     /// const constructor to make a new empty list. Intended to be used
     /// to create a static. See `main.rs` for example.
@@ -123,6 +298,8 @@ impl<R: ScopedRawMutex + ConstInit> Default for PinList<R> {
 ///
 /// For now they are oriented around using a HashMap.
 impl<R: ScopedRawMutex> PinList<R> {
+    /// Process any nodes that are requesting flash data
+    ///
     /// This method:
     ///
     /// 1. Locks the mutex
@@ -141,7 +318,9 @@ impl<R: ScopedRawMutex> PinList<R> {
             // Traverse the linked list, hopping between intrusive nodes.
             for node in ls.iter_mut() {
                 // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
-                // to the contents of the node.
+                // to the contents of the node. We COPY OUT the vtable and the &'static str
+                // key, for later use, which is important because we might throw away our
+                // `node` ptr shortly.
                 let vtable = {
                     match node.state {
                         State::Initial => Some((node.vtable, node.key)),
@@ -153,27 +332,56 @@ impl<R: ScopedRawMutex> PinList<R> {
                     }
                 };
                 if let Some((vtable, key)) = vtable {
-                    // Make a node pointer from a header pointer
+                    // Make a node pointer from a header pointer. This *consumes* the `Pin<&mut NodeHeader>`, meaning
+                    // we are free to later re-invent other mutable ptrs/refs, AS LONG AS we still treat the data
+                    // as pinned.
                     let mut hdrptr: NonNull<NodeHeader> = NonNull::from(unsafe { Pin::into_inner_unchecked(node) });
                     let nodeptr: NonNull<Node<()>> = hdrptr.cast();
 
+                    // Does the "flash" have some data for us to push to the node?
                     if let Some(val) = in_flash.get(key) {
+                        // It seems so! Try to deserialize it, using the type-erased vtable
+                        //
+                        // Note: We MUST have destroyed `node` at this point, so we don't have aliasing
+                        // references of both the Node and the NodeHeader. Pointers are fine!
+                        //
+                        // TODO: right now we only read if `t` is uninhabited, so we don't care about dropping
+                        // or overwriting the value. IF WE EVER want the ability to "reload from flash", we
+                        // might want to think about drop!
                         let res = (vtable.deserialize)(
                             nodeptr,
                             val.as_slice(),
                         );
+
+                        // SAFETY: We can re-magic a reference to the header, because the NonNull<Node<()>>
+                        // does not have a live reference anymore
                         let hdrmut = unsafe { hdrptr.as_mut() };
+
                         if res.is_ok() {
+                            // If it went okay, let the node know that it has been hydrated with data
+                            // from the flash
                             hdrmut.state = State::ValidNoWriteNeeded;
                             hdrmut.state_change.as_ref().unwrap().wake();
                         } else {
-                            // todo: is this right? if it's bad its bad
+                            // If there WAS a key, but the deser failed, this means that either the data
+                            // was corrupted, or there was a breaking schema change. Either way, we can't
+                            // particularly recover from this. We might want to log this, but exposing
+                            // the difference between this and "no data found" to the node probably won't
+                            // actually be useful.
+                            //
+                            // todo: add logs? some kind of asserts?
                             hdrmut.state = State::NonResident;
                             hdrmut.state_change.as_ref().unwrap().wake();
                         }
                     } else {
+                        // The node has asked for data, and our flash has nothing for it. Let the node
+                        // know that there's definitely nothing to wait for anymore, and it should
+                        // figure out it's own data, probably from Default::default().
+                        //
+                        // TODO: if we read from the external flash in "chunks", e.g. one page at a time,
+                        // we MIGHT not want to mark this fully "NonResident" yet, and wait until we have
+                        // processed ALL chunks, and THEN mark any `Initial` nodes as `NonResident`.
                         let hdrmut = unsafe { hdrptr.as_mut() };
-                        // Not in flash
                         hdrmut.state = State::NonResident;
                         hdrmut.state_change.as_ref().unwrap().wake();
                     }
@@ -182,10 +390,26 @@ impl<R: ScopedRawMutex> PinList<R> {
         })
     }
 
+    /// Process any nodes that are requesting to WRITE to flash data
+    ///
+    /// This method:
+    ///
+    /// 1. Locks the mutex
+    /// 2. Iterates through each node currently linked in the list
+    /// 3. For Each node that says "I have made changes", it will try to hand
+    ///    control over to the node to serialize to a scratch buffer
+    /// 4. On success, it will mark the node as no longer having changes
+    ///
+    /// This function might change significantly depending on how our actual flash
+    /// writes work, where we might have a temporary "we've serialized the data already,
+    /// but we don't know if the flash write succeeded yet".
     pub fn process_writes(&'static self, flash: &mut HashMap<String, Vec<u8>>) {
+        // Lock the list, remember, if we're touching nodes, we need to have the list
+        // locked the entire time!
         self.list.with_lock(|ls| {
-            let iter = ls.iter_mut();
-            for node in iter {
+            // For each node in the list...
+            for node in ls.iter_mut() {
+                // ... does this node need writing?
                 let vtable = {
                     match node.state {
                         State::Initial => None,
@@ -193,26 +417,42 @@ impl<R: ScopedRawMutex> PinList<R> {
                         State::DefaultUnwritten => None,
                         State::ValidNoWriteNeeded => None,
                         State::NeedsWrite => Some((node.vtable, node.key)),
+                        // TODO: the demo doesn't handle "writestarted" at all
                         State::WriteStarted => panic!("shouldn't be here"),
                     }
                 };
+                // yes, it needs writing
                 if let Some((vtable, key)) = vtable {
+                    // See `process_reads` for the tricky safety caveats here!
                     let mut hdrptr: NonNull<NodeHeader> = NonNull::from(unsafe { Pin::into_inner_unchecked(node) });
                     let nodeptr: NonNull<Node<()>> = hdrptr.cast();
 
+                    // Todo: use a provided scratch buffer
                     let mut buf = [0u8; 1024];
+                    // Attempt to serialize
                     let res = (vtable.serialize)(
                         nodeptr,
                         buf.as_mut_slice(),
                     );
 
                     if let Ok(used) = res {
-                        let hdrmut = unsafe { hdrptr.as_mut() };
+                        // "Store" in our "flash"
                         let res = flash.insert(key.to_string(), (buf[..used]).to_vec());
                         assert!(res.is_none());
+
+                        // Mark the store as complete, wake the node if it cares about state
+                        // changes. TODO: will nodes ever care about state changes other than
+                        // the initial hydration?
+                        let hdrmut = unsafe { hdrptr.as_mut() };
                         hdrmut.state = State::ValidNoWriteNeeded;
                         hdrmut.state_change.as_ref().unwrap().wake();
                     } else {
+                        // I'm honestly not sure what we should do if serialization failed.
+                        // If it was a simple "out of space" because we have a batch of writes
+                        // already, we might want to try again later. If it failed for some
+                        // other reason, or it fails even with an empty page (e.g. serializes
+                        // to more than 1k or 4k or something), there's really not much to be
+                        // done, other than log.
                         panic!("why did ser fail");
                     }
                 }
@@ -221,26 +461,17 @@ impl<R: ScopedRawMutex> PinList<R> {
     }
 }
 
+// --------------------------------------------------------------------------
+// impl PinListNode
+// --------------------------------------------------------------------------
+
+/// I think this is safe? If we can move data into the node, its
+/// Sync-safety is guaranteed by the PinList mutex.
 unsafe impl<T, R> Sync for PinListNode<T, R>
 where
     T: Send + 'static,
     R: ScopedRawMutex + 'static,
 {}
-
-// This is the equivalent of Wait
-#[pin_project(PinnedDrop)]
-pub struct PinListNode<T, R>
-where
-    T: 'static,
-    R: ScopedRawMutex + 'static,
-{
-    // morally: Option<&'static PinList<R>>
-    list: AtomicPtr<PinList<R>>,
-    state_change: WaitCell,
-
-    #[pin]
-    inner: UnsafeCell<Node<T>>,
-}
 
 impl<T, R> PinListNode<T, R>
 where
@@ -250,6 +481,7 @@ where
     T: Default + Clone,
     R: ScopedRawMutex + 'static,
 {
+    /// Make a new PinListNode, initially empty and unattached
     pub const fn new(path: &'static str) -> Self {
         Self {
             list: AtomicPtr::new(ptr::null_mut()),
@@ -273,32 +505,36 @@ where
         // TODO: We need some kind of "taken" flag to prevent multiple
         // calls to attach, maybe return some kind of handle. Could maybe just
         // compare and swap with this?
+        //
+        // THIS COULD DEFINITELY RACE IF TWO FUNCTIONS CALL `attach` at the same time!
         if !self.list.load(Ordering::Relaxed).is_null() {
             return Err(());
         }
 
-        // todo: assert not already attached
-        // todo: assert key uniqueness
+        // todo: assert not already attached to the list
+        // todo: assert key uniqueness across the whole list
         list.list.with_lock(|ls| {
             let nodeptr: *mut Node<T> = self.inner.get();
             {
-                // WITH the lock, put in our WaitCell
+                // WITH the lock, put in our WaitCell reference
                 let noderef = unsafe { &mut *nodeptr };
                 noderef.header.state_change = Some(&self.state_change);
             }
             let nodenn: NonNull<Node<T>> = unsafe { NonNull::new_unchecked(nodeptr) };
-            // NOTE: We EXPLICITLY case the outer Node<T> ptr, instead of using the header
+            // NOTE: We EXPLICITLY cast the outer Node<T> ptr, instead of using the header
             // pointer, so when we cast back later, the pointer has the correct provenance!
             let hdrnn: NonNull<NodeHeader> = nodenn.cast();
             ls.push_front(hdrnn);
         });
 
         // now spin until we have a value, or we know it is non-resident
+        // This is like a nicer version of `poll_fn`.
         self.state_change.wait_for(|| {
-            // We need the lock to look at ourself
+            // We need the lock to look at ourself!
             list.list.with_lock(|_ls| {
+                // We have the lock, we can gaze into the UnsafeCell
                 let nodeptr: *mut Node<T> = self.inner.get();
-                let noderef = unsafe { &mut *nodeptr };
+                let noderef: &mut Node<T> = unsafe { &mut *nodeptr };
                 // Are we in a state with a valid T?
                 match noderef.header.state {
                     State::Initial => false,
@@ -318,6 +554,7 @@ where
             })
         }).await.expect("waitcell should never close");
 
+        // Store the pointer to the pinlist
         let ls: *const PinList<R> = list;
         let ls: *mut PinList<R> = ls.cast_mut();
         self.list.store(ls, Ordering::Relaxed);
@@ -325,6 +562,24 @@ where
         Ok(())
     }
 
+    /// This is a `load` function that copies out the data
+    ///
+    /// TODO: we probably want a nicer handler that errors out, or awaits
+    /// if the data isn't loaded yet.
+    ///
+    /// Or we could have `attach` return some kind of `PinListNodeHandle` that
+    /// denotes "yes the pinlist has been loaded at least once", and guarantees
+    /// that this load won't fail. This might also help with the "only attach once"
+    /// guarantee! Oh also it might solve the `AtomicPtr` thing, because only the
+    /// `PinListNodeHandle` would need to hold the `&'static PinList`, NOT the
+    /// `PinListNode`. I think we should definitely do this!
+    ///
+    /// Note that we *copy out*, instead of returning a ref, because we MUST hold
+    /// the guard as long as &T is live. For the blocking mutex, that's all kinds
+    /// of problematic, but even if we switch to an async mutex, holding a `MutexGuard<T>`
+    /// or similiar **will inhibit all other flash operations**, which is bad!
+    ///
+    /// So just hold the lock and copy out.
     pub fn load(&'static self) -> T {
         let list = self.list.load(Ordering::Relaxed);
         let list = unsafe { list.as_ref().unwrap() };
@@ -347,6 +602,11 @@ where
         })
     }
 
+    /// Write data to the buffer, and mark the buffer as "needs to be flushed".
+    ///
+    /// Much like `load`, we could do a much better job of handling errors and not
+    /// panicking here, and this interface would probably greatly benefit from
+    /// making a `PinListNodeHandle`.
     pub fn write(&'static self, t: &T) {
         let list = self.list.load(Ordering::Relaxed);
         let list = unsafe { list.as_ref().unwrap() };
@@ -363,7 +623,8 @@ where
                 State::NeedsWrite => {},
                 State::WriteStarted => todo!("how to handle?"),
             }
-            // yes!
+            // We do a swap instead of a write here, to ensure that we
+            // call `drop` on the "old" contents of the buffer.
             let mut t: T = t.clone();
             unsafe {
                 let mutref: &mut T = noderef.t.assume_init_mut();
@@ -375,64 +636,53 @@ where
     }
 }
 
-/// ```text
-/// ┌─────────┐    ┌─────────────┐   ┌────────────────────┐
-/// │ Initial │─┬─▶│ NonResident │──▶│  DefaultUnwritten  │─┐
-/// └─────────┘ │  └─────────────┘   └────────────────────┘ │
-///             │                                           ▼
-///             │         ┌────────────────────┐     ┌────────────┐
-///             └────────▶│ ValidNoWriteNeeded │────▶│ NeedsWrite │◀─┐
-///                       └────────────────────┘     └────────────┘  │
-///                                  ▲                      │        │
-///                                  │                      ▼        │
-///                                  │              ┌──────────────┐ │
-///                                  └──────────────│ WriteStarted │─┘
-///                                                 └──────────────┘
-/// ```
-#[repr(u32)]
-pub enum State {
-    Initial = 0,
-    NonResident = 1,
-    DefaultUnwritten = 2,
-    ValidNoWriteNeeded = 3,
-    NeedsWrite = 4,
-    WriteStarted = 5,
+
+impl<T, R: ScopedRawMutex> Drop for PinListNode<T, R> {
+    fn drop(&mut self) {
+        // If we DO want to be able to drop, we probably want to unlink from the list.
+        //
+        // However, we more or less require that `PinListNode` is in a static
+        // (or some kind of linked pointer), so it should never actually be possible
+        // to drop a PinListNode.
+        //
+        // This will be problematic if we switch to an async mutex!
+        todo!("We probably don't actually need drop?")
+    }
 }
 
-pub struct NodeHeader {
-    links: list::Links<NodeHeader>,
-    key: &'static str,
-    state: State,
-    state_change: Option<&'static WaitCell>,
-    vtable: VTable,
+
+// --------------------------------------------------------------------------
+// impl NodeHeader
+// --------------------------------------------------------------------------
+
+/// This is cordycep's intrusive linked list trait. It's mostly how you
+/// shift around pointers semantically.
+unsafe impl Linked<list::Links<NodeHeader>> for NodeHeader {
+    type Handle = NonNull<NodeHeader>;
+
+    fn into_ptr(r: Self::Handle) -> NonNull<Self> {
+        r
+    }
+
+    unsafe fn from_ptr(ptr: NonNull<Self>) -> Self::Handle {
+        ptr
+    }
+
+    unsafe fn links(target: NonNull<Self>) -> NonNull<list::Links<NodeHeader>> {
+        // Safety: using `ptr::addr_of!` avoids creating a temporary
+        // reference, which stacked borrows dislikes.
+        let node = unsafe { ptr::addr_of_mut!((*target.as_ptr()).links) };
+        unsafe { NonNull::new_unchecked(node) }
+    }
 }
 
-// this is the equivalent of Node
-#[pin_project]
-#[repr(C)]
-pub struct Node<T> {
-    // LOAD BEARING: MUST BE THE FIRST ELEMENT IN A REPR-C STRUCT
-    header: NodeHeader,
-    // This type is !Unpin due to the heuristic from:
-    // <https://github.com/rust-lang/rust/pull/82834>
-    _pin: PhantomPinned,
-
-    // MUST be in tail position!
-    #[pin]
-    t: MaybeUninit<T>,
-}
-
-type SerFn = fn(NonNull<Node<()>>, &mut [u8]) -> Result<usize, ()>;
-// TODO: How to get "bytes consumed"? Do we need a custom decoder?
-type DeserFn = fn(NonNull<Node<()>>, &[u8]) -> Result<(), ()>;
-
-#[derive(Clone, Copy)]
-pub struct VTable {
-    serialize: SerFn,
-    deserialize: DeserFn,
-}
+// --------------------------------------------------------------------------
+// impl VTable
+// --------------------------------------------------------------------------
 
 impl VTable {
+    /// This is a tricky helper method that automatically builds a vtable by
+    /// monomorphizing generic functions into non-generic function pointers.
     const fn for_ty<T>() -> Self
     where
         T: 'static,
@@ -448,7 +698,14 @@ impl VTable {
     }
 }
 
-// node.t MUST be in a valid state
+/// Tricky monomorphizing serialization function.
+///
+/// Casts a type-erased node pointer into the "right" type, so that we can do
+/// serialization with it.
+///
+/// SAFETY: node.t MUST be in a valid state before calling this function, AND
+/// the mutex must be held the whole time we are here, because we are reading
+/// from `t`!
 fn serialize<T>(node: NonNull<Node<()>>, buf: &mut [u8]) -> Result<usize, ()>
 where
     T: 'static,
@@ -470,6 +727,18 @@ where
     }
 }
 
+/// Tricky monomorphizing deserialization function.
+///
+/// Casts a type-erased node pointer into the "right" type, so that we can do
+/// deserialization with it.
+///
+/// SAFETY: the mutex must be held the whole time we are here, because we are
+/// writing to `t`!
+///
+/// TODO: this ASSUMES that we will only ever call `deserialize` once, on initial
+/// hydration, so we don't need to worry about dropping the previous contents of `t`,
+/// because there shouldn't be any. If we want to offer a "reload from flash" feature,
+/// we may need to add a `needs drop` flag here to swap out the data.
 fn deserialize<T>(node: NonNull<Node<()>>, buf: &[u8]) -> Result<(), ()>
 where
     T: 'static,
@@ -488,30 +757,4 @@ where
     noderef.t = MaybeUninit::new(t);
 
     Ok(())
-}
-
-unsafe impl Linked<list::Links<NodeHeader>> for NodeHeader {
-    type Handle = NonNull<NodeHeader>;
-
-    fn into_ptr(r: Self::Handle) -> NonNull<Self> {
-        r
-    }
-
-    unsafe fn from_ptr(ptr: NonNull<Self>) -> Self::Handle {
-        ptr
-    }
-
-    unsafe fn links(target: NonNull<Self>) -> NonNull<list::Links<NodeHeader>> {
-        // Safety: using `ptr::addr_of!` avoids creating a temporary
-        // reference, which stacked borrows dislikes.
-        let node = unsafe { ptr::addr_of_mut!((*target.as_ptr()).links) };
-        unsafe { NonNull::new_unchecked(node) }
-    }
-}
-
-#[pinned_drop]
-impl<T, R: ScopedRawMutex> PinnedDrop for PinListNode<T, R> {
-    fn drop(mut self: Pin<&mut Self>) {
-        todo!("We probably don't actually need drop?")
-    }
 }
