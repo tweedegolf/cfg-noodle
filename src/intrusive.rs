@@ -111,7 +111,7 @@ where
     /// morally: Option<&'static PinList<R>>
     /// We need to store the &'static PinList, which we might not get until runtime.
     list: AtomicPtr<PinList<R>>,
-    /// This is a single waitcell which
+    /// This is a single waitcell which handles waking when the `state` field has changed
     state_change: WaitCell,
 
     /// The following parts are "observable" in the linked list. We put it inside
@@ -139,7 +139,8 @@ pub struct Node<T> {
     // should check this.
     _pin: PhantomPinned,
 
-    // We generally want this to be in the tail position, because
+    // We generally want this to be in the tail position, because the size of T varies
+    // and the pointer to the `NodeHeader` must not change as described above.
     t: MaybeUninit<T>,
 }
 
@@ -223,6 +224,9 @@ pub enum State {
     /// TODO: Decide what our policy is for this: SHOULD we write default values
     /// back to flash, or keep them out of flash until there has been an explict
     /// change to the default value?
+    /// If we don't flash it, we reduce wear on the flash and save some time.
+    /// However, if the `default()` value changes (e.g., firmware update) this
+    /// gives a different result.
     ///
     /// In this state, `t` IS valid, and may be read at any time (by the holder
     /// of the lock).
