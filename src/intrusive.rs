@@ -236,7 +236,7 @@ pub enum State {
 
 /// A function where a type-erased (`void*`) node pointer goes in, and the
 /// proper `T` is serialized to the buffer.
-/// 
+///
 /// If successful, returns the number of byte written to the buffer.
 type SerFn = fn(NonNull<Node<()>>, &mut [u8]) -> Result<usize, ()>;
 
@@ -785,21 +785,16 @@ mod test {
         }
     }
 
-    static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
-        StorageListNode::new("positron/config1");
-    static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
-        StorageListNode::new("positron/config2");
-    static POSITRON_CONFIG3: StorageListNode<PositronConfig> =
-        StorageListNode::new("positron/config3");
-    static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-
     #[tokio::test]
-    async fn task_3() {
-        println!("Starting");
+    async fn test_two_configs() {
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config1");
+        static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config2");
 
-        let list_task = tokio::task::spawn(async {
-            let mut flash: HashMap<String, Vec<u8>> = HashMap::<String, Vec<u8>>::new();
-            flash.insert("positron/config3".into(), vec![131, 15, 24, 25, 24, 108]);
+        let worker_task = tokio::task::spawn(async {
+            let flash: HashMap<String, Vec<u8>> = HashMap::<String, Vec<u8>>::new();
 
             for _ in 0..10 {
                 GLOBAL_LIST.process_reads(&flash);
@@ -846,14 +841,42 @@ mod test {
         // Assert that the loaded value equals the written value
         assert_eq!(config_handle.load(), new_config);
 
+        worker_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_load_existing() {
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static POSITRON_CONFIG: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config");
+
+        // Encode the custom_config config so we can write it to our flash
+        let custom_config = PositronConfig {
+            up: 1,
+            down: 22,
+            strange: 333,
+        };
+        let mut serialized_bytes = vec![];
+        minicbor::encode(&custom_config, &mut serialized_bytes).unwrap();
+
+        let worker_task = tokio::task::spawn(async {
+            let mut flash: HashMap<String, Vec<u8>> = HashMap::<String, Vec<u8>>::new();
+            flash.insert("positron/config".into(), serialized_bytes);
+
+            for _ in 0..2 {
+                GLOBAL_LIST.process_reads(&flash);
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        });
+
         // Obtain a handle for the third config, which should match the new_config. This should _not_ error!
-        let expecting_already_present = POSITRON_CONFIG3
+        let expecting_already_present = POSITRON_CONFIG
             .attach(&GLOBAL_LIST)
             .await
             .expect("This should not error!");
 
-        assert_eq!(new_config, expecting_already_present.load());
+        assert_eq!(custom_config, expecting_already_present.load());
 
-        list_task.await.unwrap();
+        worker_task.await.unwrap();
     }
 }
