@@ -57,14 +57,14 @@ struct EncabulatorConfigV2 {
     spinrate: Option<u32>,
 }
 
-static ENCAB_CONFIG: StorageListNode<EncabulatorConfigV2, CriticalSectionRawMutex> =
+static ENCAB_CONFIG: StorageListNode<EncabulatorConfigV2> =
     StorageListNode::new("encabulator/config");
 async fn task_1(list: &'static StorageList<CriticalSectionRawMutex>) {
-    ENCAB_CONFIG.attach(list).await.unwrap();
-    let data: EncabulatorConfigV2 = ENCAB_CONFIG.load();
+    let config_handle = ENCAB_CONFIG.attach(list).await.unwrap();
+    let data: EncabulatorConfigV2 = config_handle.load();
     println!("T1 Got {data:?}");
     sleep(Duration::from_secs(1)).await;
-    ENCAB_CONFIG.write(&EncabulatorConfigV2 {
+    config_handle.write(&EncabulatorConfigV2 {
         polarity: true,
         spinrate: Some(100),
     });
@@ -79,14 +79,13 @@ struct GrammeterConfig {
     radiation: f32,
 }
 
-static GRAMM_CONFIG: StorageListNode<GrammeterConfig, CriticalSectionRawMutex> =
-    StorageListNode::new("grammeter/config");
+static GRAMM_CONFIG: StorageListNode<GrammeterConfig> = StorageListNode::new("grammeter/config");
 async fn task_2(list: &'static StorageList<CriticalSectionRawMutex>) {
-    GRAMM_CONFIG.attach(list).await.unwrap();
-    let data: GrammeterConfig = GRAMM_CONFIG.load();
+    let config_handle = GRAMM_CONFIG.attach(list).await.unwrap();
+    let data: GrammeterConfig = config_handle.load();
     println!("T2 Got {data:?}");
     sleep(Duration::from_secs(3)).await;
-    GRAMM_CONFIG.write(&GrammeterConfig { radiation: 200.0 });
+    config_handle.write(&GrammeterConfig { radiation: 200.0 });
 }
 
 //
@@ -112,14 +111,14 @@ impl Default for PositronConfig {
     }
 }
 
-static POSITRON_CONFIG: StorageListNode<PositronConfig, CriticalSectionRawMutex> =
-    StorageListNode::new("positron/config");
+static POSITRON_CONFIG: StorageListNode<PositronConfig> = StorageListNode::new("positron/config");
+
 async fn task_3(list: &'static StorageList<CriticalSectionRawMutex>) {
-    POSITRON_CONFIG.attach(list).await.unwrap();
-    let data: PositronConfig = POSITRON_CONFIG.load();
+    let config_handle = POSITRON_CONFIG.attach(list).await.unwrap();
+    let data: PositronConfig = config_handle.load();
     println!("T3 Got {data:?}");
     sleep(Duration::from_secs(5)).await;
-    POSITRON_CONFIG.write(&PositronConfig {
+    config_handle.write(&PositronConfig {
         up: 15,
         down: 25,
         strange: 108,

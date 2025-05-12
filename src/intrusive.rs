@@ -19,7 +19,6 @@ use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
 use std::collections::HashMap;
 use std::marker::PhantomPinned;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::{
     cell::UnsafeCell,
     pin::Pin,
@@ -98,15 +97,10 @@ pub struct StorageList<R: ScopedRawMutex> {
 /// "end users" will interact with the StorageListNode to retrieve and store changes
 /// to the configuration they care about. They will also `attach` it to the
 /// `StorageList` to make it part of the "connected configuration system".
-pub struct StorageListNode<T, R>
+pub struct StorageListNode<T>
 where
     T: 'static,
-    R: ScopedRawMutex + 'static,
 {
-    /// morally: Option<&'static StorageList<R>>
-    /// We need to store the &'static StorageList, which we might not get until runtime.
-    list: AtomicPtr<StorageList<R>>,
-
     /// The following parts are "observable" in the linked list. We put it inside
     /// an unsafecell, because it might be mutated "spookily" either through the
     /// StorageListNode handle, or via the linked list.
@@ -114,6 +108,20 @@ where
     /// Other items in `StorageListNode` are only "visible" through the actual `StorageListNode`
     /// handle, not through the linked list.
     inner: UnsafeCell<Node<T>>,
+}
+
+/// A `StorageListNode` that has been loaded at least once and thus contains a valid
+pub struct StorageListNodeHandle<T, R>
+where
+    T: 'static,
+    R: ScopedRawMutex + 'static,
+{
+    /// morally: Option<&'static StorageList<R>>
+    /// We need to store the &'static StorageList, which we might not get until runtime.
+    list: &'static StorageList<R>,
+
+    /// Store the StorageListNode for this handle
+    inner: &'static StorageListNode<T>,
 }
 
 /// This is the actual "linked list node" that is chained to the list
@@ -452,25 +460,19 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
 /// I think this is safe? If we can move data into the node, its
 /// Sync-safety is guaranteed by the StorageList mutex.
-unsafe impl<T, R> Sync for StorageListNode<T, R>
-where
-    T: Send + 'static,
-    R: ScopedRawMutex + 'static,
-{
-}
+unsafe impl<T> Sync for StorageListNode<T> where T: Send + 'static {}
 
-impl<T, R> StorageListNode<T, R>
+impl<T> StorageListNode<T>
 where
     T: 'static,
     T: Encode<()>,
     for<'a> T: Decode<'a, ()>,
     T: Default + Clone,
-    R: ScopedRawMutex + 'static,
+    //R: ScopedRawMutex + 'static,
 {
     /// Make a new StorageListNode, initially empty and unattached
     pub const fn new(path: &'static str) -> Self {
         Self {
-            list: AtomicPtr::new(ptr::null_mut()),
             inner: UnsafeCell::new(Node {
                 header: NodeHeader {
                     links: list::Links::new(),
@@ -485,16 +487,13 @@ where
     }
 
     // Attaches, waits for hydration. If value not in flash, a default value is used
-    pub async fn attach(&'static self, list: &'static StorageList<R>) -> Result<(), ()> {
-        // TODO: We need some kind of "taken" flag to prevent multiple
-        // calls to attach, maybe return some kind of handle. Could maybe just
-        // compare and swap with this?
-        //
-        // THIS COULD DEFINITELY RACE IF TWO FUNCTIONS CALL `attach` at the same time!
-        if !self.list.load(Ordering::Relaxed).is_null() {
-            return Err(());
-        }
-
+    pub async fn attach<R>(
+        &'static self,
+        list: &'static StorageList<R>,
+    ) -> Result<StorageListNodeHandle<T, R>, ()>
+    where
+        R: ScopedRawMutex + 'static,
+    {
         // todo: assert not already attached to the list
         // todo: assert key uniqueness across the whole list
         list.list.with_lock(|ls| {
@@ -534,14 +533,19 @@ where
             .await
             .expect("waitcell should never close");
 
-        // Store the pointer to the StorageList
-        let ls: *const StorageList<R> = list;
-        let ls: *mut StorageList<R> = ls.cast_mut();
-        self.list.store(ls, Ordering::Relaxed);
-
-        Ok(())
+        Ok(StorageListNodeHandle { list, inner: self })
     }
+}
 
+// --------------------------------------------------------------------------
+// impl StorageListNodeHandle
+// --------------------------------------------------------------------------
+
+impl<T, R> StorageListNodeHandle<T, R>
+where
+    T: Clone + Send + 'static,
+    R: ScopedRawMutex + 'static,
+{
     /// This is a `load` function that copies out the data
     ///
     /// TODO: we probably want a nicer handler that errors out, or awaits
@@ -560,11 +564,9 @@ where
     /// or similiar **will inhibit all other flash operations**, which is bad!
     ///
     /// So just hold the lock and copy out.
-    pub fn load(&'static self) -> T {
-        let list = self.list.load(Ordering::Relaxed);
-        let list = unsafe { list.as_ref().unwrap() };
-        list.list.with_lock(|_ls| {
-            let nodeptr: *mut Node<T> = self.inner.get();
+    pub fn load(&self) -> T {
+        self.list.list.with_lock(|_ls| {
+            let nodeptr: *mut Node<T> = self.inner.inner.get();
             let noderef = unsafe { &mut *nodeptr };
             // is T valid?
             match noderef.header.state {
@@ -585,11 +587,9 @@ where
     /// Much like `load`, we could do a much better job of handling errors and not
     /// panicking here, and this interface would probably greatly benefit from
     /// making a `StorageListNodeHandle`.
-    pub fn write(&'static self, t: &T) {
-        let list = self.list.load(Ordering::Relaxed);
-        let list = unsafe { list.as_ref().unwrap() };
-        list.list.with_lock(|_ls| {
-            let nodeptr: *mut Node<T> = self.inner.get();
+    pub fn write(&self, t: &T) {
+        self.list.list.with_lock(|_ls| {
+            let nodeptr: *mut Node<T> = self.inner.inner.get();
             let noderef = unsafe { &mut *nodeptr };
             // determine state
             // TODO: allow writes from uninit state?
@@ -614,7 +614,7 @@ where
     }
 }
 
-impl<T, R: ScopedRawMutex> Drop for StorageListNode<T, R> {
+impl<T> Drop for StorageListNode<T> {
     fn drop(&mut self) {
         // If we DO want to be able to drop, we probably want to unlink from the list.
         //
