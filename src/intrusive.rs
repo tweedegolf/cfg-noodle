@@ -27,11 +27,11 @@ use minicbor::{
 use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
 use std::collections::HashMap;
 
-/// "StorageList" is the "global anchor" of all storage items.
+/// "Global anchor" of all storage items.
 ///
 /// It serves as the meeting point between two conceptual pieces:
 ///
-/// 1. The `StorageListNode`s, which each store one configuration item
+/// 1. The [`StorageListNode`]s, which each store one configuration item
 /// 2. The worker task that owns the external flash, and serves the
 ///    role of loading data FROM flash (and putting it in the Nodes),
 ///    as well as the role of deciding when to write data TO flash
@@ -94,32 +94,25 @@ pub struct StorageList<R: ScopedRawMutex> {
 
 /// StorageListNode represents the storage of a single `T`, linkable to a `StorageList`
 ///
-/// Again, the name no longer makes sense. Sorry.
-///
-/// "end users" will interact with the StorageListNode to retrieve and store changes
-/// to the configuration they care about. They will also `attach` it to the
-/// `StorageList` to make it part of the "connected configuration system".
-pub struct StorageListNode<T>
-where
-    T: 'static,
-{
-    /// The following parts are "observable" in the linked list. We put it inside
-    /// an unsafecell, because it might be mutated "spookily" either through the
-    /// StorageListNode handle, or via the linked list.
-    ///
-    /// Other items in `StorageListNode` are only "visible" through the actual `StorageListNode`
-    /// handle, not through the linked list.
+/// "end users" will [`attach`](Self::attach) it to the [`StorageList`] to make it part of
+/// the "connected configuration system".
+pub struct StorageListNode<T: 'static> {
+    /// The `inner` data is "observable" in the linked list. We put it inside
+    /// an [`UnsafeCell`], because it might be mutated "spookily" either through the
+    /// `StorageListNode`, or via the linked list.
     inner: UnsafeCell<Node<T>>,
 }
 
-/// A `StorageListNode` that has been loaded at least once and thus contains a valid
+/// Handle for a `StorageListNode` that has been loaded and thus contains valid data
+///
+/// "end users" will interact with the `StorageListNodeHandle` to retrieve and store changes
+/// to the configuration they care about.
 pub struct StorageListNodeHandle<T, R>
 where
     T: 'static,
     R: ScopedRawMutex + 'static,
 {
-    /// morally: Option<&'static StorageList<R>>
-    /// We need to store the &'static StorageList, which we might not get until runtime.
+    /// `StorageList` to which this node has been attached
     list: &'static StorageList<R>,
 
     /// Store the StorageListNode for this handle
@@ -129,7 +122,7 @@ where
 /// This is the actual "linked list node" that is chained to the list
 ///
 /// There is trickery afoot! The linked list is actually a linked list
-/// of `NodeHeader`, and we are using repr(c) here to GUARANTEE that
+/// of `NodeHeader`, and we are using `repr(c)`` here to GUARANTEE that
 /// a pointer to a `Node<T>` is the SAME VALUE as a pointer to that
 /// node's `NodeHeader`. We will use this for type punning!
 #[repr(C)]
@@ -138,9 +131,8 @@ pub struct Node<T> {
     header: NodeHeader,
     // This type is !Unpin due to the heuristic from:
     // <https://github.com/rust-lang/rust/pull/82834>
-    // TODO: I don't think this heuristic is necessarily true anymore? We
-    // should check this.
-    // But it is still used in the `pin` examples:
+    // It might not be absolutely necessary anymore (?) to have this, but
+    // it is still used in the `pin` examples, so we keep it:
     // https://doc.rust-lang.org/std/pin/index.html#a-self-referential-struct
     _pin: PhantomPinned,
 
@@ -149,7 +141,7 @@ pub struct Node<T> {
     t: MaybeUninit<T>,
 }
 
-/// The non-typed parts of a `Node<T>`.
+/// The non-typed parts of a [`Node<T>`].
 ///
 /// The `NodeHeader` serves as the actual type that is linked together in
 /// the linked list, and is the primary interface the storage worker will
@@ -158,15 +150,12 @@ pub struct Node<T> {
 pub struct NodeHeader {
     /// The doubly linked list pointers
     links: list::Links<NodeHeader>,
-    /// The "key" of our "key:value" store.
-    ///
-    /// TODO: We should probably enforce that within the linked list, all
-    /// node `key`s are unique!
+    /// The "key" of our "key:value" store. Must be unique across the list.
     key: &'static str,
     /// The current state of the node. THIS IS SAFETY LOAD BEARING whether
     /// we can access the `T` in the `Node<T>`
     state: State,
-    /// This is the type-erased serialize/deserialize vtable that is
+    /// This is the type-erased serialize/deserialize `VTable` that is
     /// unique to each `T`, and will be used by the storage worker
     /// to access the `t` indirectly for loading and storing.
     vtable: VTable,
@@ -247,6 +236,7 @@ pub enum State {
 /// A function where a type-erased (`void*`) node pointer goes in, and the
 /// proper `T` is serialized to the buffer
 type SerFn = fn(NonNull<Node<()>>, &mut [u8]) -> Result<usize, ()>;
+
 /// A function where the type-erased node pointer goes in, and we attempt
 /// to deserialize a T from the buffer.
 //
@@ -404,6 +394,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
         self.list.with_lock(|ls| {
+            for l in ls.iter() {}
             // For each node in the list...
             for node in ls.iter_mut() {
                 // ... does this node need writing?
@@ -437,7 +428,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
                         assert!(res.is_none());
 
                         // Mark the store as complete, wake the node if it cares about state
-                        // changes. TODO: will nodes ever care about state changes other than
+                        // changes.
+                        // TODO: will nodes ever care about state changes other than
                         // the initial hydration?
                         let hdrmut = unsafe { hdrptr.as_mut() };
                         hdrmut.state = State::ValidNoWriteNeeded;
@@ -489,7 +481,8 @@ where
         }
     }
 
-    // Attaches, waits for hydration. If value not in flash, a default value is used
+    // Attaches node to a list and waits for hydration.
+    // If the value is not found in flash, a default value is used
     pub async fn attach<R>(
         &'static self,
         list: &'static StorageList<R>,
@@ -497,8 +490,6 @@ where
     where
         R: ScopedRawMutex + 'static,
     {
-        // todo: assert not already attached to the list
-        // todo: assert key uniqueness across the whole list
         list.list.with_lock(|ls| {
             let nodeptr: *mut Node<T> = self.inner.get();
             let nodenn: NonNull<Node<T>> = unsafe { NonNull::new_unchecked(nodeptr) };
@@ -506,6 +497,8 @@ where
             // pointer, so when we cast back later, the pointer has the correct provenance!
             let hdrnn: NonNull<NodeHeader> = nodenn.cast();
 
+            // Check if the key already exists in the list.
+            // This also prevents attaching to the list more than once.
             if ls.iter().any(|header| {
                 // SAFETY: reading from &'static
                 // TODO: Verify this is indeed okay. Miri does not complain so far.
@@ -689,7 +682,8 @@ impl VTable {
 /// Casts a type-erased node pointer into the "right" type, so that we can do
 /// serialization with it.
 ///
-/// SAFETY: node.t MUST be in a valid state before calling this function, AND
+/// # Safety
+/// `node.t` MUST be in a valid state before calling this function, AND
 /// the mutex must be held the whole time we are here, because we are reading
 /// from `t`!
 fn serialize<T>(node: NonNull<Node<()>>, buf: &mut [u8]) -> Result<usize, ()>
@@ -718,7 +712,8 @@ where
 /// Casts a type-erased node pointer into the "right" type, so that we can do
 /// deserialization with it.
 ///
-/// SAFETY: the mutex must be held the whole time we are here, because we are
+/// # Safety
+/// The mutex must be held the whole time we are here, because we are
 /// writing to `t`!
 ///
 /// TODO: this ASSUMES that we will only ever call `deserialize` once, on initial
@@ -747,11 +742,11 @@ where
 
 #[cfg(test)]
 mod test {
+    use super::*;
+    use minicbor::CborLen;
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
 
-    use super::*;
-
-    #[derive(Debug, Encode, Decode, Clone, PartialEq)]
+    #[derive(Debug, Encode, Decode, Clone, PartialEq, CborLen)]
     struct PositronConfig {
         #[n(0)]
         up: u8,
@@ -789,9 +784,12 @@ mod test {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 let mut flash2 = HashMap::<String, Vec<u8>>::new();
                 GLOBAL_LIST.process_writes(&mut flash2);
-                //println!("NEW WRITES: {flash2:?}");
+                println!("NEW WRITES: {flash2:?}");
             }
         });
+
+        let len = PositronConfig::default().cbor_len(&mut ());
+        println!("len: {len}");
 
         // Obtain a handle for the first config
         let config_handle = POSITRON_CONFIG1
