@@ -421,6 +421,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 // yes, it needs writing
                 if let Some((vtable, key)) = vtable {
                     // See `process_reads` for the tricky safety caveats here!
+                    // TODO: Miri gives an error here. Investigate whether this is correct and fix it.
                     let mut hdrptr: NonNull<NodeHeader> =
                         NonNull::from(unsafe { Pin::into_inner_unchecked(node) });
                     let nodeptr: NonNull<Node<()>> = hdrptr.cast();
@@ -504,8 +505,19 @@ where
             // NOTE: We EXPLICITLY cast the outer Node<T> ptr, instead of using the header
             // pointer, so when we cast back later, the pointer has the correct provenance!
             let hdrnn: NonNull<NodeHeader> = nodenn.cast();
-            ls.push_front(hdrnn);
-        });
+
+            if ls.iter().any(|header| {
+                // SAFETY: reading from &'static
+                // TODO: Verify this is indeed okay. Miri does not complain so far.
+                header.key == unsafe { self.inner.get().as_ref() }.unwrap().header.key
+            }) {
+                eprintln!("Key already in use!");
+                Err(())
+            } else {
+                ls.push_front(hdrnn);
+                Ok(())
+            }
+        })?;
 
         // now spin until we have a value, or we know it is non-resident
         // This is like a nicer version of `poll_fn`.
@@ -585,10 +597,6 @@ where
     }
 
     /// Write data to the buffer, and mark the buffer as "needs to be flushed".
-    ///
-    /// Much like `load`, we could do a much better job of handling errors and not
-    /// panicking here, and this interface would probably greatly benefit from
-    /// making a `StorageListNodeHandle`.
     pub fn write(&self, t: &T) {
         self.list.list.with_lock(|_ls| {
             let nodeptr: *mut Node<T> = self.inner.inner.get();
@@ -735,4 +743,89 @@ where
     noderef.t = MaybeUninit::new(t);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use mutex::raw_impls::cs::CriticalSectionRawMutex;
+
+    use super::*;
+
+    #[derive(Debug, Encode, Decode, Clone, PartialEq)]
+    struct PositronConfig {
+        #[n(0)]
+        up: u8,
+        #[n(1)]
+        down: u16,
+        #[n(2)]
+        strange: u32,
+    }
+
+    impl Default for PositronConfig {
+        fn default() -> Self {
+            Self {
+                up: 10,
+                down: 20,
+                strange: 103,
+            }
+        }
+    }
+
+    static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
+        StorageListNode::new("positron/config1");
+    static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
+        StorageListNode::new("positron/config2");
+
+    static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+
+    #[tokio::test]
+    async fn task_3() {
+        println!("Starting");
+
+        let list_task = tokio::task::spawn(async {
+            let flash: HashMap<String, Vec<u8>> = HashMap::<String, Vec<u8>>::new();
+            for _ in 0..10 {
+                GLOBAL_LIST.process_reads(&flash);
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let mut flash2 = HashMap::<String, Vec<u8>>::new();
+                GLOBAL_LIST.process_writes(&mut flash2);
+                //println!("NEW WRITES: {flash2:?}");
+            }
+        });
+
+        // Obtain a handle for the first config
+        let config_handle = POSITRON_CONFIG1
+            .attach(&GLOBAL_LIST)
+            .await
+            .expect("This should not error");
+
+        // Obtain another handle for the same config. This should error!
+        let expecting_error = POSITRON_CONFIG1.attach(&GLOBAL_LIST).await;
+        assert!(
+            expecting_error.is_err(),
+            "Second call to attach should fail"
+        );
+
+        // Obtain a handle for the second config. This should _not_ error!
+        let _expecting_no_error = POSITRON_CONFIG2
+            .attach(&GLOBAL_LIST)
+            .await
+            .expect("This should not error!");
+
+        let data: PositronConfig = config_handle.load();
+        println!("T3 Got {data:?}");
+
+        // Write a new config
+        let new_config = PositronConfig {
+            up: 15,
+            down: 25,
+            strange: 108,
+        };
+        config_handle.write(&new_config);
+
+        // Assert that the loaded value equals the written value
+        assert_eq!(config_handle.load(), new_config);
+
+        list_task.await.unwrap();
+    }
 }
