@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use intrusive::{StorageList, StorageListNode};
-use minicbor::{Decode, Encode};
+use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use tokio::time::sleep;
 
@@ -43,13 +43,13 @@ static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
 //
 // TASK 1: Has config, but an old version
 //
-#[derive(Debug, Default, Encode, Decode, Clone)]
+#[derive(Debug, Default, Encode, Decode, Clone, CborLen)]
 struct EncabulatorConfigV1 {
     #[n(0)]
     polarity: bool,
 }
 
-#[derive(Debug, Default, Encode, Decode, Clone)]
+#[derive(Debug, Default, Encode, Decode, Clone, CborLen)]
 struct EncabulatorConfigV2 {
     #[n(0)]
     polarity: bool,
@@ -73,7 +73,7 @@ async fn task_1(list: &'static StorageList<CriticalSectionRawMutex>) {
 //
 // TASK 2: Has config, current version
 //
-#[derive(Debug, Default, Encode, Decode, Clone)]
+#[derive(Debug, Default, Encode, Decode, Clone, CborLen)]
 struct GrammeterConfig {
     #[n(0)]
     radiation: f32,
@@ -91,7 +91,7 @@ async fn task_2(list: &'static StorageList<CriticalSectionRawMutex>) {
 //
 // TASK 3: No config
 //
-#[derive(Debug, Encode, Decode, Clone)]
+#[derive(Debug, Encode, Decode, Clone, CborLen)]
 struct PositronConfig {
     #[n(0)]
     up: u8,

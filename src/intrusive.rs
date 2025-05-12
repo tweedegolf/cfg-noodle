@@ -21,8 +21,9 @@ use core::{
 };
 use maitake_sync::WaitQueue;
 use minicbor::{
-    Decode, Encode,
+    CborLen, Decode, Encode,
     encode::write::{Cursor, EndOfSlice},
+    len_with,
 };
 use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
 use std::collections::HashMap;
@@ -234,14 +235,16 @@ pub enum State {
 }
 
 /// A function where a type-erased (`void*`) node pointer goes in, and the
-/// proper `T` is serialized to the buffer
+/// proper `T` is serialized to the buffer.
+/// 
+/// If successful, returns the number of byte written to the buffer.
 type SerFn = fn(NonNull<Node<()>>, &mut [u8]) -> Result<usize, ()>;
 
 /// A function where the type-erased node pointer goes in, and we attempt
 /// to deserialize a T from the buffer.
-//
-// TODO: How to get "bytes consumed" in minicbor? Do we need a custom decoder?
-type DeserFn = fn(NonNull<Node<()>>, &[u8]) -> Result<(), ()>;
+///
+/// If successful, returns the number of bytes read from the buffer.
+type DeserFn = fn(NonNull<Node<()>>, &[u8]) -> Result<usize, ()>;
 
 #[derive(Clone, Copy)]
 pub struct VTable {
@@ -394,7 +397,6 @@ impl<R: ScopedRawMutex> StorageList<R> {
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
         self.list.with_lock(|ls| {
-            for l in ls.iter() {}
             // For each node in the list...
             for node in ls.iter_mut() {
                 // ... does this node need writing?
@@ -461,6 +463,7 @@ impl<T> StorageListNode<T>
 where
     T: 'static,
     T: Encode<()>,
+    T: CborLen<()>,
     for<'a> T: Decode<'a, ()>,
     T: Default + Clone,
     //R: ScopedRawMutex + 'static,
@@ -666,6 +669,7 @@ impl VTable {
     where
         T: 'static,
         T: Encode<()>,
+        T: CborLen<()>,
         for<'a> T: Decode<'a, ()>,
     {
         let ser = serialize::<T>;
@@ -690,6 +694,7 @@ fn serialize<T>(node: NonNull<Node<()>>, buf: &mut [u8]) -> Result<usize, ()>
 where
     T: 'static,
     T: Encode<()>,
+    T: minicbor::CborLen<()>,
 {
     let node: NonNull<Node<T>> = node.cast();
     let noderef: &Node<T> = unsafe { node.as_ref() };
@@ -698,6 +703,16 @@ where
 
     let mut cursor = Cursor::new(buf);
     let res: Result<(), minicbor::encode::Error<EndOfSlice>> = minicbor::encode(tref, &mut cursor);
+
+    println!(
+        "Finished serializing: {} bytes written, len_with(): {}",
+        cursor.position(),
+        len_with(tref, &mut ()),
+    );
+    // Make sure len_with returns the correct number of bytes
+    // Important because we depend on it in deserialize()
+    debug_assert_eq!(cursor.position(), len_with(tref, &mut ()));
+
     match res {
         Ok(()) => Ok(cursor.position()),
         Err(_e) => {
@@ -720,9 +735,10 @@ where
 /// hydration, so we don't need to worry about dropping the previous contents of `t`,
 /// because there shouldn't be any. If we want to offer a "reload from flash" feature,
 /// we may need to add a `needs drop` flag here to swap out the data.
-fn deserialize<T>(node: NonNull<Node<()>>, buf: &[u8]) -> Result<(), ()>
+fn deserialize<T>(node: NonNull<Node<()>>, buf: &[u8]) -> Result<usize, ()>
 where
     T: 'static,
+    T: CborLen<()>,
     for<'a> T: Decode<'a, ()>,
 {
     let mut node: NonNull<Node<T>> = node.cast();
@@ -735,9 +751,12 @@ where
         Err(_) => return Err(()),
     };
 
+    let len = len_with(&t, &mut ());
+    println!("Finished deserializing, len_with(): {}", len);
+
     noderef.t = MaybeUninit::new(t);
 
-    Ok(())
+    Ok(len)
 }
 
 #[cfg(test)]
@@ -770,7 +789,8 @@ mod test {
         StorageListNode::new("positron/config1");
     static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
         StorageListNode::new("positron/config2");
-
+    static POSITRON_CONFIG3: StorageListNode<PositronConfig> =
+        StorageListNode::new("positron/config3");
     static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
 
     #[tokio::test]
@@ -778,7 +798,9 @@ mod test {
         println!("Starting");
 
         let list_task = tokio::task::spawn(async {
-            let flash: HashMap<String, Vec<u8>> = HashMap::<String, Vec<u8>>::new();
+            let mut flash: HashMap<String, Vec<u8>> = HashMap::<String, Vec<u8>>::new();
+            flash.insert("positron/config3".into(), vec![131, 15, 24, 25, 24, 108]);
+
             for _ in 0..10 {
                 GLOBAL_LIST.process_reads(&flash);
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -788,8 +810,8 @@ mod test {
             }
         });
 
-        let len = PositronConfig::default().cbor_len(&mut ());
-        println!("len: {len}");
+        let len = len_with(PositronConfig::default(), &mut ());
+        println!("len_with: {len}");
 
         // Obtain a handle for the first config
         let config_handle = POSITRON_CONFIG1
@@ -823,6 +845,14 @@ mod test {
 
         // Assert that the loaded value equals the written value
         assert_eq!(config_handle.load(), new_config);
+
+        // Obtain a handle for the third config, which should match the new_config. This should _not_ error!
+        let expecting_already_present = POSITRON_CONFIG3
+            .attach(&GLOBAL_LIST)
+            .await
+            .expect("This should not error!");
+
+        assert_eq!(new_config, expecting_already_present.load());
 
         list_task.await.unwrap();
     }
