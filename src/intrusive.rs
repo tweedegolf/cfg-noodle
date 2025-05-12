@@ -12,7 +12,7 @@
 //! to store data, and to make the current design no-std friendly.
 
 use cordyceps::{Linked, List, list};
-use maitake_sync::WaitCell;
+use maitake_sync::WaitQueue;
 use minicbor::encode::write::{Cursor, EndOfSlice};
 use minicbor::{Decode, Encode};
 use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
@@ -87,6 +87,8 @@ pub struct StorageList<R: ScopedRawMutex> {
     //
     // needs_read: WaitQueue,
     // needs_write: WaitQueue,
+    reading_done: WaitQueue,
+    writing_done: WaitQueue,
 }
 
 /// StorageListNode represents the storage of a single `T`, linkable to a `StorageList`
@@ -104,8 +106,6 @@ where
     /// morally: Option<&'static StorageList<R>>
     /// We need to store the &'static StorageList, which we might not get until runtime.
     list: AtomicPtr<StorageList<R>>,
-    /// This is a single waitcell which
-    state_change: WaitCell,
 
     /// The following parts are "observable" in the linked list. We put it inside
     /// an unsafecell, because it might be mutated "spookily" either through the
@@ -134,7 +134,8 @@ pub struct Node<T> {
     // https://doc.rust-lang.org/std/pin/index.html#a-self-referential-struct
     _pin: PhantomPinned,
 
-    // We generally want this to be in the tail position, because
+    // We generally want this to be in the tail position, because the size of T varies
+    // and the pointer to the `NodeHeader` must not change as described above.
     t: MaybeUninit<T>,
 }
 
@@ -155,21 +156,6 @@ pub struct NodeHeader {
     /// The current state of the node. THIS IS SAFETY LOAD BEARING whether
     /// we can access the `T` in the `Node<T>`
     state: State,
-    /// This is a reference back to the `WaitCell`, which can be used to
-    /// notify the Node owner that their data is now ready to read.
-    ///
-    /// We could maybe make this a `MaybeUninit`, since this is invalid
-    /// BEFORE we start the `attach`, but should be valid forever AFTER
-    /// the `attach` has completed.
-    ///
-    /// We can't just put the WaitCell in the `NodeHeader`, because we
-    /// want the node's owner to be able to `wait` on the cell without
-    /// holding the mutex.
-    ///
-    /// If we actually only ever need this in `attach`, maybe we just store
-    /// an Option<Waker> here instead? idk, there's maybe a better way than
-    /// this to do things.
-    state_change: Option<&'static WaitCell>,
     /// This is the type-erased serialize/deserialize vtable that is
     /// unique to each `T`, and will be used by the storage worker
     /// to access the `t` indirectly for loading and storing.
@@ -218,6 +204,9 @@ pub enum State {
     /// TODO: Decide what our policy is for this: SHOULD we write default values
     /// back to flash, or keep them out of flash until there has been an explict
     /// change to the default value?
+    /// If we don't flash it, we reduce wear on the flash and save some time.
+    /// However, if the `default()` value changes (e.g., firmware update) this
+    /// gives a different result.
     ///
     /// In this state, `t` IS valid, and may be read at any time (by the holder
     /// of the lock).
@@ -267,13 +256,15 @@ pub struct VTable {
 impl<R: ScopedRawMutex + ConstInit> StorageList<R> {
     /// const constructor to make a new empty list. Intended to be used
     /// to create a static.
-    /// 
+    ///
     /// ```
     /// static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
     /// ```
     pub const fn new() -> Self {
         Self {
             list: BlockingMutex::new(List::new()),
+            reading_done: WaitQueue::new(),
+            writing_done: WaitQueue::new(),
         }
     }
 }
@@ -357,7 +348,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
                             // If it went okay, let the node know that it has been hydrated with data
                             // from the flash
                             hdrmut.state = State::ValidNoWriteNeeded;
-                            hdrmut.state_change.as_ref().unwrap().wake();
+                            self.reading_done.wake_all();
                         } else {
                             // If there WAS a key, but the deser failed, this means that either the data
                             // was corrupted, or there was a breaking schema change. Either way, we can't
@@ -367,7 +358,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
                             //
                             // todo: add logs? some kind of asserts?
                             hdrmut.state = State::NonResident;
-                            hdrmut.state_change.as_ref().unwrap().wake();
+                            self.reading_done.wake_all();
                         }
                     } else {
                         // The node has asked for data, and our flash has nothing for it. Let the node
@@ -379,11 +370,11 @@ impl<R: ScopedRawMutex> StorageList<R> {
                         // processed ALL chunks, and THEN mark any `Initial` nodes as `NonResident`.
                         let hdrmut = unsafe { hdrptr.as_mut() };
                         hdrmut.state = State::NonResident;
-                        hdrmut.state_change.as_ref().unwrap().wake();
+                        self.reading_done.wake_all();
                     }
                 }
             }
-        })
+        });
     }
 
     /// Process any nodes that are requesting to WRITE to flash data
@@ -439,7 +430,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
                         // the initial hydration?
                         let hdrmut = unsafe { hdrptr.as_mut() };
                         hdrmut.state = State::ValidNoWriteNeeded;
-                        hdrmut.state_change.as_ref().unwrap().wake();
+                        self.writing_done.wake_all();
                     } else {
                         // I'm honestly not sure what we should do if serialization failed.
                         // If it was a simple "out of space" because we have a batch of writes
@@ -480,13 +471,11 @@ where
     pub const fn new(path: &'static str) -> Self {
         Self {
             list: AtomicPtr::new(ptr::null_mut()),
-            state_change: WaitCell::new(),
             inner: UnsafeCell::new(Node {
                 header: NodeHeader {
                     links: list::Links::new(),
                     key: path,
                     state: State::Initial,
-                    state_change: None,
                     vtable: VTable::for_ty::<T>(),
                 },
                 t: MaybeUninit::uninit(),
@@ -510,11 +499,6 @@ where
         // todo: assert key uniqueness across the whole list
         list.list.with_lock(|ls| {
             let nodeptr: *mut Node<T> = self.inner.get();
-            {
-                // WITH the lock, put in our WaitCell reference
-                let noderef = unsafe { &mut *nodeptr };
-                noderef.header.state_change = Some(&self.state_change);
-            }
             let nodenn: NonNull<Node<T>> = unsafe { NonNull::new_unchecked(nodeptr) };
             // NOTE: We EXPLICITLY cast the outer Node<T> ptr, instead of using the header
             // pointer, so when we cast back later, the pointer has the correct provenance!
@@ -524,7 +508,7 @@ where
 
         // now spin until we have a value, or we know it is non-resident
         // This is like a nicer version of `poll_fn`.
-        self.state_change
+        list.reading_done
             .wait_for(|| {
                 // We need the lock to look at ourself!
                 list.list.with_lock(|_ls| {
