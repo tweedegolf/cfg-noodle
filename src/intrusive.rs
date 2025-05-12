@@ -12,18 +12,20 @@
 //! to store data, and to make the current design no-std friendly.
 
 use cordyceps::{Linked, List, list};
-use maitake_sync::WaitQueue;
-use minicbor::encode::write::{Cursor, EndOfSlice};
-use minicbor::{Decode, Encode};
-use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
-use std::collections::HashMap;
-use std::marker::PhantomPinned;
-use std::mem::MaybeUninit;
-use std::{
+use core::{
     cell::UnsafeCell,
+    marker::PhantomPinned,
+    mem::MaybeUninit,
     pin::Pin,
     ptr::{self, NonNull},
 };
+use maitake_sync::WaitQueue;
+use minicbor::{
+    Decode, Encode,
+    encode::write::{Cursor, EndOfSlice},
+};
+use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
+use std::collections::HashMap;
 
 /// "StorageList" is the "global anchor" of all storage items.
 ///
