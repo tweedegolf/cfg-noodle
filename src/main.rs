@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use intrusive::{PinList, PinListNode};
+use intrusive::{StorageList, StorageListNode};
 use minicbor::{Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use tokio::time::sleep;
@@ -38,7 +38,7 @@ async fn main() {
     }
 }
 
-static GLOBAL_LIST: PinList<CriticalSectionRawMutex> = PinList::new();
+static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
 
 //
 // TASK 1: Has config, but an old version
@@ -57,9 +57,9 @@ struct EncabulatorConfigV2 {
     spinrate: Option<u32>,
 }
 
-static ENCAB_CONFIG: PinListNode<EncabulatorConfigV2, CriticalSectionRawMutex> =
-    PinListNode::new("encabulator/config");
-async fn task_1(list: &'static PinList<CriticalSectionRawMutex>) {
+static ENCAB_CONFIG: StorageListNode<EncabulatorConfigV2, CriticalSectionRawMutex> =
+    StorageListNode::new("encabulator/config");
+async fn task_1(list: &'static StorageList<CriticalSectionRawMutex>) {
     ENCAB_CONFIG.attach(list).await.unwrap();
     let data: EncabulatorConfigV2 = ENCAB_CONFIG.load();
     println!("T1 Got {data:?}");
@@ -79,9 +79,9 @@ struct GrammeterConfig {
     radiation: f32,
 }
 
-static GRAMM_CONFIG: PinListNode<GrammeterConfig, CriticalSectionRawMutex> =
-    PinListNode::new("grammeter/config");
-async fn task_2(list: &'static PinList<CriticalSectionRawMutex>) {
+static GRAMM_CONFIG: StorageListNode<GrammeterConfig, CriticalSectionRawMutex> =
+    StorageListNode::new("grammeter/config");
+async fn task_2(list: &'static StorageList<CriticalSectionRawMutex>) {
     GRAMM_CONFIG.attach(list).await.unwrap();
     let data: GrammeterConfig = GRAMM_CONFIG.load();
     println!("T2 Got {data:?}");
@@ -112,9 +112,9 @@ impl Default for PositronConfig {
     }
 }
 
-static POSITRON_CONFIG: PinListNode<PositronConfig, CriticalSectionRawMutex> =
-    PinListNode::new("positron/config");
-async fn task_3(list: &'static PinList<CriticalSectionRawMutex>) {
+static POSITRON_CONFIG: StorageListNode<PositronConfig, CriticalSectionRawMutex> =
+    StorageListNode::new("positron/config");
+async fn task_3(list: &'static StorageList<CriticalSectionRawMutex>) {
     POSITRON_CONFIG.attach(list).await.unwrap();
     let data: PositronConfig = POSITRON_CONFIG.load();
     println!("T3 Got {data:?}");

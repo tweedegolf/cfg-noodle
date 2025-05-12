@@ -26,23 +26,16 @@ use std::{
     ptr::{self, NonNull},
 };
 
-/// "PinList" is the "global anchor" of all storage items.
+/// "StorageList" is the "global anchor" of all storage items.
 ///
 /// It serves as the meeting point between two conceptual pieces:
 ///
-/// 1. The `PinListNode`s, which each store one configuration item
+/// 1. The `StorageListNode`s, which each store one configuration item
 /// 2. The worker task that owns the external flash, and serves the
 ///    role of loading data FROM flash (and putting it in the Nodes),
 ///    as well as the role of deciding when to write data TO flash
 ///    (retrieving it from each node).
-///
-/// It's called "PinList" because it comes from something else I was
-/// researching: https://bsky.app/profile/jamesmunns.com/post/3lo6gkvyfmc2p,
-/// where the storage could be stored in a pinned future, instead of a
-/// static. It's not a very accurate name anymore, maybe something like
-/// `StorageList` or `StorageListAnchor` is better now. I'll leave that
-/// up to you to decide.
-pub struct PinList<R: ScopedRawMutex> {
+pub struct StorageList<R: ScopedRawMutex> {
     /// This uses a `BlockingMutex`, a mutex that wraps access in a
     /// non-async closure. The mutex contains a `List`, which is a
     /// doubly-linked intrusive list. Unlike my other Pin-based research,
@@ -60,7 +53,7 @@ pub struct PinList<R: ScopedRawMutex> {
     /// generic lock interface, and uses a `WaitQueue`, which is an intrusive
     /// waker list, allowing for multiple wakers.
     ///
-    /// See `impl Drop for PinListNode` for more potential issues with an
+    /// See `impl Drop for StorageListNode` for more potential issues with an
     /// async mutex.
     ///
     /// The type parameter `R` allows us to be generic over kinds of mutex
@@ -70,7 +63,7 @@ pub struct PinList<R: ScopedRawMutex> {
     ///
     /// This mutex MUST be locked whenever you:
     ///
-    /// 1. Want to append an item to the linked list, e.g. with `PinListNode`.
+    /// 1. Want to append an item to the linked list, e.g. with `StorageListNode`.
     ///    You'd also need to lock it to REMOVE something from the list, but
     ///    we'll probably not support that in this library, at least for now.
     /// 2. You want to interact with ANY node that is in the list, REGARDLESS
@@ -84,41 +77,41 @@ pub struct PinList<R: ScopedRawMutex> {
     /// Header, which is the first field in `Node<T>`, which is repr-C, so we
     /// can cast this back to a `Node<T>` as needed
     list: BlockingMutex<R, List<NodeHeader>>,
-    // TODO: We probably want to put one or two `WaitQueue`s here, one so
-    // `PinListNode`s can fire off an "I need to be hydrated" wake, and one
-    // so `PinListNode`s can fire off an "I have a pending write" wake.
+    // TODO: We probably want to put one or two `WaitQueue`s here, so
+    // `StorageListNode`s can fire off an "I need to be hydrated" wake, and one
+    // so `StorageListNode`s can fire off an "I have a pending write" wake.
     //
     // These would allow the storage worker task to be a bit more intelligent
     // or reactive to checking for "I have something to do", instead of having
     // to regularly poll.
     //
     // needs_read: WaitQueue,
-    // neads_write: WaitQueue,
+    // needs_write: WaitQueue,
 }
 
-/// PinListNode represents the storage of a single `T`, linkable to a `PinList`
+/// StorageListNode represents the storage of a single `T`, linkable to a `StorageList`
 ///
 /// Again, the name no longer makes sense. Sorry.
 ///
-/// "end users" will interact with the PinListNode to retrieve and store changes
+/// "end users" will interact with the StorageListNode to retrieve and store changes
 /// to the configuration they care about. They will also `attach` it to the
-/// `PinList` to make it part of the "connected configuration system".
-pub struct PinListNode<T, R>
+/// `StorageList` to make it part of the "connected configuration system".
+pub struct StorageListNode<T, R>
 where
     T: 'static,
     R: ScopedRawMutex + 'static,
 {
-    /// morally: Option<&'static PinList<R>>
-    /// We need to store the &'static PinList, which we might not get until runtime.
-    list: AtomicPtr<PinList<R>>,
-    /// This is a single waitcell which handles waking when the `state` field has changed
+    /// morally: Option<&'static StorageList<R>>
+    /// We need to store the &'static StorageList, which we might not get until runtime.
+    list: AtomicPtr<StorageList<R>>,
+    /// This is a single waitcell which
     state_change: WaitCell,
 
     /// The following parts are "observable" in the linked list. We put it inside
     /// an unsafecell, because it might be mutated "spookily" either through the
-    /// PinListNode handle, or via the linked list.
+    /// StorageListNode handle, or via the linked list.
     ///
-    /// Other items in `PinListNode` are only "visible" through the actual `PinListNode`
+    /// Other items in `StorageListNode` are only "visible" through the actual `StorageListNode`
     /// handle, not through the linked list.
     inner: UnsafeCell<Node<T>>,
 }
@@ -137,10 +130,11 @@ pub struct Node<T> {
     // <https://github.com/rust-lang/rust/pull/82834>
     // TODO: I don't think this heuristic is necessarily true anymore? We
     // should check this.
+    // But it is still used in the `pin` examples:
+    // https://doc.rust-lang.org/std/pin/index.html#a-self-referential-struct
     _pin: PhantomPinned,
 
-    // We generally want this to be in the tail position, because the size of T varies
-    // and the pointer to the `NodeHeader` must not change as described above.
+    // We generally want this to be in the tail position, because
     t: MaybeUninit<T>,
 }
 
@@ -224,9 +218,6 @@ pub enum State {
     /// TODO: Decide what our policy is for this: SHOULD we write default values
     /// back to flash, or keep them out of flash until there has been an explict
     /// change to the default value?
-    /// If we don't flash it, we reduce wear on the flash and save some time.
-    /// However, if the `default()` value changes (e.g., firmware update) this
-    /// gives a different result.
     ///
     /// In this state, `t` IS valid, and may be read at any time (by the holder
     /// of the lock).
@@ -270,12 +261,16 @@ pub struct VTable {
 }
 
 // --------------------------------------------------------------------------
-// impl PinList
+// impl StorageList
 // --------------------------------------------------------------------------
 
-impl<R: ScopedRawMutex + ConstInit> PinList<R> {
+impl<R: ScopedRawMutex + ConstInit> StorageList<R> {
     /// const constructor to make a new empty list. Intended to be used
-    /// to create a static. See `main.rs` for example.
+    /// to create a static.
+    /// 
+    /// ```
+    /// static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    /// ```
     pub const fn new() -> Self {
         Self {
             list: BlockingMutex::new(List::new()),
@@ -283,14 +278,14 @@ impl<R: ScopedRawMutex + ConstInit> PinList<R> {
     }
 }
 
-impl<R: ScopedRawMutex + ConstInit> Default for PinList<R> {
+impl<R: ScopedRawMutex + ConstInit> Default for StorageList<R> {
     /// this only exists to shut up the clippy lint about impl'ing default
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// These are public methods for the `PinList`. They currently are intended to be
+/// These are public methods for the `StorageList`. They currently are intended to be
 /// used by the "storage worker task", that decides when we actually want to
 /// interact with the flash.
 ///
@@ -300,7 +295,7 @@ impl<R: ScopedRawMutex + ConstInit> Default for PinList<R> {
 /// re-worked.
 ///
 /// For now they are oriented around using a HashMap.
-impl<R: ScopedRawMutex> PinList<R> {
+impl<R: ScopedRawMutex> StorageList<R> {
     /// Process any nodes that are requesting flash data
     ///
     /// This method:
@@ -461,19 +456,19 @@ impl<R: ScopedRawMutex> PinList<R> {
 }
 
 // --------------------------------------------------------------------------
-// impl PinListNode
+// impl StorageListNode
 // --------------------------------------------------------------------------
 
 /// I think this is safe? If we can move data into the node, its
-/// Sync-safety is guaranteed by the PinList mutex.
-unsafe impl<T, R> Sync for PinListNode<T, R>
+/// Sync-safety is guaranteed by the StorageList mutex.
+unsafe impl<T, R> Sync for StorageListNode<T, R>
 where
     T: Send + 'static,
     R: ScopedRawMutex + 'static,
 {
 }
 
-impl<T, R> PinListNode<T, R>
+impl<T, R> StorageListNode<T, R>
 where
     T: 'static,
     T: Encode<()>,
@@ -481,7 +476,7 @@ where
     T: Default + Clone,
     R: ScopedRawMutex + 'static,
 {
-    /// Make a new PinListNode, initially empty and unattached
+    /// Make a new StorageListNode, initially empty and unattached
     pub const fn new(path: &'static str) -> Self {
         Self {
             list: AtomicPtr::new(ptr::null_mut()),
@@ -501,7 +496,7 @@ where
     }
 
     // Attaches, waits for hydration. If value not in flash, a default value is used
-    pub async fn attach(&'static self, list: &'static PinList<R>) -> Result<(), ()> {
+    pub async fn attach(&'static self, list: &'static StorageList<R>) -> Result<(), ()> {
         // TODO: We need some kind of "taken" flag to prevent multiple
         // calls to attach, maybe return some kind of handle. Could maybe just
         // compare and swap with this?
@@ -555,9 +550,9 @@ where
             .await
             .expect("waitcell should never close");
 
-        // Store the pointer to the pinlist
-        let ls: *const PinList<R> = list;
-        let ls: *mut PinList<R> = ls.cast_mut();
+        // Store the pointer to the StorageList
+        let ls: *const StorageList<R> = list;
+        let ls: *mut StorageList<R> = ls.cast_mut();
         self.list.store(ls, Ordering::Relaxed);
 
         Ok(())
@@ -568,12 +563,12 @@ where
     /// TODO: we probably want a nicer handler that errors out, or awaits
     /// if the data isn't loaded yet.
     ///
-    /// Or we could have `attach` return some kind of `PinListNodeHandle` that
-    /// denotes "yes the pinlist has been loaded at least once", and guarantees
+    /// Or we could have `attach` return some kind of `StorageListNodeHandle` that
+    /// denotes "yes the StorageList has been loaded at least once", and guarantees
     /// that this load won't fail. This might also help with the "only attach once"
     /// guarantee! Oh also it might solve the `AtomicPtr` thing, because only the
-    /// `PinListNodeHandle` would need to hold the `&'static PinList`, NOT the
-    /// `PinListNode`. I think we should definitely do this!
+    /// `StorageListNodeHandle` would need to hold the `&'static StorageList`, NOT the
+    /// `StorageListNode`. I think we should definitely do this!
     ///
     /// Note that we *copy out*, instead of returning a ref, because we MUST hold
     /// the guard as long as &T is live. For the blocking mutex, that's all kinds
@@ -605,7 +600,7 @@ where
     ///
     /// Much like `load`, we could do a much better job of handling errors and not
     /// panicking here, and this interface would probably greatly benefit from
-    /// making a `PinListNodeHandle`.
+    /// making a `StorageListNodeHandle`.
     pub fn write(&'static self, t: &T) {
         let list = self.list.load(Ordering::Relaxed);
         let list = unsafe { list.as_ref().unwrap() };
@@ -635,13 +630,13 @@ where
     }
 }
 
-impl<T, R: ScopedRawMutex> Drop for PinListNode<T, R> {
+impl<T, R: ScopedRawMutex> Drop for StorageListNode<T, R> {
     fn drop(&mut self) {
         // If we DO want to be able to drop, we probably want to unlink from the list.
         //
-        // However, we more or less require that `PinListNode` is in a static
+        // However, we more or less require that `StorageListNode` is in a static
         // (or some kind of linked pointer), so it should never actually be possible
-        // to drop a PinListNode.
+        // to drop a StorageListNode.
         //
         // This will be problematic if we switch to an async mutex!
         todo!("We probably don't actually need drop?")
