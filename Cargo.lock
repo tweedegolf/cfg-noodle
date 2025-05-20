@@ -99,8 +99,7 @@ checksum = "32b13ea120a812beba79e34316b3942a857c86ec1593cb34f27bb28272ce2cca"
 [[package]]
 name = "cordyceps"
 version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0392f465ceba1713d30708f61c160ebf4dc1cf86bb166039d16b11ad4f3b5b6"
+source = "git+https://github.com/jamesmunns/mycelium?rev=9c344032563c0b63a97f9aa16cf66aaef9eea6df#9c344032563c0b63a97f9aa16cf66aaef9eea6df"
 dependencies = [
  "loom",
  "tracing",

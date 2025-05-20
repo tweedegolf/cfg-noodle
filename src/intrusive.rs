@@ -16,7 +16,6 @@ use core::{
     cell::UnsafeCell,
     marker::PhantomPinned,
     mem::MaybeUninit,
-    pin::Pin,
     ptr::{self, NonNull},
 };
 use maitake_sync::WaitQueue;
@@ -308,12 +307,13 @@ impl<R: ScopedRawMutex> StorageList<R> {
         // locked the entire time!
         self.list.with_lock(|ls| {
             // Traverse the linked list, hopping between intrusive nodes.
-            for node in ls.iter_mut() {
+            for node in ls.raw_iter() {
                 // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
                 // to the contents of the node. We COPY OUT the vtable and the &'static str
                 // key, for later use, which is important because we might throw away our
                 // `node` ptr shortly.
                 let vtable = {
+                    let node = unsafe { node.as_ref() };
                     match node.state {
                         State::Initial => Some((node.vtable, node.key)),
                         State::NonResident => None,
@@ -327,8 +327,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
                     // Make a node pointer from a header pointer. This *consumes* the `Pin<&mut NodeHeader>`, meaning
                     // we are free to later re-invent other mutable ptrs/refs, AS LONG AS we still treat the data
                     // as pinned.
-                    let mut hdrptr: NonNull<NodeHeader> =
-                        NonNull::from(unsafe { Pin::into_inner_unchecked(node) });
+                    let mut hdrptr: NonNull<NodeHeader> = node;
                     let nodeptr: NonNull<Node<()>> = hdrptr.cast();
 
                     // Does the "flash" have some data for us to push to the node?
@@ -398,9 +397,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
         // locked the entire time!
         self.list.with_lock(|ls| {
             // For each node in the list...
-            for node in ls.iter_mut() {
+            for node in ls.raw_iter() {
                 // ... does this node need writing?
                 let vtable = {
+                    let node = unsafe { node.as_ref() };
                     match node.state {
                         State::Initial => None,
                         State::NonResident => None,
@@ -415,8 +415,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 if let Some((vtable, key)) = vtable {
                     // See `process_reads` for the tricky safety caveats here!
                     // TODO: Miri gives an error here. Investigate whether this is correct and fix it.
-                    let mut hdrptr: NonNull<NodeHeader> =
-                        NonNull::from(unsafe { Pin::into_inner_unchecked(node) });
+                    let mut hdrptr: NonNull<NodeHeader> = node;
                     let nodeptr: NonNull<Node<()>> = hdrptr.cast();
 
                     // Todo: use a provided scratch buffer
