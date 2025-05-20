@@ -17,9 +17,9 @@ use core::{
     marker::PhantomPinned,
     mem::MaybeUninit,
     num::Wrapping,
-
     ptr::{self, NonNull},
 };
+use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use maitake_sync::WaitQueue;
 use minicbor::{
     CborLen, Decode, Encode,
@@ -27,6 +27,7 @@ use minicbor::{
     len_with,
 };
 use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
+use sequential_storage::{cache::NoCache, queue};
 use std::collections::HashMap;
 
 /// "Global anchor" of all storage items.
@@ -259,6 +260,12 @@ pub struct VTable {
     deserialize: DeserFn,
 }
 
+/// Owns a flash and the range reserved for the `StorageList`
+struct Flash<T: MultiwriteNorFlash> {
+    flash: T,
+    range: core::ops::Range<u32>,
+}
+
 // --------------------------------------------------------------------------
 // impl StorageList
 // --------------------------------------------------------------------------
@@ -302,6 +309,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// This method:
     ///
     /// 1. Locks the mutex
+    ///
+    /// // TODO: UPDATE THIS WITH NEW PROCEDURE
     /// 2. Iterates through each node currently linked in the list
     /// 3. For Each node that says "I need to be hydrated", it sees if a matching
     ///    key record exists in the hashmap (our stand-in for the actual flash
@@ -310,10 +319,91 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// 4. On success, it will mark the node as now having valid data. On failure
     ///    it marks that (discussed more below, some of this might not be perfect
     ///    yet and requires more thought)
-    pub fn process_reads(&'static self, in_flash: &HashMap<String, Vec<u8>>) {
+    pub async fn process_reads(&'static self, flash: &Flash<impl MultiwriteNorFlash>) {
+        let mut buf = [0u8; 4096];
+
+        // Create a `QueueIterator` without caching
+        let mut cache = NoCache::new();
+        let mut queue_iter = queue::iter(&mut flash.flash, flash.range.clone(), &mut cache)
+            .await
+            .unwrap();
+
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
-        self.list.with_lock(|ls| {
+        self.list.with_lock(|ls| async {
+            while let Some(item) = queue_iter.next(&mut buf).await.unwrap() {
+                let key: &str = extract_key(&item);
+                let counter: u8 = extract_counter(&item);
+                let payload: &[u8] = extract_payload(&item);
+
+                // Check for the write_confirm key
+                if key == "WRITE-CONFIRM" {
+                    // write_confirm_found = true;
+                } else if let Some(node_header) = find_key(ls, key) {
+                    // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
+                    // to the contents of the node. We COPY OUT the vtable and the &'static str
+                    // key, for later use, which is important because we might throw away our
+                    // `node` ptr shortly.
+                    let vtable = {
+                        let node_header = unsafe { node_header.as_ref() };
+                        match node_header.state {
+                            State::Initial => Some((node_header.vtable, node_header.key)),
+                            State::NonResident => None,
+                            State::DefaultUnwritten => None,
+                            State::ValidNoWriteNeeded => None,
+                            State::NeedsWrite => None,
+                            State::WriteStarted => None,
+                        }
+                    };
+                    if let Some((vtable, key)) = vtable {
+                        // Make a node pointer from a header pointer. This *consumes* the `Pin<&mut NodeHeader>`, meaning
+                        // we are free to later re-invent other mutable ptrs/refs, AS LONG AS we still treat the data
+                        // as pinned.
+                        let mut hdrptr: NonNull<NodeHeader> = node_header;
+                        let nodeptr: NonNull<Node<()>> = hdrptr.cast();
+
+                        // Note: We MUST have destroyed `node` at this point, so we don't have aliasing
+                        // references of both the Node and the NodeHeader. Pointers are fine!
+                        //
+                        // TODO: right now we only read if `t` is uninhabited, so we don't care about dropping
+                        // or overwriting the value. IF WE EVER want the ability to "reload from flash", we
+                        // might want to think about drop!
+                        let res = (vtable.deserialize)(nodeptr, payload.as_slice());
+
+                        // TODO: Can this happen before the `if let Some(val)` so we don't repeat it in the `else`?
+                        // SAFETY: We can re-magic a reference to the header, because the NonNull<Node<()>>
+                        // does not have a live reference anymore
+                        let hdrmut = unsafe { hdrptr.as_mut() };
+
+                        if res.is_ok() {
+                            // If it went okay, let the node know that it has been hydrated with data
+                            // from the flash
+                            hdrmut.state = State::ValidNoWriteNeeded;
+                            self.reading_done.wake_all();
+                        } else {
+                            // If there WAS a key, but the deser failed, this means that either the data
+                            // was corrupted, or there was a breaking schema change. Either way, we can't
+                            // particularly recover from this. We might want to log this, but exposing
+                            // the difference between this and "no data found" to the node probably won't
+                            // actually be useful.
+                            //
+                            // todo: add logs? some kind of asserts?
+                            hdrmut.state = State::NonResident;
+                            self.reading_done.wake_all();
+                        }
+                        // The node has asked for data, and our flash has nothing for it. Let the node
+                        // know that there's definitely nothing to wait for anymore, and it should
+                        // figure out it's own data, probably from Default::default().
+                        //
+                        // TODO: if we read from the external flash in "chunks", e.g. one page at a time,
+                        // we MIGHT not want to mark this fully "NonResident" yet, and wait until we have
+                        // processed ALL chunks, and THEN mark any `Initial` nodes as `NonResident`.
+                        // let hdrmut = unsafe { hdrptr.as_mut() };
+                        // hdrmut.state = State::NonResident;
+                        // self.reading_done.wake_all();
+                    }
+                }
+            }
             // Traverse the linked list, hopping between intrusive nodes.
             for node in ls.raw_iter() {
                 // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
@@ -423,7 +513,6 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 // yes, it needs writing
                 if let Some((vtable, key)) = vtable {
                     // See `process_reads` for the tricky safety caveats here!
-                    // TODO: Miri gives an error here. Investigate whether this is correct and fix it.
                     let mut hdrptr: NonNull<NodeHeader> = node;
                     let nodeptr: NonNull<Node<()>> = hdrptr.cast();
 
