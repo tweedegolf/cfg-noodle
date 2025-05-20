@@ -2,6 +2,10 @@ name: Miri
 
 on: [push, pull_request]
 
+env:
+  # Currently, we use timers + sleep, which require disabling isolation
+  MIRIFLAGS: "-Zmiri-disable-isolation"
+
 jobs:
   miri:
     name: "Miri"
