@@ -5,6 +5,7 @@ use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use tokio::time::sleep;
 
+pub mod flash;
 pub mod hashmap;
 pub mod intrusive;
 

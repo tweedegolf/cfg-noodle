@@ -1,24 +1,31 @@
 [package]
+edition = "2024"
 name = "cfg-noodle"
 version = "0.1.0"
-edition = "2024"
+
+[features]
+_test = ["std"]
+std = []
 
 [dependencies]
 const-fnv1a-hash = "1.1.0"
 embedded-storage-async = "0.4.1"
-minicbor = { version = "0.26.5", features = ["std", "derive"] }
-sequential-storage = { version = "4.0.1", features = ["std", "_test"] }
+minicbor = { version = "0.26.5", features = ["derive", "std"] }
+sequential-storage = { version = "4.0.1", features = ["_test", "std"] }
 tokio = { version = "1.44.2", features = ["macros", "rt-multi-thread", "time"] }
 
 cordyceps = "0.3.3"
 critical-section = { version = "1.2.0", features = ["std"] }
-mutex = { version = "1.0.0", features = ["std", "impl-critical-section"] }
-pin-project = "1.1.10"
 maitake-sync = { version = "0.2.1", features = ["std"] }
+mutex = { version = "1.0.0", features = ["impl-critical-section", "std"] }
+pin-project = "1.1.10"
 
 
-# [patch.crates-io]
-# sequential-storage = { path = "../sequential-storage" }
 
 [patch.crates-io]
 cordyceps = { git = "https://github.com/jamesmunns/mycelium", rev = "9c344032563c0b63a97f9aa16cf66aaef9eea6df" }
+
+[dev-dependencies]
+approx = "0.5.1"
+futures = { version = "0.3.30", features = ["executor"] }
+futures-test = "0.3.30"

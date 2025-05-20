@@ -16,6 +16,8 @@ use core::{
     cell::UnsafeCell,
     marker::PhantomPinned,
     mem::MaybeUninit,
+    num::Wrapping,
+
     ptr::{self, NonNull},
 };
 use maitake_sync::WaitQueue;
@@ -155,6 +157,12 @@ pub struct NodeHeader {
     /// The current state of the node. THIS IS SAFETY LOAD BEARING whether
     /// we can access the `T` in the `Node<T>`
     state: State,
+    /// Counter that is increased on every write to flash.
+    /// This helps determine which entry is the newest, should there ever be
+    /// two entries for the same key.
+    /// A `None` value indicates that the node has not been found in flash (yet)
+    ///  and the counter is not yet initialized.
+    counter: Option<Wrapping<u8>>,
     /// This is the type-erased serialize/deserialize `VTable` that is
     /// unique to each `T`, and will be used by the storage worker
     /// to access the `t` indirectly for loading and storing.
@@ -342,6 +350,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
                         // might want to think about drop!
                         let res = (vtable.deserialize)(nodeptr, val.as_slice());
 
+                        // TODO: Can this happen before the `if let Some(val)` so we don't repeat it in the `else`?
                         // SAFETY: We can re-magic a reference to the header, because the NonNull<Node<()>>
                         // does not have a live reference anymore
                         let hdrmut = unsafe { hdrptr.as_mut() };
@@ -476,6 +485,7 @@ where
                     key: path,
                     state: State::Initial,
                     vtable: VTable::for_ty::<T>(),
+                    counter: None,
                 },
                 t: MaybeUninit::uninit(),
                 _pin: PhantomPinned,
@@ -761,7 +771,9 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+    use embedded_storage_async::nor_flash::NorFlash;
     use minicbor::CborLen;
+    // use mock_flash::MockFlashBase;
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
 
     #[derive(Debug, Encode, Decode, Clone, PartialEq, CborLen)]
@@ -878,4 +890,12 @@ mod test {
 
         worker_task.await.unwrap();
     }
+
+    // #[tokio::test]
+    // async fn mock_flash() {
+    //     let mut flash: MockFlashBase<128, 256, 16> =
+    //         MockFlashBase::new(mock_flash::WriteCountCheck::OnceOnly, Some(10000), true);
+
+    //     flash.erase(0, 4096).await.unwrap();
+    // }
 }
