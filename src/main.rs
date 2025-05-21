@@ -5,7 +5,7 @@ use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use tokio::time::sleep;
 
-pub mod flash;
+pub mod error;
 pub mod hashmap;
 pub mod intrusive;
 
@@ -29,7 +29,8 @@ async fn main() {
     // give time for tasks to attach
     sleep(Duration::from_millis(100)).await;
     // process reads
-    GLOBAL_LIST.process_reads(&flash);
+    todo!("Add flash mock");
+    //GLOBAL_LIST.process_reads(&flash);
 
     for _ in 0..10 {
         sleep(Duration::from_secs(1)).await;

@@ -19,6 +19,7 @@ critical-section = { version = "1.2.0", features = ["std"] }
 maitake-sync = { version = "0.2.1", features = ["std"] }
 mutex = { version = "1.0.0", features = ["impl-critical-section", "std"] }
 pin-project = "1.1.10"
+thiserror = { version = "2.0.12", default-features = false }
 
 
 
