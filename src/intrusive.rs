@@ -850,7 +850,6 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use embedded_storage_async::nor_flash::NorFlash;
     use minicbor::CborLen;
     // use mock_flash::MockFlashBase;
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
@@ -958,12 +957,18 @@ mod test {
         minicbor::encode(&custom_config, &mut serialized_bytes).unwrap();
 
         let worker_task = tokio::task::spawn(async {
-            let mut flash: HashMap<String, Vec<u8>> = HashMap::<String, Vec<u8>>::new();
-            flash.insert("positron/config".into(), serialized_bytes);
+            let mut flash = Flash {
+                flash: sequential_storage::mock_flash::MockFlashBase::<10, 16, 256>::new(
+                    WriteCountCheck::OnceOnly,
+                    None,
+                    true,
+                ),
+                range: 0x0000..0x10000,
+            };
+            //flash.insert("positron/config".into(), serialized_bytes);
 
             for _ in 0..2 {
-                todo!("Add flash mock");
-                //GLOBAL_LIST.process_reads(&flash);
+                GLOBAL_LIST.process_reads(&mut flash, &mut Vec::new()).await;
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         });
