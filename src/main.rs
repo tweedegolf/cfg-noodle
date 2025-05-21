@@ -1,8 +1,9 @@
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
-use intrusive::{StorageList, StorageListNode};
+use intrusive::{Flash, StorageList, StorageListNode};
 use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
+use sequential_storage::mock_flash::WriteCountCheck;
 use tokio::time::sleep;
 
 pub mod error;
@@ -15,7 +16,17 @@ async fn main() {
     tokio::task::spawn(task_2(&GLOBAL_LIST));
     tokio::task::spawn(task_3(&GLOBAL_LIST));
 
-    let mut flash = HashMap::<String, Vec<u8>>::new();
+    //let mut flash = HashMap::<String, Vec<u8>>::new();
+    let mut flash = Flash::new(
+        sequential_storage::mock_flash::MockFlashBase::<10, 16, 256>::new(
+            WriteCountCheck::OnceOnly,
+            None,
+            true,
+        ),
+        0x0000..0x1000,
+    );
+
+    /*
     flash.insert(
         "encabulator/config".to_string(),
         minicbor::to_vec(&EncabulatorConfigV1 { polarity: true }).unwrap(),
@@ -24,19 +35,26 @@ async fn main() {
         "grammeter/config".to_string(),
         minicbor::to_vec(&GrammeterConfig { radiation: 100.0 }).unwrap(),
     );
+    */
     // no positron config
 
     // give time for tasks to attach
     sleep(Duration::from_millis(100)).await;
     // process reads
-    todo!("Add flash mock");
-    //GLOBAL_LIST.process_reads(&flash);
+    GLOBAL_LIST.process_reads(&mut flash, &mut Vec::new()).await;
 
     for _ in 0..10 {
         sleep(Duration::from_secs(1)).await;
-        let mut flash2 = HashMap::<String, Vec<u8>>::new();
-        GLOBAL_LIST.process_writes(&mut flash2);
-        println!("NEW WRITES: {flash2:?}");
+        let mut flash2 = Flash::new(
+            sequential_storage::mock_flash::MockFlashBase::<10, 16, 256>::new(
+                WriteCountCheck::OnceOnly,
+                None,
+                true,
+            ),
+            0x0000..0x1000,
+        );
+        GLOBAL_LIST.process_writes(&mut flash2).await;
+        println!("NEW WRITES: {}", flash2.flash().print_items().await);
     }
 }
 
@@ -63,13 +81,15 @@ static ENCAB_CONFIG: StorageListNode<EncabulatorConfigV2> =
     StorageListNode::new("encabulator/config");
 async fn task_1(list: &'static StorageList<CriticalSectionRawMutex>) {
     let config_handle = ENCAB_CONFIG.attach(list).await.unwrap();
-    let data: EncabulatorConfigV2 = config_handle.load();
+    let data: EncabulatorConfigV2 = config_handle.load().await;
     println!("T1 Got {data:?}");
     sleep(Duration::from_secs(1)).await;
-    config_handle.write(&EncabulatorConfigV2 {
-        polarity: true,
-        spinrate: Some(100),
-    });
+    config_handle
+        .write(&EncabulatorConfigV2 {
+            polarity: true,
+            spinrate: Some(100),
+        })
+        .await;
 }
 
 //
@@ -84,10 +104,12 @@ struct GrammeterConfig {
 static GRAMM_CONFIG: StorageListNode<GrammeterConfig> = StorageListNode::new("grammeter/config");
 async fn task_2(list: &'static StorageList<CriticalSectionRawMutex>) {
     let config_handle = GRAMM_CONFIG.attach(list).await.unwrap();
-    let data: GrammeterConfig = config_handle.load();
+    let data: GrammeterConfig = config_handle.load().await;
     println!("T2 Got {data:?}");
     sleep(Duration::from_secs(3)).await;
-    config_handle.write(&GrammeterConfig { radiation: 200.0 });
+    config_handle
+        .write(&GrammeterConfig { radiation: 200.0 })
+        .await;
 }
 
 //
@@ -117,12 +139,14 @@ static POSITRON_CONFIG: StorageListNode<PositronConfig> = StorageListNode::new("
 
 async fn task_3(list: &'static StorageList<CriticalSectionRawMutex>) {
     let config_handle = POSITRON_CONFIG.attach(list).await.unwrap();
-    let data: PositronConfig = config_handle.load();
+    let data: PositronConfig = config_handle.load().await;
     println!("T3 Got {data:?}");
     sleep(Duration::from_secs(5)).await;
-    config_handle.write(&PositronConfig {
-        up: 15,
-        down: 25,
-        strange: 108,
-    });
+    config_handle
+        .write(&PositronConfig {
+            up: 15,
+            down: 25,
+            strange: 108,
+        })
+        .await;
 }
