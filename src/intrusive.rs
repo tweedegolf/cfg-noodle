@@ -21,6 +21,7 @@ use core::{
     ptr::{self, NonNull},
 };
 use embedded_storage_async::nor_flash::MultiwriteNorFlash;
+use log::{debug, error, info};
 use maitake_sync::{Mutex, WaitQueue};
 use minicbor::{
     CborLen, Decode, Encode,
@@ -154,7 +155,7 @@ pub struct NodeHeader {
     /// The doubly linked list pointers
     links: list::Links<NodeHeader>,
     /// The "key" of our "key:value" store. Must be unique across the list.
-    key: &'static str,
+    key: [u8; KEY_LEN],
     /// The current state of the node. THIS IS SAFETY LOAD BEARING whether
     /// we can access the `T` in the `Node<T>`
     state: State,
@@ -274,6 +275,9 @@ impl<T: MultiwriteNorFlash> Flash<T> {
     pub fn flash(&mut self) -> &mut T {
         &mut self.flash
     }
+    pub fn range(&mut self) -> core::ops::Range<u32> {
+        self.range.clone()
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -285,6 +289,8 @@ impl<R: ScopedRawMutex + ConstInit> StorageList<R> {
     /// to create a static.
     ///
     /// ```
+    /// # use cfg_noodle::intrusive::StorageList;
+    /// # use mutex::raw_impls::cs::CriticalSectionRawMutex;
     /// static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
     /// ```
     pub const fn new() -> Self {
@@ -334,21 +340,29 @@ impl<R: ScopedRawMutex> StorageList<R> {
         flash: &mut Flash<impl MultiwriteNorFlash>,
         buf: &mut [u8],
     ) {
+        info!("Start process_reads, buffer has len {}", buf.len());
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
         let mut ls = self.list.lock().await;
+        debug!("process_reads locked list");
+
         // Create a `QueueIterator` without caching
         let mut cache = NoCache::new();
         let mut queue_iter = queue::iter(&mut flash.flash, flash.range.clone(), &mut cache)
             .await
             .unwrap();
         while let Some(item) = queue_iter.next(buf).await.unwrap() {
-            let key: &str = extract_key(&item).unwrap();
-            let _counter: u8 = extract_counter(&item); // TODO handle counter
-            let payload: &[u8] = extract_payload(&item);
+            let key: &[u8; KEY_LEN] = extract_key(&item).expect("Invalid item: no key");
+            let _counter: u8 = extract_counter(&item).expect("Invalid item: no counter"); // TODO handle counter
+            let payload: &[u8] = extract_payload(&item).expect("Invalid item: no payload");
 
+            debug!(
+                "Extracted metadata: key {:?}, counter: {:?}, payload: {:?}",
+                key, _counter, payload
+            );
             // Check for the write_confirm key
             if is_write_confirm(&item) {
+                info!("Found write_confirm");
                 // write_confirm_found = true;
                 // TODO: what next? And what if we never run into this?
             } else if let Some(node_header) = find_node(&mut ls, key) {
@@ -417,7 +431,23 @@ impl<R: ScopedRawMutex> StorageList<R> {
             }
         }
         // TODO: handle write_confirm_found == false
-        // TODO: Set nodes in initial states to non resident
+
+        // Set nodes in initial states to non resident
+        for node_header in ls.raw_iter() {
+            // Make a node pointer from a header pointer. This *consumes* the `Pin<&mut NodeHeader>`, meaning
+            // we are free to later re-invent other mutable ptrs/refs, AS LONG AS we still treat the data
+            // as pinned.
+            let mut hdrptr: NonNull<NodeHeader> = node_header;
+
+            // SAFETY: We can re-magic a reference to the header, because the NonNull<Node<()>>
+            // does not have a live reference anymore
+            let hdrmut = unsafe { hdrptr.as_mut() };
+
+            if let State::Initial = hdrmut.state {
+                hdrmut.state = State::NonResident
+            }
+        }
+        debug!("Reading done. Waking all.");
         self.reading_done.wake_all();
     }
 
@@ -435,9 +465,11 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// writes work, where we might have a temporary "we've serialized the data already,
     /// but we don't know if the flash write succeeded yet".
     pub async fn process_writes(&'static self, flash: &mut Flash<impl MultiwriteNorFlash>) {
+        info!("Start process_writes");
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
         let ls = self.list.lock().await;
+        info!("process_writes locked list");
         // Check if any node in the list needs writing
         let mut needs_writing = false;
 
@@ -452,12 +484,13 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 // TODO: Handle this differently?
                 // Neither of these cases should appear on a list that has been processed properly
                 State::Initial | State::NonResident | State::WriteStarted => {
-                    panic!("shouldn't be here")
+                    panic!("Node State invalid for writing")
                 }
             }
         }
         // If the list is unchanged, there is no need to write it to flash!
         if !needs_writing {
+            info!("List does not need writing. Exiting.");
             return;
         }
 
@@ -474,9 +507,15 @@ impl<R: ScopedRawMutex> StorageList<R> {
             // Todo: use a provided scratch buffer
             let mut buf = [0u8; 1024];
             // Attempt to serialize
-            buf[0..KEY_LEN].copy_from_slice(&key.as_bytes()[0..32]);
-            buf[KEY_LEN] = counter.map(|c| c.0).unwrap_or(0);
-            let res = (vtable.serialize)(nodeptr, &mut buf[KEY_LEN + 1..]);
+            // TODO: maybe this function should rather take a NonNull<NodeHeader> and
+            // do the pointer operations, so we can reuse it in tests.
+            let res = serialize_node(
+                &key,
+                counter.map(|c| c.0).unwrap_or(0),
+                vtable.serialize,
+                nodeptr,
+                &mut buf,
+            );
 
             if let Ok(used) = res {
                 let used = KEY_LEN + 1 + used;
@@ -535,7 +574,7 @@ where
             inner: UnsafeCell::new(Node {
                 header: NodeHeader {
                     links: list::Links::new(),
-                    key: path,
+                    key: const_fnv1a_hash::fnv1a_hash_str_32(path).to_le_bytes(),
                     state: State::Initial,
                     vtable: VTable::for_ty::<T>(),
                     counter: None,
@@ -551,32 +590,42 @@ where
     pub async fn attach<R>(
         &'static self,
         list: &'static StorageList<R>,
-    ) -> Result<StorageListNodeHandle<T, R>, ()>
+    ) -> Result<StorageListNodeHandle<T, R>, Error>
     where
         R: ScopedRawMutex + 'static,
     {
-        let mut ls = list.list.lock().await;
-        let nodeptr: *mut Node<T> = self.inner.get();
-        let nodenn: NonNull<Node<T>> = unsafe { NonNull::new_unchecked(nodeptr) };
-        // NOTE: We EXPLICITLY cast the outer Node<T> ptr, instead of using the header
-        // pointer, so when we cast back later, the pointer has the correct provenance!
-        let hdrnn: NonNull<NodeHeader> = nodenn.cast();
+        debug!("Attaching new node");
+        {
+            let mut ls = list.list.lock().await;
+            debug!("attach() got Lock on list");
 
-        // Check if the key already exists in the list.
-        // This also prevents attaching to the list more than once.
+            let nodeptr: *mut Node<T> = self.inner.get();
+            let nodenn: NonNull<Node<T>> = unsafe { NonNull::new_unchecked(nodeptr) };
+            // NOTE: We EXPLICITLY cast the outer Node<T> ptr, instead of using the header
+            // pointer, so when we cast back later, the pointer has the correct provenance!
+            let hdrnn: NonNull<NodeHeader> = nodenn.cast();
 
-        // TODO: Check safety of this!
-        let key = unsafe { self.inner.get().as_ref() }.unwrap().header.key;
-        if find_node(&mut ls, key).is_some() {
-            eprintln!("Key already in use!");
-        } else {
-            ls.push_front(hdrnn);
+            // Check if the key already exists in the list.
+            // This also prevents attaching to the list more than once.
+
+            // TODO: Check safety of this!
+            let key = &unsafe { self.inner.get().as_ref() }.unwrap().header.key;
+            if find_node(&mut ls, key).is_some() {
+                error!("Key already in use: {:?}", key);
+                return Err(Error::DuplicateKey);
+            } else {
+                ls.push_front(hdrnn);
+            }
+
+            // Release the lock on list
+            drop(ls);
         }
 
         // now spin until we have a value, or we know it is non-resident
         // This is like a nicer version of `poll_fn`.
 
         loop {
+            debug!("Waiting for reading_done");
             list.reading_done
                 .wait()
                 .await
@@ -607,31 +656,44 @@ where
         Ok(StorageListNodeHandle { list, inner: self })
     }
 }
-pub const KEY_LEN: usize = 32;
-fn find_node(ls: &mut List<NodeHeader>, key: &str) -> Option<NonNull<NodeHeader>> {
-    // TODO: Once we settle on what exeactly the keys are, this needs to be revisited!
-    assert_eq!(key.len(), KEY_LEN);
-
+// Key length in bytes
+pub const KEY_LEN: usize = 4;
+fn find_node(ls: &mut List<NodeHeader>, key: &[u8; KEY_LEN]) -> Option<NonNull<NodeHeader>> {
     // TODO: Check if the safety requirements are upheld!
     // It seems like we should not use `iter` for the same reason we use `raw_iter` instead in read/write
     ls.raw_iter()
-        .find(|item| unsafe { item.as_ref() }.key == key)
+        .find(|item| unsafe { item.as_ref() }.key == *key)
 }
 
-fn extract_key(item: &[u8]) -> Result<&str, Error> {
-    core::str::from_utf8(&item[..KEY_LEN]).map_err(|_| Error::Deserialization)
+fn extract_key(item: &[u8]) -> Result<&[u8; KEY_LEN], Error> {
+    item[..KEY_LEN]
+        .try_into()
+        .map_err(|_| Error::Deserialization)
 }
 
-fn extract_counter(item: &[u8]) -> u8 {
-    item[KEY_LEN]
+fn extract_counter(item: &[u8]) -> Result<u8, Error> {
+    item.get(KEY_LEN).ok_or(Error::Deserialization).copied()
 }
 
-fn extract_payload(item: &[u8]) -> &[u8] {
-    &item[KEY_LEN + 1..]
+fn extract_payload(item: &[u8]) -> Result<&[u8], Error> {
+    item.get(KEY_LEN + 1..).ok_or(Error::Deserialization)
 }
 
 fn is_write_confirm(item: &[u8]) -> bool {
     item[..KEY_LEN].iter().all(|&elem| elem == 0)
+}
+
+pub fn serialize_node(
+    key: &[u8; KEY_LEN],
+    counter: u8,
+    serialize_fn: SerFn,
+    nodeptr: NonNull<Node<()>>,
+    buf: &mut [u8],
+) -> Result<usize, ()> {
+    // Attempt to serialize
+    buf[0..KEY_LEN].copy_from_slice(key);
+    buf[KEY_LEN] = counter;
+    serialize_fn(nodeptr, &mut buf[KEY_LEN + 1..]).map(|len| len + KEY_LEN + 1)
 }
 
 // --------------------------------------------------------------------------
@@ -851,6 +913,7 @@ where
 mod test {
     use super::*;
     use minicbor::CborLen;
+    use test_log::test;
     // use mock_flash::MockFlashBase;
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
     use sequential_storage::mock_flash::WriteCountCheck;
@@ -875,7 +938,7 @@ mod test {
         }
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_two_configs() {
         static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
         static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
@@ -883,6 +946,7 @@ mod test {
         static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config2");
 
+        eprintln!("Spawn worker_task");
         let worker_task = tokio::task::spawn(async {
             let mut flash = Flash {
                 flash: sequential_storage::mock_flash::MockFlashBase::<10, 16, 256>::new(
@@ -890,11 +954,17 @@ mod test {
                     None,
                     true,
                 ),
-                range: 0x0000..0x10000,
+                range: 0x0000..0x1000,
             };
+            let range = flash.range();
+            sequential_storage::erase_all(&mut flash.flash(), range)
+                .await
+                .unwrap();
+
+            let mut buf = vec![0u8; 4096];
 
             for _ in 0..10 {
-                GLOBAL_LIST.process_reads(&mut flash, &mut Vec::new()).await;
+                GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 //let mut flash2 = HashMap::<String, Vec<u8>>::new();
                 //GLOBAL_LIST.process_writes(&mut flash2);
@@ -941,7 +1011,7 @@ mod test {
         worker_task.await.unwrap();
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_load_existing() {
         static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
         static POSITRON_CONFIG: StorageListNode<PositronConfig> =
@@ -953,22 +1023,48 @@ mod test {
             down: 22,
             strange: 333,
         };
-        let mut serialized_bytes = vec![];
-        minicbor::encode(&custom_config, &mut serialized_bytes).unwrap();
+        let mut serialized_bytes = [0u8; 4096];
+        let len = len_with(&custom_config, &mut ());
 
-        let worker_task = tokio::task::spawn(async {
+        let key = const_fnv1a_hash::fnv1a_hash_str_32("positron/config").to_le_bytes();
+        let res = serialize_node(
+            &key,
+            0,
+            serialize::<PositronConfig>,
+            POSITRON_CONFIG.inner.into_inner().header,
+            &mut serialized_bytes,
+        );
+
+        serialized_bytes[0..KEY_LEN]
+            .copy_from_slice(&const_fnv1a_hash::fnv1a_hash_str_32("positron/config").to_le_bytes());
+        serialized_bytes[KEY_LEN] = 1;
+        minicbor::encode(&custom_config, &mut serialized_bytes[KEY_LEN + 1..])
+            .expect("serialization should not fail");
+
+        let worker_task = tokio::task::spawn(async move {
             let mut flash = Flash {
                 flash: sequential_storage::mock_flash::MockFlashBase::<10, 16, 256>::new(
                     WriteCountCheck::OnceOnly,
                     None,
                     true,
                 ),
-                range: 0x0000..0x10000,
+                range: 0x0000..0x1000,
             };
+            let range = flash.range();
+            queue::push(
+                &mut flash.flash(),
+                range,
+                &mut NoCache::new(),
+                &mut serialized_bytes[0..KEY_LEN + 1 + len],
+                false,
+            )
+            .await
+            .expect("pushing to flash should not fail here");
             //flash.insert("positron/config".into(), serialized_bytes);
 
+            let mut buf = vec![0u8; 4096];
             for _ in 0..2 {
-                GLOBAL_LIST.process_reads(&mut flash, &mut Vec::new()).await;
+                GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         });
@@ -979,7 +1075,11 @@ mod test {
             .await
             .expect("This should not error!");
 
-        assert_eq!(custom_config, expecting_already_present.load().await);
+        assert_eq!(
+            custom_config,
+            expecting_already_present.load().await,
+            "Key should already be present"
+        );
 
         worker_task.await.unwrap();
     }

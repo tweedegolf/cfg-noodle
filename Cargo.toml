@@ -20,6 +20,9 @@ maitake-sync = { version = "0.2.1", features = ["std"] }
 mutex = { version = "1.0.0", features = ["impl-critical-section", "std"] }
 pin-project = "1.1.10"
 thiserror = { version = "2.0.12", default-features = false }
+log = "0.4.27"
+simple_logger = "5.0.0"
+test-log = "0.2.17"
 
 
 

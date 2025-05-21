@@ -12,6 +12,7 @@ pub mod intrusive;
 
 #[tokio::main]
 async fn main() {
+    simple_logger::SimpleLogger::new().init().unwrap();
     tokio::task::spawn(task_1(&GLOBAL_LIST));
     tokio::task::spawn(task_2(&GLOBAL_LIST));
     tokio::task::spawn(task_3(&GLOBAL_LIST));
@@ -25,6 +26,11 @@ async fn main() {
         ),
         0x0000..0x1000,
     );
+    let range = flash.range();
+
+    sequential_storage::erase_all(&mut flash.flash(), range)
+        .await
+        .unwrap();
 
     /*
     flash.insert(
