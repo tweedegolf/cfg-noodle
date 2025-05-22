@@ -12,7 +12,10 @@
 //! to store data, and to make the current design no-std friendly.
 
 use crate::error::Error;
-use cordyceps::{Linked, List, list};
+use cordyceps::{
+    Linked, List,
+    list::{self, IterRaw},
+};
 use core::{
     cell::UnsafeCell,
     marker::PhantomPinned,
@@ -497,18 +500,20 @@ impl<R: ScopedRawMutex> StorageList<R> {
             info!("List does not need writing. Exiting.");
             return;
         }
-
-        for hdrptr in ls.iter_raw() {
-            let node = unsafe { hdrptr.as_ref() };
-            let nodeptr: NonNull<Node<()>> = hdrptr.cast();
-
+        
+        let mut iter = StaticRawIter {
+            iter: ls.iter_raw(),
+        };
+        
+        while let Some(hdrptr) = iter.next() {
             // Todo: use a provided scratch buffer
             let mut buf = [0u8; 1024];
             // Attempt to serialize
-            let res = serialize_node(hdrptr, &mut buf);
+            let res = serialize_node(hdrptr.ptr, &mut buf);
 
             if let Ok(used) = res {
-                // "Store" in our "flash"
+                // Write to flash
+                // TODO: THIS DOES NOT WORK! hdrptr is !Send and crossing the await is not allowed.
                 queue::push(
                     &mut flash.flash,
                     flash.range.clone(),
@@ -683,7 +688,7 @@ fn is_write_confirm(item: &[u8]) -> bool {
 }
 
 /// Serialize a list node into `buf`.
-/// 
+///
 /// Returns the number of bytes written to `buf` or an error.
 pub fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Result<usize, ()> {
     let (vtable, key, counter) = {
@@ -921,6 +926,22 @@ where
     Ok(len)
 }
 
+struct StaticRawIter<'a> {
+    iter: IterRaw<'a, NodeHeader>,
+}
+unsafe impl<'a> Send for StaticRawIter<'a> {}
+
+struct SendPtr {
+    ptr: NonNull<NodeHeader>,
+}
+unsafe impl Send for SendPtr {}
+
+impl<'a> StaticRawIter<'a> {
+    fn next(&mut self) -> Option<SendPtr> {
+        self.iter.next().map(|ptr| SendPtr { ptr })
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -977,7 +998,7 @@ mod test {
             let mut buf = vec![0u8; 4096];
 
             for _ in 0..10 {
-                //GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
+                GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 GLOBAL_LIST.process_writes(&mut flash).await;
 
