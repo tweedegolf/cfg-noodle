@@ -466,14 +466,16 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// writes work, where we might have a temporary "we've serialized the data already,
     /// but we don't know if the flash write succeeded yet".
     pub async fn process_writes(&'static self, flash: &mut Flash<impl MultiwriteNorFlash>) {
-        info!("Start process_writes");
+        debug!("Start process_writes");
+
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
         let mut ls = self.list.lock().await;
-        info!("process_writes locked list");
+        debug!("process_writes locked list");
+
         // Check if any node in the list needs writing
         let mut needs_writing = false;
-
+        // TODO: Should we go over all nodes or just start writing once we hit the first node that needs writing?
         for node in ls.iter_raw() {
             let node = unsafe { node.as_ref() };
             match node.state {
@@ -489,24 +491,16 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 }
             }
         }
+
         // If the list is unchanged, there is no need to write it to flash!
         if !needs_writing {
             info!("List does not need writing. Exiting.");
             return;
         }
 
-        for mut hdrptr in ls.iter_raw() {
-            // TODO: Why was this here? Do we really need this extra variable?
-            // let mut hdrptr: NonNull<NodeHeader> = node;
-
+        for hdrptr in ls.iter_raw() {
             let node = unsafe { hdrptr.as_ref() };
             let nodeptr: NonNull<Node<()>> = hdrptr.cast();
-
-            // Todo: use a provided scratch buffer
-            let mut buf = [0u8; 1024];
-            // Attempt to serialize
-            let res = (node.vtable.serialize)(nodeptr, buf.as_mut_slice());
-            info!("Got this: {:?}", &buf[..res.unwrap()]);
 
             // Todo: use a provided scratch buffer
             let mut buf = [0u8; 1024];
@@ -514,8 +508,6 @@ impl<R: ScopedRawMutex> StorageList<R> {
             let res = serialize_node(hdrptr, &mut buf);
 
             if let Ok(used) = res {
-                let used = KEY_LEN + 1 + used;
-
                 // "Store" in our "flash"
                 queue::push(
                     &mut flash.flash,
@@ -526,14 +518,6 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 )
                 .await
                 .unwrap();
-
-                // Mark the store as complete, wake the node if it cares about state
-                // changes.
-                // TODO: will nodes ever care about state changes other than
-                // the initial hydration?
-                let hdrmut = unsafe { hdrptr.as_mut() };
-                hdrmut.state = State::ValidNoWriteNeeded;
-                self.writing_done.wake_all();
             } else {
                 // I'm honestly not sure what we should do if serialization failed.
                 // If it was a simple "out of space" because we have a batch of writes
@@ -543,6 +527,16 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 // done, other than log.
                 panic!("why did ser fail");
             }
+        }
+
+        for mut hdrptr in ls.iter_raw() {
+            // Mark the store as complete, wake the node if it cares about state
+            // changes.
+            // TODO: will nodes ever care about state changes other than
+            // the initial hydration?
+            let hdrmut = unsafe { hdrptr.as_mut() };
+            hdrmut.state = State::ValidNoWriteNeeded;
+            self.writing_done.wake_all();
         }
     }
 }
@@ -592,6 +586,8 @@ where
         R: ScopedRawMutex + 'static,
     {
         debug!("Attaching new node");
+
+        // Add a scope so that the Lock on the List is dropped
         {
             let mut ls = list.list.lock().await;
             debug!("attach() got Lock on list");
@@ -604,23 +600,17 @@ where
 
             // Check if the key already exists in the list.
             // This also prevents attaching to the list more than once.
-
             // TODO: Check safety of this!
-            let key = &unsafe { self.inner.get().as_ref() }.unwrap().header.key;
+            let key = unsafe { &nodenn.as_ref().header.key };
             if find_node(&mut ls, key).is_some() {
                 error!("Key already in use: {:?}", key);
                 return Err(Error::DuplicateKey);
             } else {
                 ls.push_front(hdrnn);
             }
-
-            // Release the lock on list
-            drop(ls);
         }
 
         // now spin until we have a value, or we know it is non-resident
-        // This is like a nicer version of `poll_fn`.
-
         loop {
             debug!("Waiting for reading_done");
             list.reading_done
@@ -653,59 +643,65 @@ where
         Ok(StorageListNodeHandle { list, inner: self })
     }
 }
-// Key length in bytes
+
+/// Key length in bytes
 pub const KEY_LEN: usize = 4;
-fn find_node(ls: &mut List<NodeHeader>, key: &[u8; KEY_LEN]) -> Option<NonNull<NodeHeader>> {
+
+/// Find a `NodeHeader` with the given `key`.
+///
+/// If `key` is not in the `List`, this function returns `None`.
+fn find_node(list: &mut List<NodeHeader>, key: &[u8; KEY_LEN]) -> Option<NonNull<NodeHeader>> {
     // TODO: Check if the safety requirements are upheld!
     // It seems like we should not use `iter` for the same reason we use `raw_iter` instead in read/write
-    ls.iter_raw()
+    list.iter_raw()
         .find(|item| unsafe { item.as_ref() }.key == *key)
 }
 
+/// Get the `key` bytes from a list item in the flash.
+/// Used to extract the key from a `QueueIteratorItem`.
 fn extract_key(item: &[u8]) -> Result<&[u8; KEY_LEN], Error> {
     item[..KEY_LEN]
         .try_into()
         .map_err(|_| Error::Deserialization)
 }
 
+/// Get the `counter` byte from a list item in the flash.
+/// Used to extract the counter from a `QueueIteratorItem`.
 fn extract_counter(item: &[u8]) -> Result<u8, Error> {
     item.get(KEY_LEN).ok_or(Error::Deserialization).copied()
 }
 
+/// Get the `payload` bytes from a list item in the flash.
+/// Used to extract the payload from a `QueueIteratorItem`.
 fn extract_payload(item: &[u8]) -> Result<&[u8], Error> {
     item.get(KEY_LEN + 1..).ok_or(Error::Deserialization)
 }
 
+/// Check if the list item in the flash is a `write_confirm` block.
 fn is_write_confirm(item: &[u8]) -> bool {
     item[..KEY_LEN].iter().all(|&elem| elem == 0)
 }
 
+/// Serialize a list node into `buf`.
+/// 
+/// Returns the number of bytes written to `buf` or an error.
 pub fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Result<usize, ()> {
     let (vtable, key, counter) = {
         let node = unsafe { headerptr.as_ref() };
         (node.vtable, node.key, node.counter)
     };
+
     debug!(
         "serializing node with key <{:?}>, counter <{:?}>",
         key, counter
     );
-    // TODO: Why is this extra variable created? do we still need it with iter_raw?
-    let mut hdrptr: NonNull<NodeHeader> = headerptr;
-    let nodeptr: NonNull<Node<()>> = hdrptr.cast();
+
+    let nodeptr: NonNull<Node<()>> = headerptr.cast();
 
     // Attempt to serialize
     buf[0..KEY_LEN].copy_from_slice(&key);
     buf[KEY_LEN] = counter.map(|c| c.0).unwrap_or(0);
     (vtable.serialize)(nodeptr, &mut buf[KEY_LEN + 1..]).map(|len| len + KEY_LEN + 1)
-
-    /*
-    let mut buf = [0u8; 1024];
-    // Attempt to serialize
-    let res = (vtable.serialize)(nodeptr, buf.as_mut_slice());
-    info!("got: {:?}", buf);
-
-    (vtable.serialize)(nodeptr, buf.as_mut()).map(|len| len + KEY_LEN + 1)
-    */
 }
 
 // --------------------------------------------------------------------------
@@ -981,7 +977,7 @@ mod test {
             let mut buf = vec![0u8; 4096];
 
             for _ in 0..10 {
-                GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
+                //GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 GLOBAL_LIST.process_writes(&mut flash).await;
 
