@@ -35,6 +35,8 @@ use mutex::{ConstInit, ScopedRawMutex};
 use sequential_storage::{cache::NoCache, queue};
 use std::fmt::Debug;
 
+pub type Counter = Wrapping<u8>;
+
 /// "Global anchor" of all storage items.
 ///
 /// It serves as the meeting point between two conceptual pieces:
@@ -168,7 +170,7 @@ pub struct NodeHeader {
     /// two entries for the same key.
     /// A `None` value indicates that the node has not been found in flash (yet)
     ///  and the counter is not yet initialized.
-    counter: Option<Wrapping<u8>>,
+    counter: Option<Counter>,
     /// This is the type-erased serialize/deserialize `VTable` that is
     /// unique to each `T`, and will be used by the storage worker
     /// to access the `t` indirectly for loading and storing.
@@ -357,12 +359,12 @@ impl<R: ScopedRawMutex> StorageList<R> {
             .unwrap();
         while let Some(item) = queue_iter.next(buf).await.unwrap() {
             let key: &[u8; KEY_LEN] = extract_key(&item).expect("Invalid item: no key");
-            let _counter: u8 = extract_counter(&item).expect("Invalid item: no counter"); // TODO handle counter
+            let counter: Counter = extract_counter(&item).expect("Invalid item: no counter"); // TODO handle counter
             let payload: &[u8] = extract_payload(&item).expect("Invalid item: no payload");
 
             debug!(
                 "Extracted metadata: key {:?}, counter: {:?}, payload: {:?}",
-                key, _counter, payload
+                key, counter, payload
             );
             // Check for the write_confirm key
             if is_write_confirm(&item) {
@@ -409,6 +411,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
                         // If it went okay, let the node know that it has been hydrated with data
                         // from the flash
                         hdrmut.state = State::ValidNoWriteNeeded;
+                        hdrmut.counter.replace(counter);
                         self.reading_done.wake_all();
                     } else {
                         // If there WAS a key, but the deser failed, this means that either the data
@@ -455,24 +458,30 @@ impl<R: ScopedRawMutex> StorageList<R> {
         self.reading_done.wake_all();
     }
 
-    /// Process any nodes that are requesting to WRITE to flash data
+    /// Process writes to flash.
     ///
+    /// If any of the nodes has pending writes, this function writes the
+    /// entire list to flash.
+    ///
+    /// ## Params:
+    /// - `flash`: a [`Flash`] object containing the necessary information to call [`queue::push`]
+    /// - `buf`: a scratch-buffer that must be large enough to hold the largest serialized node
+    ///     In practice, a buffer as large as the flash's page size is enough because sequential
+    ///     storage can not store larger items.
+    ///
+    /// TODO: update this description
     /// This method:
-    ///
     /// 1. Locks the mutex
     /// 2. Iterates through each node currently linked in the list
     /// 3. For Each node that says "I have made changes", it will try to hand
     ///    control over to the node to serialize to a scratch buffer
     /// 4. On success, it will mark the node as no longer having changes
-    ///
-    /// This function might change significantly depending on how our actual flash
-    /// writes work, where we might have a temporary "we've serialized the data already,
-    /// but we don't know if the flash write succeeded yet".
     pub async fn process_writes(
         &'static self,
         flash: &mut Flash<impl MultiwriteNorFlash>,
+        buf: &mut [u8],
     ) -> Result<(), Error> {
-        debug!("Start process_writes");
+        info!("Start process_writes");
 
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
@@ -481,10 +490,18 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
         // Check if any node in the list needs writing
         let mut needs_writing = false;
+
+        let mut max_counter: Counter = Default::default();
+
         // TODO: Should we go over all nodes or just start writing once we hit the first node that needs writing?
-        for node in ls.iter_raw() {
-            let node = unsafe { node.as_ref() };
-            match node.state {
+        for hdrptr in ls.iter_raw() {
+            let header = unsafe { hdrptr.as_ref() };
+
+            // Update the counter to the highest value we have in the list
+            if is_newer(header.counter.unwrap_or_default(), max_counter) {
+                max_counter = header.counter.unwrap_or_default();
+            }
+            match header.state {
                 // If no write is needed, we obviously won't write.
                 State::ValidNoWriteNeeded => (),
                 // If the node hasn't been written to flash yet and we initialized it
@@ -493,7 +510,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 // TODO: Handle this differently?
                 // Neither of these cases should appear on a list that has been processed properly
                 State::Initial | State::NonResident | State::WriteStarted => {
-                    return Err(Error::InvalidState(node.key));
+                    return Err(Error::InvalidState(header.key));
                 }
             }
         }
@@ -504,19 +521,28 @@ impl<R: ScopedRawMutex> StorageList<R> {
             return Ok(());
         }
 
+        // Increase the counter for this list by one
+        let counter = max_counter + Wrapping(1);
+        debug!("New counter: {}", counter);
+        
+        // Update counters before writing the list to flash
+        // We do this before serialization because that may fail and
+        // we want to avoid diverging counter values...
+        for mut hdrptr in ls.iter_raw() {
+            let header = unsafe { hdrptr.as_mut() };
+            header.counter.replace(counter);
+        }
+
         let mut iter = StaticRawIter {
             iter: ls.iter_raw(),
         };
 
         while let Some(hdrptr) = iter.next() {
-            // Todo: use a provided scratch buffer
-            let mut buf = [0u8; 1024];
             // Attempt to serialize
-            let res = serialize_node(hdrptr.ptr, &mut buf);
+            let res = serialize_node(hdrptr.ptr, buf);
 
             if let Ok(used) = res {
                 // Write to flash
-                // TODO: THIS DOES NOT WORK! hdrptr is !Send and crossing the await is not allowed.
                 queue::push(
                     &mut flash.flash,
                     flash.range.clone(),
@@ -533,7 +559,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 // other reason, or it fails even with an empty page (e.g. serializes
                 // to more than 1k or 4k or something), there's really not much to be
                 // done, other than log.
-                panic!("why did ser fail");
+                // For now, we just return an error and let the caller decide what to do.
+                return Err(Error::Deserialization);
             }
         }
 
@@ -678,8 +705,15 @@ fn extract_key(item: &[u8]) -> Result<&[u8; KEY_LEN], Error> {
 
 /// Get the `counter` byte from a list item in the flash.
 /// Used to extract the counter from a `QueueIteratorItem`.
-fn extract_counter(item: &[u8]) -> Result<u8, Error> {
-    item.get(KEY_LEN).ok_or(Error::Deserialization).copied()
+fn extract_counter(item: &[u8]) -> Result<Counter, Error> {
+    item.get(KEY_LEN)
+        .ok_or(Error::Deserialization)
+        .map(|c| Wrapping(c.clone()))
+}
+
+const COUNTER_THRESHOLD: u8 = 10;
+fn is_newer(counter: Counter, compared_to: Counter) -> bool {
+    compared_to - counter > Wrapping(COUNTER_THRESHOLD)
 }
 
 /// Get the `payload` bytes from a list item in the flash.
@@ -1009,11 +1043,11 @@ mod test {
             for _ in 0..10 {
                 GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                if let Err(e) = GLOBAL_LIST.process_writes(&mut flash).await {
+                if let Err(e) = GLOBAL_LIST.process_writes(&mut flash, &mut buf).await {
                     error!("Error in process_writes: {}", e);
                 }
 
-                info!("NEW WRITES: {:?}", flash.flash().print_items().await);
+                info!("NEW WRITES: {}", flash.flash().print_items().await);
             }
         });
 
@@ -1041,6 +1075,15 @@ mod test {
         let data: PositronConfig = config_handle.load().await;
         info!("T3 Got {data:?}");
 
+        // Assert that the counter is still None
+        assert_eq!(
+            unsafe { config_handle.inner.inner.get().as_ref() }
+                .unwrap()
+                .header
+                .counter,
+            None
+        );
+
         // Write a new config to first handle
         let new_config = PositronConfig {
             up: 15,
@@ -1054,6 +1097,16 @@ mod test {
 
         // Assert that the loaded value equals the written value
         assert_eq!(config_handle.load().await, new_config);
+
+        // Assert that the counter is now 1
+        assert_eq!(
+            unsafe { config_handle.inner.inner.get().as_ref() }
+                .unwrap()
+                .header
+                .counter
+                .unwrap(),
+            Wrapping(1)
+        );
 
         // Wait for the worker task to finish
         worker_task.await.unwrap();
@@ -1080,6 +1133,7 @@ mod test {
         unsafe {
             POSITRON_CONFIG.inner.get().as_mut().unwrap().t =
                 MaybeUninit::new(custom_config.clone());
+            POSITRON_CONFIG.inner.get().as_mut().unwrap().header.counter = Some(Wrapping(0));
         }
         let nodeptr: *mut Node<PositronConfig> = POSITRON_CONFIG.inner.get();
         let nodenn: NonNull<Node<PositronConfig>> = unsafe { NonNull::new_unchecked(nodeptr) };
@@ -1121,14 +1175,20 @@ mod test {
             .await
             .expect("pushing to flash should not fail here");
 
-            warn!("Flash content: {}", flash.flash.print_items().await);
 
-            for _ in 0..2 {
+            for _ in 0..10 {
+                warn!("Flash content: {}", flash.flash.print_items().await);
                 // Reuse the serialization buf, no need to create a new one
                 GLOBAL_LIST
                     .process_reads(&mut flash, &mut serialization_buf)
                     .await;
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                if let Err(e) = GLOBAL_LIST
+                    .process_writes(&mut flash, &mut serialization_buf)
+                    .await
+                {
+                    error!("Error in process_writes: {}", e);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         });
 
@@ -1145,6 +1205,37 @@ mod test {
             "Key should already be present"
         );
 
+        expecting_already_present.write(&custom_config).await;
+
+        sleep(Duration::from_millis(50)).await;
+
+        // Assert that the counter is now 1
+        assert_eq!(
+            unsafe { expecting_already_present.inner.inner.get().as_ref() }
+                .unwrap()
+                .header
+                .counter
+                .unwrap(),
+            Wrapping(1)
+        );
+
         worker_task.await.unwrap();
+    }
+
+    #[test(tokio::test)]
+    async fn test_counter_comparison() {
+        // Question: can we determine whether the right counter value is "newer"
+        // as in "a larger value considering it is of type `Wrapping`" by
+        // subtracting it from the left counter and comparing it to some threshold?
+        assert!(Wrapping::<u8>(0) - Wrapping::<u8>(1) > Wrapping::<u8>(10));
+        assert!(Wrapping::<u8>(1) - Wrapping::<u8>(2) > Wrapping::<u8>(10));
+        assert!(Wrapping::<u8>(255) - Wrapping::<u8>(0) > Wrapping::<u8>(10));
+
+        assert!(is_newer(Wrapping::<u8>(1), Wrapping::<u8>(0)));
+        assert!(is_newer(Wrapping::<u8>(3), Wrapping::<u8>(254)));
+        assert!(is_newer(
+            Wrapping::<u8>(COUNTER_THRESHOLD) + Wrapping::<u8>(254),
+            Wrapping::<u8>(254)
+        ));
     }
 }
