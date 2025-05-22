@@ -1,7 +1,11 @@
+use crate::intrusive::KEY_LEN;
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Deserialization failed!")]
     Deserialization,
     #[error("Duplicate key!")]
-    DuplicateKey
+    DuplicateKey,
+    #[error("Invalid Node State! Key {0:?}")]
+    InvalidState([u8; KEY_LEN])
 }

@@ -468,7 +468,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// This function might change significantly depending on how our actual flash
     /// writes work, where we might have a temporary "we've serialized the data already,
     /// but we don't know if the flash write succeeded yet".
-    pub async fn process_writes(&'static self, flash: &mut Flash<impl MultiwriteNorFlash>) {
+    pub async fn process_writes(
+        &'static self,
+        flash: &mut Flash<impl MultiwriteNorFlash>,
+    ) -> Result<(), Error> {
         debug!("Start process_writes");
 
         // Lock the list, remember, if we're touching nodes, we need to have the list
@@ -490,7 +493,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 // TODO: Handle this differently?
                 // Neither of these cases should appear on a list that has been processed properly
                 State::Initial | State::NonResident | State::WriteStarted => {
-                    panic!("Node State invalid for writing")
+                    return Err(Error::InvalidState(node.key));
                 }
             }
         }
@@ -498,13 +501,13 @@ impl<R: ScopedRawMutex> StorageList<R> {
         // If the list is unchanged, there is no need to write it to flash!
         if !needs_writing {
             info!("List does not need writing. Exiting.");
-            return;
+            return Ok(());
         }
-        
+
         let mut iter = StaticRawIter {
             iter: ls.iter_raw(),
         };
-        
+
         while let Some(hdrptr) = iter.next() {
             // Todo: use a provided scratch buffer
             let mut buf = [0u8; 1024];
@@ -543,6 +546,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
             hdrmut.state = State::ValidNoWriteNeeded;
             self.writing_done.wake_all();
         }
+
+        Ok(())
     }
 }
 
@@ -613,6 +618,7 @@ where
             } else {
                 ls.push_front(hdrnn);
             }
+            debug!("attach() release Lock on list")
         }
 
         // now spin until we have a value, or we know it is non-resident
@@ -999,13 +1005,14 @@ mod test {
 
             for _ in 0..10 {
                 GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                GLOBAL_LIST.process_writes(&mut flash).await;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                if let Err(e) = GLOBAL_LIST.process_writes(&mut flash).await {
+                    error!("Error in process_writes: {}", e);
+                }
 
                 info!("NEW WRITES: {:?}", flash.flash().print_items().await);
             }
         });
-
         let len = len_with(PositronConfig::default(), &mut ());
         println!("len_with: {len}");
 
@@ -1041,7 +1048,6 @@ mod test {
 
         // Assert that the loaded value equals the written value
         assert_eq!(config_handle.load().await, new_config);
-
         worker_task.await.unwrap();
     }
 

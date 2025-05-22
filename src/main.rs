@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use intrusive::{Flash, StorageList, StorageListNode};
+use log::{error, info};
 use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use sequential_storage::mock_flash::WriteCountCheck;
@@ -59,8 +60,10 @@ async fn main() {
             ),
             0x0000..0x1000,
         );
-        GLOBAL_LIST.process_writes(&mut flash2).await;
-        println!("NEW WRITES: {}", flash2.flash().print_items().await);
+        if let Err(e) = GLOBAL_LIST.process_writes(&mut flash2).await {
+            error!("Error in process_writes: {}", e);
+        }
+        info!("NEW WRITES: {}", flash2.flash().print_items().await);
     }
 }
 
