@@ -950,6 +950,8 @@ impl<'a> StaticRawIter<'a> {
 
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
+
     use super::*;
     use log::warn;
     use minicbor::CborLen;
@@ -957,6 +959,7 @@ mod test {
     // use mock_flash::MockFlashBase;
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
     use sequential_storage::mock_flash::WriteCountCheck;
+    use tokio::time::sleep;
 
     #[derive(Debug, Encode, Decode, Clone, PartialEq, CborLen)]
     struct PositronConfig {
@@ -999,7 +1002,7 @@ mod test {
             .await
             .unwrap();
 
-        eprintln!("Spawn worker_task");
+        info!("Spawn worker_task");
         let worker_task = tokio::task::spawn(async move {
             let mut buf = vec![0u8; 4096];
 
@@ -1013,8 +1016,6 @@ mod test {
                 info!("NEW WRITES: {:?}", flash.flash().print_items().await);
             }
         });
-        let len = len_with(PositronConfig::default(), &mut ());
-        println!("len_with: {len}");
 
         // Obtain a handle for the first config
         let config_handle = POSITRON_CONFIG1
@@ -1022,7 +1023,8 @@ mod test {
             .await
             .expect("This should not error");
 
-        // Obtain another handle for the same config. This should error!
+        // Obtain another handle for the same config.
+        // This should error because we try adding the same key.
         let expecting_error = POSITRON_CONFIG1.attach(&GLOBAL_LIST).await;
         assert!(
             expecting_error.is_err(),
@@ -1035,10 +1037,11 @@ mod test {
             .await
             .expect("This should not error!");
 
+        // Load data for thje first handle
         let data: PositronConfig = config_handle.load().await;
-        println!("T3 Got {data:?}");
+        info!("T3 Got {data:?}");
 
-        // Write a new config
+        // Write a new config to first handle
         let new_config = PositronConfig {
             up: 15,
             down: 25,
@@ -1046,47 +1049,56 @@ mod test {
         };
         config_handle.write(&new_config).await;
 
+        // Give the worker_task some time to process the write
+        sleep(Duration::from_millis(100)).await;
+
         // Assert that the loaded value equals the written value
         assert_eq!(config_handle.load().await, new_config);
+
+        // Wait for the worker task to finish
         worker_task.await.unwrap();
     }
 
     #[test(tokio::test)]
     async fn test_load_existing() {
+        // This test will write a config to the flash first and then read it back to check
+        // whether reading an item from flash works.
+
         static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
         static POSITRON_CONFIG: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config");
 
-        // Encode the custom_config config so we can write it to our flash
+        // Serialize the custom_config config so we can write it to our flash
         let custom_config = PositronConfig {
             up: 1,
             down: 22,
             strange: 333,
         };
-        let mut serialized_bytes = [0u8; 4096];
-        let len = len_with(&custom_config, &mut ());
 
-        // TODO: This is a very cumbersome way of serializing the node
-        // just so we can push it to the flash and read back...
+        // TODO: The following pointer operations are a very cumbersome way
+        // of serializing the node just so we can push it to the flash and read back...
         unsafe {
             POSITRON_CONFIG.inner.get().as_mut().unwrap().t =
                 MaybeUninit::new(custom_config.clone());
         }
-
         let nodeptr: *mut Node<PositronConfig> = POSITRON_CONFIG.inner.get();
         let nodenn: NonNull<Node<PositronConfig>> = unsafe { NonNull::new_unchecked(nodeptr) };
         let hdrnn: NonNull<NodeHeader> = nodenn.cast();
 
-        let used =
-            serialize_node(hdrnn, &mut serialized_bytes).expect("Serializing node should not fail");
+        let mut serialization_buf = [0u8; 4096];
+        let used = serialize_node(hdrnn, &mut serialization_buf)
+            .expect("Serializing node should not fail");
 
+        // Now serialize again by calling encode() directly and verify both match
         let mut serialize_control = vec![];
+        let len = len_with(&custom_config, &mut ());
         minicbor::encode(&custom_config, &mut serialize_control).unwrap();
-
-        info!(
-            "Expecting  serialized config: {:?}",
-            &serialize_control[..len]
+        // The serialized node will contain some metadata, but the last `len` bytes must match
+        assert_eq!(
+            serialize_control[..len],
+            serialization_buf[used - len..used]
         );
+
         let worker_task = tokio::task::spawn(async move {
             let mut flash = Flash {
                 flash: sequential_storage::mock_flash::MockFlashBase::<10, 16, 256>::new(
@@ -1097,29 +1109,31 @@ mod test {
                 range: 0x0000..0x1000,
             };
 
-            info!("Pushing bytes: {:?}", &serialized_bytes[..used]);
-            let range = flash.range();
+            info!("Pushing to flash: {:?}", &serialization_buf[..used]);
+            let range = flash.range(); // get cloned range so we can borrow flash mutably in push()
             queue::push(
                 &mut flash.flash(),
                 range,
                 &mut NoCache::new(),
-                &mut serialized_bytes[..used],
+                &mut serialization_buf[..used],
                 false,
             )
             .await
             .expect("pushing to flash should not fail here");
-            //flash.insert("positron/config".into(), serialized_bytes);
 
-            warn!("{}", flash.flash.print_items().await);
+            warn!("Flash content: {}", flash.flash.print_items().await);
 
-            let mut buf = vec![0u8; 4096];
             for _ in 0..2 {
-                GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
+                // Reuse the serialization buf, no need to create a new one
+                GLOBAL_LIST
+                    .process_reads(&mut flash, &mut serialization_buf)
+                    .await;
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
         });
 
-        // Obtain a handle for the third config, which should match the new_config. This should _not_ error!
+        // Obtain a handle for the config. It should match the custom_config.
+        // This should _not_ error!
         let expecting_already_present = POSITRON_CONFIG
             .attach(&GLOBAL_LIST)
             .await
