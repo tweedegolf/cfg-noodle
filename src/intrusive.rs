@@ -562,8 +562,8 @@ where
     T: CborLen<()>,
     for<'a> T: Decode<'a, ()>,
     T: Default + Clone,
-    T: Debug,
-    //R: ScopedRawMutex + 'static,
+    T: Debug, // TODO: Remove all those Debug trait bounds? Just added for debuggin
+              //R: ScopedRawMutex + 'static,
 {
     /// Make a new StorageListNode, initially empty and unattached
     pub const fn new(path: &'static str) -> Self {
@@ -963,29 +963,29 @@ mod test {
         static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config2");
 
-        eprintln!("Spawn worker_task");
-        let worker_task = tokio::task::spawn(async {
-            let mut flash = Flash {
-                flash: sequential_storage::mock_flash::MockFlashBase::<10, 16, 256>::new(
-                    WriteCountCheck::OnceOnly,
-                    None,
-                    true,
-                ),
-                range: 0x0000..0x1000,
-            };
-            let range = flash.range();
-            sequential_storage::erase_all(&mut flash.flash(), range)
-                .await
-                .unwrap();
+        let mut flash = Flash {
+            flash: sequential_storage::mock_flash::MockFlashBase::<10, 16, 256>::new(
+                WriteCountCheck::OnceOnly,
+                None,
+                true,
+            ),
+            range: 0x0000..0x1000,
+        };
+        let range = flash.range();
+        sequential_storage::erase_all(&mut flash.flash(), range)
+            .await
+            .unwrap();
 
+        eprintln!("Spawn worker_task");
+        let worker_task = tokio::task::spawn(async move {
             let mut buf = vec![0u8; 4096];
 
             for _ in 0..10 {
                 GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                //let mut flash2 = HashMap::<String, Vec<u8>>::new();
-                //GLOBAL_LIST.process_writes(&mut flash2);
-                //println!("NEW WRITES: {flash2:?}");
+                GLOBAL_LIST.process_writes(&mut flash).await;
+
+                info!("NEW WRITES: {:?}", flash.flash().print_items().await);
             }
         });
 
@@ -1110,12 +1110,4 @@ mod test {
 
         worker_task.await.unwrap();
     }
-
-    // #[tokio::test]
-    // async fn mock_flash() {
-    //     let mut flash: MockFlashBase<128, 256, 16> =
-    //         MockFlashBase::new(mock_flash::WriteCountCheck::OnceOnly, Some(10000), true);
-
-    //     flash.erase(0, 4096).await.unwrap();
-    // }
 }
