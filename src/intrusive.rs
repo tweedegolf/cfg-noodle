@@ -30,6 +30,7 @@ use minicbor::{
 };
 use mutex::{ConstInit, ScopedRawMutex};
 use sequential_storage::{cache::NoCache, queue};
+use std::fmt::Debug;
 
 /// "Global anchor" of all storage items.
 ///
@@ -433,7 +434,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
         // TODO: handle write_confirm_found == false
 
         // Set nodes in initial states to non resident
-        for node_header in ls.raw_iter() {
+        for node_header in ls.iter_raw() {
             // Make a node pointer from a header pointer. This *consumes* the `Pin<&mut NodeHeader>`, meaning
             // we are free to later re-invent other mutable ptrs/refs, AS LONG AS we still treat the data
             // as pinned.
@@ -468,12 +469,12 @@ impl<R: ScopedRawMutex> StorageList<R> {
         info!("Start process_writes");
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
-        let ls = self.list.lock().await;
+        let mut ls = self.list.lock().await;
         info!("process_writes locked list");
         // Check if any node in the list needs writing
         let mut needs_writing = false;
 
-        for node in ls.raw_iter() {
+        for node in ls.iter_raw() {
             let node = unsafe { node.as_ref() };
             match node.state {
                 // If no write is needed, we obviously won't write.
@@ -494,28 +495,23 @@ impl<R: ScopedRawMutex> StorageList<R> {
             return;
         }
 
-        for node in ls.raw_iter() {
-            // ... does this node need writing?
-            let (vtable, key, counter) = {
-                let node = unsafe { node.as_ref() };
-                (node.vtable, node.key, node.counter)
-            };
-            // See `process_reads` for the tricky safety caveats here!
-            let mut hdrptr: NonNull<NodeHeader> = node;
+        for mut hdrptr in ls.iter_raw() {
+            // TODO: Why was this here? Do we really need this extra variable?
+            // let mut hdrptr: NonNull<NodeHeader> = node;
+
+            let node = unsafe { hdrptr.as_ref() };
             let nodeptr: NonNull<Node<()>> = hdrptr.cast();
 
             // Todo: use a provided scratch buffer
             let mut buf = [0u8; 1024];
             // Attempt to serialize
-            // TODO: maybe this function should rather take a NonNull<NodeHeader> and
-            // do the pointer operations, so we can reuse it in tests.
-            let res = serialize_node(
-                &key,
-                counter.map(|c| c.0).unwrap_or(0),
-                vtable.serialize,
-                nodeptr,
-                &mut buf,
-            );
+            let res = (node.vtable.serialize)(nodeptr, buf.as_mut_slice());
+            info!("Got this: {:?}", &buf[..res.unwrap()]);
+
+            // Todo: use a provided scratch buffer
+            let mut buf = [0u8; 1024];
+            // Attempt to serialize
+            let res = serialize_node(hdrptr, &mut buf);
 
             if let Ok(used) = res {
                 let used = KEY_LEN + 1 + used;
@@ -566,6 +562,7 @@ where
     T: CborLen<()>,
     for<'a> T: Decode<'a, ()>,
     T: Default + Clone,
+    T: Debug,
     //R: ScopedRawMutex + 'static,
 {
     /// Make a new StorageListNode, initially empty and unattached
@@ -661,7 +658,7 @@ pub const KEY_LEN: usize = 4;
 fn find_node(ls: &mut List<NodeHeader>, key: &[u8; KEY_LEN]) -> Option<NonNull<NodeHeader>> {
     // TODO: Check if the safety requirements are upheld!
     // It seems like we should not use `iter` for the same reason we use `raw_iter` instead in read/write
-    ls.raw_iter()
+    ls.iter_raw()
         .find(|item| unsafe { item.as_ref() }.key == *key)
 }
 
@@ -683,17 +680,32 @@ fn is_write_confirm(item: &[u8]) -> bool {
     item[..KEY_LEN].iter().all(|&elem| elem == 0)
 }
 
-pub fn serialize_node(
-    key: &[u8; KEY_LEN],
-    counter: u8,
-    serialize_fn: SerFn,
-    nodeptr: NonNull<Node<()>>,
-    buf: &mut [u8],
-) -> Result<usize, ()> {
+pub fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Result<usize, ()> {
+    let (vtable, key, counter) = {
+        let node = unsafe { headerptr.as_ref() };
+        (node.vtable, node.key, node.counter)
+    };
+    debug!(
+        "serializing node with key <{:?}>, counter <{:?}>",
+        key, counter
+    );
+    // TODO: Why is this extra variable created? do we still need it with iter_raw?
+    let mut hdrptr: NonNull<NodeHeader> = headerptr;
+    let nodeptr: NonNull<Node<()>> = hdrptr.cast();
+
     // Attempt to serialize
-    buf[0..KEY_LEN].copy_from_slice(key);
-    buf[KEY_LEN] = counter;
-    serialize_fn(nodeptr, &mut buf[KEY_LEN + 1..]).map(|len| len + KEY_LEN + 1)
+    buf[0..KEY_LEN].copy_from_slice(&key);
+    buf[KEY_LEN] = counter.map(|c| c.0).unwrap_or(0);
+    (vtable.serialize)(nodeptr, &mut buf[KEY_LEN + 1..]).map(|len| len + KEY_LEN + 1)
+
+    /*
+    let mut buf = [0u8; 1024];
+    // Attempt to serialize
+    let res = (vtable.serialize)(nodeptr, buf.as_mut_slice());
+    info!("got: {:?}", buf);
+
+    (vtable.serialize)(nodeptr, buf.as_mut()).map(|len| len + KEY_LEN + 1)
+    */
 }
 
 // --------------------------------------------------------------------------
@@ -820,6 +832,7 @@ impl VTable {
         T: 'static,
         T: Encode<()>,
         T: CborLen<()>,
+        T: Debug,
         for<'a> T: Decode<'a, ()>,
     {
         let ser = serialize::<T>;
@@ -844,6 +857,7 @@ fn serialize<T>(node: NonNull<Node<()>>, buf: &mut [u8]) -> Result<usize, ()>
 where
     T: 'static,
     T: Encode<()>,
+    T: Debug,
     T: minicbor::CborLen<()>,
 {
     let node: NonNull<Node<T>> = node.cast();
@@ -854,10 +868,12 @@ where
     let mut cursor = Cursor::new(buf);
     let res: Result<(), minicbor::encode::Error<EndOfSlice>> = minicbor::encode(tref, &mut cursor);
 
-    println!(
-        "Finished serializing: {} bytes written, len_with(): {}",
+    info!(
+        "Finished serializing: {} bytes written, len_with(): {}, content: {:?}, type: {:#?}",
         cursor.position(),
         len_with(tref, &mut ()),
+        &cursor.get_ref()[..cursor.position()],
+        tref
     );
     // Make sure len_with returns the correct number of bytes
     // Important because we depend on it in deserialize()
@@ -912,6 +928,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+    use log::warn;
     use minicbor::CborLen;
     use test_log::test;
     // use mock_flash::MockFlashBase;
@@ -1026,21 +1043,27 @@ mod test {
         let mut serialized_bytes = [0u8; 4096];
         let len = len_with(&custom_config, &mut ());
 
-        let key = const_fnv1a_hash::fnv1a_hash_str_32("positron/config").to_le_bytes();
-        let res = serialize_node(
-            &key,
-            0,
-            serialize::<PositronConfig>,
-            POSITRON_CONFIG.inner.into_inner().header,
-            &mut serialized_bytes,
+        // TODO: This is a very cumbersome way of serializing the node
+        // just so we can push it to the flash and read back...
+        unsafe {
+            POSITRON_CONFIG.inner.get().as_mut().unwrap().t =
+                MaybeUninit::new(custom_config.clone());
+        }
+
+        let nodeptr: *mut Node<PositronConfig> = POSITRON_CONFIG.inner.get();
+        let nodenn: NonNull<Node<PositronConfig>> = unsafe { NonNull::new_unchecked(nodeptr) };
+        let hdrnn: NonNull<NodeHeader> = nodenn.cast();
+
+        let used =
+            serialize_node(hdrnn, &mut serialized_bytes).expect("Serializing node should not fail");
+
+        let mut serialize_control = vec![];
+        minicbor::encode(&custom_config, &mut serialize_control).unwrap();
+
+        info!(
+            "Expecting  serialized config: {:?}",
+            &serialize_control[..len]
         );
-
-        serialized_bytes[0..KEY_LEN]
-            .copy_from_slice(&const_fnv1a_hash::fnv1a_hash_str_32("positron/config").to_le_bytes());
-        serialized_bytes[KEY_LEN] = 1;
-        minicbor::encode(&custom_config, &mut serialized_bytes[KEY_LEN + 1..])
-            .expect("serialization should not fail");
-
         let worker_task = tokio::task::spawn(async move {
             let mut flash = Flash {
                 flash: sequential_storage::mock_flash::MockFlashBase::<10, 16, 256>::new(
@@ -1050,17 +1073,21 @@ mod test {
                 ),
                 range: 0x0000..0x1000,
             };
+
+            info!("Pushing bytes: {:?}", &serialized_bytes[..used]);
             let range = flash.range();
             queue::push(
                 &mut flash.flash(),
                 range,
                 &mut NoCache::new(),
-                &mut serialized_bytes[0..KEY_LEN + 1 + len],
+                &mut serialized_bytes[..used],
                 false,
             )
             .await
             .expect("pushing to flash should not fail here");
             //flash.insert("positron/config".into(), serialized_bytes);
+
+            warn!("{}", flash.flash.print_items().await);
 
             let mut buf = vec![0u8; 4096];
             for _ in 0..2 {

@@ -14,7 +14,7 @@ minicbor = { version = "0.26.5", features = ["derive", "std"] }
 sequential-storage = { version = "4.0.1", features = ["_test", "std"] }
 tokio = { version = "1.44.2", features = ["macros", "rt-multi-thread", "time"] }
 
-cordyceps = "0.3.3"
+cordyceps = "0.3.4"
 critical-section = { version = "1.2.0", features = ["std"] }
 maitake-sync = { version = "0.2.1", features = ["std"] }
 mutex = { version = "1.0.0", features = ["impl-critical-section", "std"] }
@@ -23,11 +23,6 @@ thiserror = { version = "2.0.12", default-features = false }
 log = "0.4.27"
 simple_logger = "5.0.0"
 test-log = "0.2.17"
-
-
-
-[patch.crates-io]
-cordyceps = { git = "https://github.com/jamesmunns/mycelium", rev = "9c344032563c0b63a97f9aa16cf66aaef9eea6df" }
 
 [dev-dependencies]
 approx = "0.5.1"
