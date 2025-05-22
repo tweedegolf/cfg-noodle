@@ -1,6 +1,11 @@
 name: Miri
 
-on: [push, pull_request]
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
 
 env:
   # Currently, we use timers + sleep, which require disabling isolation
