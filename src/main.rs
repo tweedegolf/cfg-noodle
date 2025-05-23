@@ -7,10 +7,12 @@ use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use sequential_storage::mock_flash::WriteCountCheck;
 use tokio::time::sleep;
 
-
 #[tokio::main]
 async fn main() {
-    simple_logger::SimpleLogger::new().without_timestamps().init().unwrap();
+    simple_logger::SimpleLogger::new()
+        .without_timestamps()
+        .init()
+        .unwrap();
     tokio::task::spawn(task_1(&GLOBAL_LIST));
     tokio::task::spawn(task_2(&GLOBAL_LIST));
     tokio::task::spawn(task_3(&GLOBAL_LIST));
@@ -76,7 +78,7 @@ static ENCAB_CONFIG: StorageListNode<EncabulatorConfigV2> =
     StorageListNode::new("encabulator/config");
 async fn task_1(list: &'static StorageList<CriticalSectionRawMutex>) {
     let config_handle = ENCAB_CONFIG.attach(list).await.unwrap();
-    let data: EncabulatorConfigV2 = config_handle.load().await;
+    let data: EncabulatorConfigV2 = config_handle.load().await.unwrap();
     println!("T1 Got {data:?}");
     sleep(Duration::from_secs(1)).await;
     config_handle
@@ -84,7 +86,8 @@ async fn task_1(list: &'static StorageList<CriticalSectionRawMutex>) {
             polarity: true,
             spinrate: Some(100),
         })
-        .await;
+        .await
+        .unwrap();
 }
 
 //
@@ -99,12 +102,13 @@ struct GrammeterConfig {
 static GRAMM_CONFIG: StorageListNode<GrammeterConfig> = StorageListNode::new("grammeter/config");
 async fn task_2(list: &'static StorageList<CriticalSectionRawMutex>) {
     let config_handle = GRAMM_CONFIG.attach(list).await.unwrap();
-    let data: GrammeterConfig = config_handle.load().await;
+    let data: GrammeterConfig = config_handle.load().await.unwrap();
     println!("T2 Got {data:?}");
     sleep(Duration::from_secs(3)).await;
     config_handle
         .write(&GrammeterConfig { radiation: 200.0 })
-        .await;
+        .await
+        .unwrap();
 }
 
 //
@@ -134,7 +138,7 @@ static POSITRON_CONFIG: StorageListNode<PositronConfig> = StorageListNode::new("
 
 async fn task_3(list: &'static StorageList<CriticalSectionRawMutex>) {
     let config_handle = POSITRON_CONFIG.attach(list).await.unwrap();
-    let data: PositronConfig = config_handle.load().await;
+    let data: PositronConfig = config_handle.load().await.unwrap();
     println!("T3 Got {data:?}");
     sleep(Duration::from_secs(5)).await;
     config_handle
@@ -143,5 +147,6 @@ async fn task_3(list: &'static StorageList<CriticalSectionRawMutex>) {
             down: 25,
             strange: 108,
         })
-        .await;
+        .await
+        .unwrap();
 }

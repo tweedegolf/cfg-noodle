@@ -1,25 +1,17 @@
-//! This is a rough shape of an intrusive approach to storing configuration data.
-//!
-//! Some things are still "fake", for the sake of simplicity, but the goal is
-//! to brain-dump the conceptual shape of the problem, for further evaluation
-//! and development.
-//!
-//! It is (so far) poorly tested, and definitely could use tests, particularly
-//! in concert with `miri`, to ensure that we are not doing any unsound things
-//! with pointers.
-//!
-//! We will also need to make some modifications when we know "how" we want
-//! to store data, and to make the current design no-std friendly.
+//! # Intrusive Linked List for Configuration Storage
+//! This implements the [StorageList] and its [StorageListNode]s
 
-use crate::error::Error;
-use crate::logging::{debug, error, info};
+use crate::{
+    error::Error,
+    logging::{debug, error, info},
+};
 use cordyceps::{
     Linked, List,
     list::{self, IterRaw},
 };
-use core::fmt::Debug;
 use core::{
     cell::UnsafeCell,
+    fmt::Debug,
     marker::PhantomPinned,
     mem::MaybeUninit,
     num::Wrapping,
@@ -47,26 +39,6 @@ pub type Counter = Wrapping<u8>;
 ///    as well as the role of deciding when to write data TO flash
 ///    (retrieving it from each node).
 pub struct StorageList<R: ScopedRawMutex> {
-    /// This uses a `BlockingMutex`, a mutex that wraps access in a
-    /// non-async closure. The mutex contains a `List`, which is a
-    /// doubly-linked intrusive list. Unlike my other Pin-based research,
-    /// in this impl we ONLY support `'static` nodes, which means we
-    /// could MAYBE switch to an async mutex instead of a blocking mutex,
-    /// because we don't need load-bearing-blocking-drop impls that unchain
-    /// nodes from the list on drop (necessary when you are storing in Pin),
-    /// which might make async interactions with the flash driver easier.
-    ///
-    /// This is a thing to verify for soundness before/after changing to
-    /// an async mutex! Also: We almost CERTAINLY do NOT want to use
-    /// embassy's async mutex - it only stores a single waker, which means
-    /// if we have contention, we will have "waker churn" problems. You
-    /// probably want to use `maitake-sync::Mutex`, which has the same
-    /// generic lock interface, and uses a `WaitQueue`, which is an intrusive
-    /// waker list, allowing for multiple wakers.
-    ///
-    /// See `impl Drop for StorageListNode` for more potential issues with an
-    /// async mutex.
-    ///
     /// The type parameter `R` allows us to be generic over kinds of mutex
     /// impls, allowing for use of a `std` mutex on `std`, and for things
     /// like `CriticalSectionRawMutex` or `ThreadModeRawMutex` on no-std
@@ -88,23 +60,17 @@ pub struct StorageList<R: ScopedRawMutex> {
     /// Header, which is the first field in `Node<T>`, which is repr-C, so we
     /// can cast this back to a `Node<T>` as needed
     list: Mutex<List<NodeHeader>, R>,
-    // TODO: We probably want to put two more `WaitQueue`s here, so
-    // `StorageListNode`s can fire off an "I need to be hydrated" wake
-    // and an "I have a pending write" wake.
-    //
-    // These would allow the storage worker task to be a bit more intelligent
-    // or reactive to checking for "I have something to do", instead of having
-    // to regularly poll.
-    //
-    // needs_read: WaitQueue,
-    // needs_write: WaitQueue,
+    // TODO: do we need a `needs_read` WaitQueue?
+    // Read is only needed after attaching, and attach() does not return before
+    // the node is hydrated or initialized with a default value
+    needs_write: WaitQueue,
     reading_done: WaitQueue,
     writing_done: WaitQueue,
 }
 
 /// StorageListNode represents the storage of a single `T`, linkable to a `StorageList`
 ///
-/// "end users" will [`attach`](Self::attach) it to the [`StorageList`] to make it part of
+/// Users will [`attach`](Self::attach) it to the [`StorageList`] to make it part of
 /// the "connected configuration system".
 pub struct StorageListNode<T: 'static> {
     /// The `inner` data is "observable" in the linked list. We put it inside
@@ -132,8 +98,8 @@ where
 /// This is the actual "linked list node" that is chained to the list
 ///
 /// There is trickery afoot! The linked list is actually a linked list
-/// of `NodeHeader`, and we are using `repr(c)`` here to GUARANTEE that
-/// a pointer to a `Node<T>` is the SAME VALUE as a pointer to that
+/// of `NodeHeader`, and we are using `repr(c)` here to GUARANTEE that
+/// a pointer to a ``Node<T>`` is the SAME VALUE as a pointer to that
 /// node's `NodeHeader`. We will use this for type punning!
 #[repr(C)]
 pub struct Node<T> {
@@ -183,7 +149,7 @@ pub struct NodeHeader {
 /// of the `Node<T>`!
 ///
 /// ## State transition diagram
-///
+/// TODO: Update this if necessary
 /// ```text
 /// ┌─────────┐    ┌─────────────┐   ┌────────────────────┐
 /// │ Initial │─┬─▶│ NonResident │──▶│  DefaultUnwritten  │─┐
@@ -198,6 +164,7 @@ pub struct NodeHeader {
 ///                                  └──────────────│ WriteStarted │─┘
 ///                                                 └──────────────┘
 /// ```
+#[derive(Debug, Clone)]
 pub enum State {
     /// The node has been created, but never "hydrated" with data from the
     /// flash. In this state, we are waiting to be notified whether we can
@@ -296,6 +263,7 @@ impl<R: ScopedRawMutex + ConstInit> StorageList<R> {
     pub const fn new() -> Self {
         Self {
             list: Mutex::new_with_raw_mutex(List::new(), R::INIT),
+            needs_write: WaitQueue::new(),
             reading_done: WaitQueue::new(),
             writing_done: WaitQueue::new(),
         }
@@ -325,8 +293,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// ## Params:
     /// - `flash`: a [`Flash`] object containing the necessary information to call [`queue::push`]
     /// - `buf`: a scratch-buffer that must be large enough to hold the largest serialized node
-    ///     In practice, a buffer as large as the flash's page size is enough because sequential
-    ///     storage can not store larger items.
+    ///   In practice, a buffer as large as the flash's page size is enough because sequential
+    ///   storage can not store larger items.
     ///
     /// This method:
     ///
@@ -458,8 +426,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// ## Arguments:
     /// * `flash`: a [`Flash`] object containing the necessary information to call [`queue::push`]
     /// * `buf`: a scratch-buffer that must be large enough to hold the largest serialized node
-    ///     In practice, a buffer as large as the flash's page size is enough because sequential
-    ///     storage can not store larger items.
+    ///   In practice, a buffer as large as the flash's page size is enough because sequential
+    ///   storage can not store larger items.
     ///
     /// TODO: update this description
     /// This method:
@@ -502,7 +470,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 // TODO: Handle this differently?
                 // Neither of these cases should appear on a list that has been processed properly
                 State::Initial | State::NonResident | State::WriteStarted => {
-                    return Err(Error::InvalidState(header.key));
+                    return Err(Error::InvalidState((header.key, header.state.clone())));
                 }
             }
         }
@@ -693,23 +661,13 @@ where
 {
     /// This is a `load` function that copies out the data
     ///
-    /// TODO: we probably want a nicer handler that errors out, or awaits
-    /// if the data isn't loaded yet.
-    ///
-    /// Or we could have `attach` return some kind of `StorageListNodeHandle` that
-    /// denotes "yes the StorageList has been loaded at least once", and guarantees
-    /// that this load won't fail. This might also help with the "only attach once"
-    /// guarantee! Oh also it might solve the `AtomicPtr` thing, because only the
-    /// `StorageListNodeHandle` would need to hold the `&'static StorageList`, NOT the
-    /// `StorageListNode`. I think we should definitely do this!
-    ///
     /// Note that we *copy out*, instead of returning a ref, because we MUST hold
-    /// the guard as long as &T is live. For the blocking mutex, that's all kinds
-    /// of problematic, but even if we switch to an async mutex, holding a `MutexGuard<T>`
+    /// the guard as long as &T is live. For a blocking mutex, that's all kinds
+    /// of problematic, but even with the async mutex, holding a `MutexGuard<T>`
     /// or similiar **will inhibit all other flash operations**, which is bad!
     ///
     /// So just hold the lock and copy out.
-    pub async fn load(&self) -> T {
+    pub async fn load(&self) -> Result<T, Error> {
         // Lock the list if we look at ourself
         let _lock = self.list.list.lock().await;
 
@@ -717,32 +675,42 @@ where
         let noderef = unsafe { &mut *nodeptr };
         // is T valid?
         match noderef.header.state {
-            State::Initial => todo!(),
-            State::NonResident => todo!(),
-            State::DefaultUnwritten => {}
-            State::ValidNoWriteNeeded => {}
-            State::NeedsWrite => {}
-            State::WriteStarted => {}
+            // All these states implicate that process_reads/_writes has not finished
+            // but they hold a lock on the list, so we should never reach this piece
+            // of code while holding a lock ourselves
+            State::Initial | State::NonResident | State::WriteStarted => {
+                return Err(Error::InvalidState((
+                    noderef.header.key,
+                    noderef.header.state.clone(),
+                )));
+            }
+            State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
         }
         // yes!
-        unsafe { noderef.t.assume_init_ref().clone() }
+        Ok(unsafe { noderef.t.assume_init_ref().clone() })
     }
 
     /// Write data to the buffer, and mark the buffer as "needs to be flushed".
-    pub async fn write(&self, t: &T) {
+    pub async fn write(&self, t: &T) -> Result<(), Error> {
         let _lock = self.list.list.lock().await;
 
         let nodeptr: *mut Node<T> = self.inner.inner.get();
         let noderef = unsafe { &mut *nodeptr };
         // determine state
-        // TODO: allow writes from uninit state?
+        // TODO: allow writes from uninit (`Initial`) state?
         match noderef.header.state {
-            State::Initial => todo!("shouldn't observe"),
-            State::NonResident => todo!("shouldn't observe"),
-            State::DefaultUnwritten => {}
-            State::ValidNoWriteNeeded => {}
-            State::NeedsWrite => {}
-            State::WriteStarted => todo!("how to handle?"),
+            // `Initial` and `NonResident` can not occur for the same reason as
+            // outlined in load().
+            // `WriteStarted` can not happen either: process_writes locks the list and
+            // therefore we cannot reach this code while process_writes is running and
+            // it will not finish (and release the lock) until it finished writing.
+            State::WriteStarted | State::Initial | State::NonResident => {
+                return Err(Error::InvalidState((
+                    noderef.header.key,
+                    noderef.header.state.clone(),
+                )));
+            }
+            State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
         }
         // We do a swap instead of a write here, to ensure that we
         // call `drop` on the "old" contents of the buffer.
@@ -752,7 +720,11 @@ where
             core::mem::swap(&mut t, mutref);
         }
         noderef.header.state = State::NeedsWrite;
+
+        // Let the write task know we have work
+        self.list.needs_write.wake();
         // old T is dropped
+        Ok(())
     }
 }
 
@@ -842,7 +814,7 @@ where
     let mut cursor = Cursor::new(buf);
     let res: Result<(), minicbor::encode::Error<EndOfSlice>> = minicbor::encode(tref, &mut cursor);
 
-    info!(
+    debug!(
         "Finished serializing: {} bytes written, len_with(): {}, content: {:?}, type: {:#?}",
         cursor.position(),
         len_with(tref, &mut ()),
@@ -888,6 +860,7 @@ where
 
     let t = match res {
         Ok(t) => t,
+        // TODO: Should we return the actual error here or not?
         Err(_) => return Err(()),
     };
 
@@ -901,14 +874,15 @@ where
 // --------------------------------------------------------------------------
 // Helper structs and functions
 // --------------------------------------------------------------------------
+
 /// Wrapper for [`IterRaw`] that implements `Send`, until this issue is resolved:
 /// https://github.com/hawkw/mycelium/issues/535
 struct StaticRawIter<'a> {
     iter: IterRaw<'a, NodeHeader>,
 }
-unsafe impl<'a> Send for StaticRawIter<'a> {}
+unsafe impl Send for StaticRawIter<'_> {}
 
-impl<'a> StaticRawIter<'a> {
+impl StaticRawIter<'_> {
     fn next(&mut self) -> Option<SendPtr> {
         self.iter.next().map(|ptr| SendPtr { ptr })
     }
@@ -931,7 +905,7 @@ pub const KEY_LEN: usize = 4;
 /// Find a `NodeHeader` with the given `key` in the storage list.
 ///
 /// This function searches through the intrusive linked list of storage nodes to find
-/// a node with a matching key. 
+/// a node with a matching key.
 ///
 /// # Arguments
 /// * `list` - A mutable guard to the locked storage list
@@ -974,7 +948,7 @@ fn extract_key(item: &[u8]) -> Result<&[u8; KEY_LEN], Error> {
 fn extract_counter(item: &[u8]) -> Result<Counter, Error> {
     item.get(KEY_LEN)
         .ok_or(Error::Deserialization)
-        .map(|c| Wrapping(c.clone()))
+        .map(|c| Wrapping(*c))
 }
 
 /// Get the `payload` bytes from a list item in the flash.
@@ -1055,15 +1029,15 @@ pub fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Result<
 #[cfg(all(test, feature = "_test"))]
 mod test {
     extern crate std;
-    use std::time::Duration;
-
     use super::*;
-    use log::warn;
+
+    use crate::logging::warn;
+    use core::time::Duration;
     use minicbor::CborLen;
-    use test_log::test;
-    // use mock_flash::MockFlashBase;
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
+    use sequential_storage::mock_flash::MockFlashBase;
     use sequential_storage::mock_flash::WriteCountCheck;
+    use test_log::test;
     use tokio::time::sleep;
 
     #[derive(Debug, Encode, Decode, Clone, PartialEq, CborLen)]
@@ -1095,11 +1069,7 @@ mod test {
             StorageListNode::new("positron/config2");
 
         let mut flash = Flash {
-            flash: sequential_storage::mock_flash::MockFlashBase::<10, 16, 256>::new(
-                WriteCountCheck::OnceOnly,
-                None,
-                true,
-            ),
+            flash: MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true),
             range: 0x0000..0x1000,
         };
         // TODO: Figure out why miri tests with unaligned buffers and whether
@@ -1147,7 +1117,7 @@ mod test {
             .expect("This should not error!");
 
         // Load data for thje first handle
-        let data: PositronConfig = config_handle.load().await;
+        let data: PositronConfig = config_handle.load().await.unwrap();
         info!("T3 Got {data:?}");
 
         // Assert that the counter is still None
@@ -1165,13 +1135,13 @@ mod test {
             down: 25,
             strange: 108,
         };
-        config_handle.write(&new_config).await;
+        config_handle.write(&new_config).await.unwrap();
 
         // Give the worker_task some time to process the write
         sleep(Duration::from_millis(100)).await;
 
         // Assert that the loaded value equals the written value
-        assert_eq!(config_handle.load().await, new_config);
+        assert_eq!(config_handle.load().await.unwrap(), new_config);
 
         // Assert that the counter is now 1
         assert_eq!(
@@ -1230,11 +1200,7 @@ mod test {
 
         let worker_task = tokio::task::spawn(async move {
             let mut flash = Flash {
-                flash: sequential_storage::mock_flash::MockFlashBase::<10, 16, 256>::new(
-                    WriteCountCheck::OnceOnly,
-                    None,
-                    true,
-                ),
+                flash: MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true),
                 range: 0x0000..0x1000,
             };
 
@@ -1244,7 +1210,7 @@ mod test {
                 &mut flash.flash(),
                 range,
                 &mut NoCache::new(),
-                &mut serialization_buf[..used],
+                &serialization_buf[..used],
                 false,
             )
             .await
@@ -1275,11 +1241,14 @@ mod test {
 
         assert_eq!(
             custom_config,
-            expecting_already_present.load().await,
+            expecting_already_present.load().await.unwrap(),
             "Key should already be present"
         );
 
-        expecting_already_present.write(&custom_config).await;
+        expecting_already_present
+            .write(&custom_config)
+            .await
+            .unwrap();
 
         sleep(Duration::from_millis(50)).await;
 
