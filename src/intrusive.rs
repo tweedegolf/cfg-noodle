@@ -481,7 +481,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
         flash: &mut Flash<impl MultiwriteNorFlash>,
         buf: &mut [u8],
     ) -> Result<(), Error> {
-        info!("Start process_writes");
+        debug!("Start process_writes");
 
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
@@ -517,7 +517,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
         // If the list is unchanged, there is no need to write it to flash!
         if !needs_writing {
-            info!("List does not need writing. Exiting.");
+            debug!("List does not need writing. Exiting.");
             return Ok(());
         }
 

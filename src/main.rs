@@ -13,7 +13,7 @@ pub mod intrusive;
 
 #[tokio::main]
 async fn main() {
-    simple_logger::SimpleLogger::new().init().unwrap();
+    simple_logger::SimpleLogger::new().without_timestamps().init().unwrap();
     tokio::task::spawn(task_1(&GLOBAL_LIST));
     tokio::task::spawn(task_2(&GLOBAL_LIST));
     tokio::task::spawn(task_3(&GLOBAL_LIST));
@@ -33,23 +33,11 @@ async fn main() {
         .await
         .unwrap();
 
-    /*
-    flash.insert(
-        "encabulator/config".to_string(),
-        minicbor::to_vec(&EncabulatorConfigV1 { polarity: true }).unwrap(),
-    );
-    flash.insert(
-        "grammeter/config".to_string(),
-        minicbor::to_vec(&GrammeterConfig { radiation: 100.0 }).unwrap(),
-    );
-    */
-    // no positron config
-
     // give time for tasks to attach
     sleep(Duration::from_millis(100)).await;
     // process reads
-    let mut buf = Vec::new();
-    GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
+    let buf = &mut [0u8; 4096];
+    GLOBAL_LIST.process_reads(&mut flash, buf).await;
 
     for _ in 0..10 {
         sleep(Duration::from_secs(1)).await;
@@ -61,7 +49,7 @@ async fn main() {
             ),
             0x0000..0x1000,
         );
-        if let Err(e) = GLOBAL_LIST.process_writes(&mut flash2, &mut buf).await {
+        if let Err(e) = GLOBAL_LIST.process_writes(&mut flash2, buf).await {
             error!("Error in process_writes: {}", e);
         }
         info!("NEW WRITES: {}", flash2.flash().print_items().await);
