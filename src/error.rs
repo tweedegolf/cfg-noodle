@@ -4,6 +4,8 @@ use crate::intrusive::KEY_LEN;
 pub enum Error {
     #[error("Deserialization failed!")]
     Deserialization,
+    #[error("Serialization failed!")]
+    Serialization,
     #[error("Duplicate key!")]
     DuplicateKey,
     #[error("Invalid Node State! Key {0:?}")]

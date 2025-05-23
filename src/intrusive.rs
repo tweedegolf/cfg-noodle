@@ -12,10 +12,12 @@
 //! to store data, and to make the current design no-std friendly.
 
 use crate::error::Error;
+use crate::logging::{debug, error, info};
 use cordyceps::{
     Linked, List,
     list::{self, IterRaw},
 };
+use core::fmt::Debug;
 use core::{
     cell::UnsafeCell,
     marker::PhantomPinned,
@@ -24,7 +26,7 @@ use core::{
     ptr::{self, NonNull},
 };
 use embedded_storage_async::nor_flash::MultiwriteNorFlash;
-use maitake_sync::{Mutex, WaitQueue};
+use maitake_sync::{Mutex, MutexGuard, WaitQueue};
 use minicbor::{
     CborLen, Decode, Encode,
     encode::write::{Cursor, EndOfSlice},
@@ -32,8 +34,6 @@ use minicbor::{
 };
 use mutex::{ConstInit, ScopedRawMutex};
 use sequential_storage::{cache::NoCache, queue};
-use core::fmt::Debug;
-use crate::logging::{debug, error, info};
 
 pub type Counter = Wrapping<u8>;
 
@@ -88,9 +88,9 @@ pub struct StorageList<R: ScopedRawMutex> {
     /// Header, which is the first field in `Node<T>`, which is repr-C, so we
     /// can cast this back to a `Node<T>` as needed
     list: Mutex<List<NodeHeader>, R>,
-    // TODO: We probably want to put one or two `WaitQueue`s here, so
-    // `StorageListNode`s can fire off an "I need to be hydrated" wake, and one
-    // so `StorageListNode`s can fire off an "I have a pending write" wake.
+    // TODO: We probably want to put two more `WaitQueue`s here, so
+    // `StorageListNode`s can fire off an "I need to be hydrated" wake
+    // and an "I have a pending write" wake.
     //
     // These would allow the storage worker task to be a bit more intelligent
     // or reactive to checking for "I have something to do", instead of having
@@ -169,7 +169,7 @@ pub struct NodeHeader {
     /// This helps determine which entry is the newest, should there ever be
     /// two entries for the same key.
     /// A `None` value indicates that the node has not been found in flash (yet)
-    ///  and the counter is not yet initialized.
+    /// and the counter is not yet initialized.
     counter: Option<Counter>,
     /// This is the type-erased serialize/deserialize `VTable` that is
     /// unique to each `T`, and will be used by the storage worker
@@ -214,14 +214,8 @@ pub enum State {
     /// In this state, `t` is NOT valid, and is uninitialized. it MUST NOT be
     /// read.
     NonResident,
-    /// The value has been initialized using a default value (NOT from flash).
-    ///
-    /// TODO: Decide what our policy is for this: SHOULD we write default values
-    /// back to flash, or keep them out of flash until there has been an explict
-    /// change to the default value?
-    /// If we don't flash it, we reduce wear on the flash and save some time.
-    /// However, if the `default()` value changes (e.g., firmware update) this
-    /// gives a different result.
+    /// The value has been initialized using a default value (NOT from flash)
+    /// and needs to be written to flash.
     ///
     /// In this state, `t` IS valid, and may be read at any time (by the holder
     /// of the lock).
@@ -328,6 +322,12 @@ impl<R: ScopedRawMutex + ConstInit> Default for StorageList<R> {
 impl<R: ScopedRawMutex> StorageList<R> {
     /// Process any nodes that are requesting flash data
     ///
+    /// ## Params:
+    /// - `flash`: a [`Flash`] object containing the necessary information to call [`queue::push`]
+    /// - `buf`: a scratch-buffer that must be large enough to hold the largest serialized node
+    ///     In practice, a buffer as large as the flash's page size is enough because sequential
+    ///     storage can not store larger items.
+    ///
     /// This method:
     ///
     /// 1. Locks the mutex
@@ -370,19 +370,19 @@ impl<R: ScopedRawMutex> StorageList<R> {
             if is_write_confirm(&item) {
                 info!("Found write_confirm");
                 // write_confirm_found = true;
-                // TODO: what next? And what if we never run into this?
+                // TODO: what next? And what if we don't find any write_confirm block?
             } else if let Some(node_header) = find_node(&mut ls, key) {
                 // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
-                // to the contents of the node. We COPY OUT the vtable and the &'static str
-                // key, for later use, which is important because we might throw away our
-                // `node` ptr shortly.
+                // to the contents of the node. We COPY OUT the vtable for later use,
+                // which is important because we might throw away our `node` ptr shortly.
                 let vtable = {
                     let node_header = unsafe { node_header.as_ref() };
                     match node_header.state {
                         State::Initial => Some(node_header.vtable),
                         State::NonResident => None,
                         State::DefaultUnwritten => None,
-                        State::ValidNoWriteNeeded => None, // TODO: Handle the case where this comes up again with a different counter value
+                        // TODO: Handle the case where a key is found again (with a different counter value)
+                        State::ValidNoWriteNeeded => None,
                         State::NeedsWrite => None,
                         State::WriteStarted => None,
                     }
@@ -402,7 +402,6 @@ impl<R: ScopedRawMutex> StorageList<R> {
                     // might want to think about drop!
                     let res = (vtable.deserialize)(nodeptr, payload);
 
-                    // TODO: Can this happen before the `if let Some(val)` so we don't repeat it in the `else`?
                     // SAFETY: We can re-magic a reference to the header, because the NonNull<Node<()>>
                     // does not have a live reference anymore
                     let hdrmut = unsafe { hdrptr.as_mut() };
@@ -427,13 +426,6 @@ impl<R: ScopedRawMutex> StorageList<R> {
                     // The node has asked for data, and our flash has nothing for it. Let the node
                     // know that there's definitely nothing to wait for anymore, and it should
                     // figure out it's own data, probably from Default::default().
-                    //
-                    // TODO: if we read from the external flash in "chunks", e.g. one page at a time,
-                    // we MIGHT not want to mark this fully "NonResident" yet, and wait until we have
-                    // processed ALL chunks, and THEN mark any `Initial` nodes as `NonResident`.
-                    // let hdrmut = unsafe { hdrptr.as_mut() };
-                    // hdrmut.state = State::NonResident;
-                    // self.reading_done.wake_all();
                 }
             }
         }
@@ -463,9 +455,9 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// If any of the nodes has pending writes, this function writes the
     /// entire list to flash.
     ///
-    /// ## Params:
-    /// - `flash`: a [`Flash`] object containing the necessary information to call [`queue::push`]
-    /// - `buf`: a scratch-buffer that must be large enough to hold the largest serialized node
+    /// ## Arguments:
+    /// * `flash`: a [`Flash`] object containing the necessary information to call [`queue::push`]
+    /// * `buf`: a scratch-buffer that must be large enough to hold the largest serialized node
     ///     In practice, a buffer as large as the flash's page size is enough because sequential
     ///     storage can not store larger items.
     ///
@@ -524,7 +516,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
         // Increase the counter for this list by one
         let counter = max_counter + Wrapping(1);
         debug!("New counter: {}", counter);
-        
+
         // Update counters before writing the list to flash
         // We do this before serialization because that may fail and
         // we want to avoid diverging counter values...
@@ -542,7 +534,11 @@ impl<R: ScopedRawMutex> StorageList<R> {
             let res = serialize_node(hdrptr.ptr, buf);
 
             if let Ok(used) = res {
-                debug!("Pushing to flash: {:?}, addr {:x}", &buf[..used], buf.as_ptr() as usize);
+                debug!(
+                    "Pushing to flash: {:?}, addr {:x}",
+                    &buf[..used],
+                    buf.as_ptr() as usize
+                );
                 // Write to flash
                 queue::push(
                     &mut flash.flash,
@@ -594,8 +590,7 @@ where
     T: CborLen<()>,
     for<'a> T: Decode<'a, ()>,
     T: Default + Clone,
-    T: Debug, // TODO: Remove all those Debug trait bounds? Just added for debuggin
-              //R: ScopedRawMutex + 'static,
+    T: Debug, // TODO: Remove all those Debug trait bounds? Just added for debugging
 {
     /// Make a new StorageListNode, initially empty and unattached
     pub const fn new(path: &'static str) -> Self {
@@ -638,7 +633,8 @@ where
 
             // Check if the key already exists in the list.
             // This also prevents attaching to the list more than once.
-            // TODO: Check safety of this!
+            // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
+            // to the contents of the node.
             let key = unsafe { &nodenn.as_ref().header.key };
             if find_node(&mut ls, key).is_some() {
                 error!("Key already in use: {:?}", key);
@@ -649,7 +645,7 @@ where
             debug!("attach() release Lock on list");
         }
 
-        // now spin until we have a value, or we know it is non-resident
+        // Wait until we have a value, or we know it is non-resident
         loop {
             debug!("Waiting for reading_done");
             list.reading_done
@@ -665,6 +661,9 @@ where
             let noderef: &mut Node<T> = unsafe { &mut *nodeptr };
             // Are we in a state with a valid T?
             match noderef.header.state {
+                // TODO: This should not really happen because it means we attached in
+                // the middle of the read process. Which would us and the read process
+                // have the list locked simultaneously.
                 State::Initial => continue,
                 State::NonResident => {
                     // We are nonresident, we need to initialize
@@ -681,73 +680,6 @@ where
 
         Ok(StorageListNodeHandle { list, inner: self })
     }
-}
-
-/// Key length in bytes
-pub const KEY_LEN: usize = 4;
-
-/// Find a `NodeHeader` with the given `key`.
-///
-/// If `key` is not in the `List`, this function returns `None`.
-fn find_node(list: &mut List<NodeHeader>, key: &[u8; KEY_LEN]) -> Option<NonNull<NodeHeader>> {
-    // TODO: Check if the safety requirements are upheld!
-    // It seems like we should not use `iter` for the same reason we use `raw_iter` instead in read/write
-    list.iter_raw()
-        .find(|item| unsafe { item.as_ref() }.key == *key)
-}
-
-/// Get the `key` bytes from a list item in the flash.
-/// Used to extract the key from a `QueueIteratorItem`.
-fn extract_key(item: &[u8]) -> Result<&[u8; KEY_LEN], Error> {
-    item[..KEY_LEN]
-        .try_into()
-        .map_err(|_| Error::Deserialization)
-}
-
-/// Get the `counter` byte from a list item in the flash.
-/// Used to extract the counter from a `QueueIteratorItem`.
-fn extract_counter(item: &[u8]) -> Result<Counter, Error> {
-    item.get(KEY_LEN)
-        .ok_or(Error::Deserialization)
-        .map(|c| Wrapping(c.clone()))
-}
-
-const COUNTER_THRESHOLD: u8 = 10;
-fn is_newer(counter: Counter, compared_to: Counter) -> bool {
-    compared_to - counter > Wrapping(COUNTER_THRESHOLD)
-}
-
-/// Get the `payload` bytes from a list item in the flash.
-/// Used to extract the payload from a `QueueIteratorItem`.
-fn extract_payload(item: &[u8]) -> Result<&[u8], Error> {
-    item.get(KEY_LEN + 1..).ok_or(Error::Deserialization)
-}
-
-/// Check if the list item in the flash is a `write_confirm` block.
-fn is_write_confirm(item: &[u8]) -> bool {
-    item[..KEY_LEN].iter().all(|&elem| elem == 0)
-}
-
-/// Serialize a list node into `buf`.
-///
-/// Returns the number of bytes written to `buf` or an error.
-pub fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Result<usize, ()> {
-    let (vtable, key, counter) = {
-        let node = unsafe { headerptr.as_ref() };
-        (node.vtable, node.key, node.counter)
-    };
-
-    debug!(
-        "serializing node with key <{:?}>, counter <{:?}>",
-        key, counter
-    );
-
-    let nodeptr: NonNull<Node<()>> = headerptr.cast();
-
-    // Attempt to serialize
-    buf[0..KEY_LEN].copy_from_slice(&key);
-    buf[KEY_LEN] = counter.map(|c| c.0).unwrap_or(0);
-    (vtable.serialize)(nodeptr, &mut buf[KEY_LEN + 1..]).map(|len| len + KEY_LEN + 1)
 }
 
 // --------------------------------------------------------------------------
@@ -966,15 +898,15 @@ where
     Ok(len)
 }
 
+// --------------------------------------------------------------------------
+// Helper structs and functions
+// --------------------------------------------------------------------------
+/// Wrapper for [`IterRaw`] that implements `Send`, until this issue is resolved:
+/// https://github.com/hawkw/mycelium/issues/535
 struct StaticRawIter<'a> {
     iter: IterRaw<'a, NodeHeader>,
 }
 unsafe impl<'a> Send for StaticRawIter<'a> {}
-
-struct SendPtr {
-    ptr: NonNull<NodeHeader>,
-}
-unsafe impl Send for SendPtr {}
 
 impl<'a> StaticRawIter<'a> {
     fn next(&mut self) -> Option<SendPtr> {
@@ -982,9 +914,147 @@ impl<'a> StaticRawIter<'a> {
     }
 }
 
+/// Wrapper for [`NonNull<NodeHeader>`] that implements `Send`.
+///
+/// ## Safety
+/// This must only be used when the List mutex is locked and Node and Anchor
+/// live &'static.
+/// TODO: Review and expand on the exact requirements for using this.
+struct SendPtr {
+    ptr: NonNull<NodeHeader>,
+}
+unsafe impl Send for SendPtr {}
+
+/// Node Key length in bytes
+pub const KEY_LEN: usize = 4;
+
+/// Find a `NodeHeader` with the given `key` in the storage list.
+///
+/// This function searches through the intrusive linked list of storage nodes to find
+/// a node with a matching key. 
+///
+/// # Arguments
+/// * `list` - A mutable guard to the locked storage list
+/// * `key` - The key to search for (fixed-size byte array)
+///
+/// # Returns
+/// * `Some(NonNull<NodeHeader>)` - A non-null pointer to the matching node header
+/// * `None` - If no node with the given key exists in the list
+///
+/// # Safety
+/// This function is safe to call as long as the caller holds the storage list mutex
+/// (which is enforced by taking a `MutexGuard` parameter). The raw iteration and
+/// unsafe pointer dereferencing are sound because:
+/// - The mutex guard ensures exclusive access to the list contents
+/// - All nodes in the list are guaranteed to be valid and properly initialized
+///   (payload is not read)
+/// - The `NonNull` pointers returned by `iter_raw()` are guaranteed to be valid
+fn find_node<R: ScopedRawMutex>(
+    list: &mut MutexGuard<List<NodeHeader>, R>,
+    key: &[u8; KEY_LEN],
+) -> Option<NonNull<NodeHeader>> {
+    // TODO: Check if the safety requirements are upheld!
+    // It seems like we should not use `iter` for the same reason we use `raw_iter` instead in read/write
+    // SAFETY: Since we hold a lock on the List (taking MutexGuard as a parameter)
+    // we have exclusive access to the contents of the list.
+    list.iter_raw()
+        .find(|item| unsafe { item.as_ref() }.key == *key)
+}
+
+/// Get the `key` bytes from a list item in the flash.
+/// Used to extract the key from a `QueueIteratorItem`.
+fn extract_key(item: &[u8]) -> Result<&[u8; KEY_LEN], Error> {
+    item[..KEY_LEN]
+        .try_into()
+        .map_err(|_| Error::Deserialization)
+}
+
+/// Get the `counter` byte from a list item in the flash.
+/// Used to extract the counter from a `QueueIteratorItem`.
+fn extract_counter(item: &[u8]) -> Result<Counter, Error> {
+    item.get(KEY_LEN)
+        .ok_or(Error::Deserialization)
+        .map(|c| Wrapping(c.clone()))
+}
+
+/// Get the `payload` bytes from a list item in the flash.
+/// Used to extract the payload from a `QueueIteratorItem`.
+fn extract_payload(item: &[u8]) -> Result<&[u8], Error> {
+    item.get(KEY_LEN + 1..).ok_or(Error::Deserialization)
+}
+
+/// Check if the list item in the flash is a `write_confirm` block.
+fn is_write_confirm(item: &[u8]) -> bool {
+    item[..KEY_LEN].iter().all(|&elem| elem == 0)
+}
+
+/// Defines the threshold for determining when a counter value should be considered "newer".
+///
+/// When comparing counters that use `Wrapping<u8>`, we need to handle counter wraparound.
+/// The threshold represents how far apart counters can be before we consider the higher
+/// counter to have wrapped around to a lower value.
+const COUNTER_THRESHOLD: u8 = 10;
+
+/// Determines if `counter` is newer than `compared_to`, handling wraparound for `Wrapping<u8>`.
+///
+/// This function uses an arithmetic trick to handle the wraparound case. When subtracting a
+/// newer counter from an older one, the result will be a large number due to wraparound.
+/// For example, if counter=5 and compared_to=250, then 250-5=245, which is greater than
+/// the threshold, indicating that 5 is newer than 250 (after wraparound).
+///
+/// # Arguments
+/// * `counter` - The counter to check if it's newer
+/// * `compared_to` - The counter to compare against
+///
+/// # Returns
+/// `true` if `counter` is newer than `compared_to`, accounting for wraparound
+fn is_newer(counter: Counter, compared_to: Counter) -> bool {
+    compared_to - counter > Wrapping(COUNTER_THRESHOLD)
+}
+
+/// This function serializes a storage node by writing its key, counter, and payload data
+/// into the provided buffer in a specific format:
+/// - Bytes 0..KEY_LEN: The node's key
+/// - Byte KEY_LEN: The counter value (or 0 if no counter is set)
+/// - Bytes KEY_LEN+1..: The serialized payload data (using the node's vtable)
+///
+/// # Arguments
+/// * `headerptr` - A non-null pointer to the NodeHeader to serialize
+/// * `buf` - The buffer to write the serialized data into
+///
+/// # Returns
+/// * `Ok(usize)` - The total number of bytes written to the buffer
+/// * `Err(())` - If serialization fails (e.g., buffer too small, serialization error)
+///
+/// # Safety
+/// The caller must ensure that:
+/// - `headerptr` points to a valid NodeHeader
+/// - The storage list mutex is held during the entire operation
+/// - The buffer is large enough to hold the serialized data
+pub fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Result<usize, Error> {
+    let (vtable, key, counter) = {
+        let node = unsafe { headerptr.as_ref() };
+        (node.vtable, node.key, node.counter)
+    };
+
+    debug!(
+        "serializing node with key <{:?}>, counter <{:?}>",
+        key, counter
+    );
+
+    let nodeptr: NonNull<Node<()>> = headerptr.cast();
+
+    // Attempt to serialize
+    buf[0..KEY_LEN].copy_from_slice(&key);
+    buf[KEY_LEN] = counter.map(|c| c.0).unwrap_or(0);
+    (vtable.serialize)(nodeptr, &mut buf[KEY_LEN + 1..])
+        .map(|len| len + KEY_LEN + 1)
+        .map_err(|_| Error::Serialization)
+}
+
 #[cfg(all(test, feature = "_test"))]
 mod test {
- extern crate std;
+    extern crate std;
     use std::time::Duration;
 
     use super::*;
@@ -1035,7 +1105,7 @@ mod test {
         // TODO: Figure out why miri tests with unaligned buffers and whether
         // this needs any fixing. For now just disable the alignment check in MockFlash
         flash.flash().alignment_check = false;
-        
+
         let range = flash.range();
         sequential_storage::erase_all(&mut flash.flash(), range)
             .await
@@ -1179,7 +1249,6 @@ mod test {
             )
             .await
             .expect("pushing to flash should not fail here");
-
 
             for _ in 0..10 {
                 warn!("Flash content: {}", flash.flash.print_items().await);
