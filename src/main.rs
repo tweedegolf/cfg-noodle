@@ -1,15 +1,12 @@
 use std::time::Duration;
 
-use intrusive::{Flash, StorageList, StorageListNode};
+use cfg_noodle::intrusive::{Flash, StorageList, StorageListNode};
 use log::{error, info};
 use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use sequential_storage::mock_flash::WriteCountCheck;
 use tokio::time::sleep;
 
-pub mod error;
-pub mod hashmap;
-pub mod intrusive;
 
 #[tokio::main]
 async fn main() {

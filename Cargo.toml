@@ -3,28 +3,52 @@ edition = "2024"
 name = "cfg-noodle"
 version = "0.1.0"
 
+[[bin]]
+name = "main"
+path = "src/main.rs"
+required-features = ["_test"]
+
 [features]
-_test = ["std"]
-std = []
+# TODO: Delete this feature? On std it will always be enabled
+_test = ["std", "sequential-storage/_test"]
+std = [
+    "minicbor/std",
+    "sequential-storage/std",
+    "critical-section/std",
+    "maitake-sync/std",
+    "mutex/std",
+    "dep:log",
+    "dep:simple_logger",
+    "dep:tokio",
+]
+defmt = ["dep:defmt"]
 
 [dependencies]
 const-fnv1a-hash = "1.1.0"
 embedded-storage-async = "0.4.1"
-minicbor = { version = "0.26.5", features = ["derive", "std"] }
-sequential-storage = { version = "4.0.1", features = ["_test", "std"] }
-tokio = { version = "1.44.2", features = ["macros", "rt-multi-thread", "time"] }
+minicbor = { version = "1.0.0", features = ["derive"] }
+sequential-storage = "4.0.1"
 
 cordyceps = "0.3.4"
-critical-section = { version = "1.2.0", features = ["std"] }
-maitake-sync = { version = "0.2.1", features = ["std"] }
-mutex = { version = "1.0.0", features = ["impl-critical-section", "std"] }
+critical-section = "1.2.0"
+maitake-sync = "0.2.1"
+mutex = { version = "1.0.0", features = ["impl-critical-section"] }
+
 pin-project = "1.1.10"
 thiserror = { version = "2.0.12", default-features = false }
-log = "0.4.27"
-simple_logger = "5.0.0"
-test-log = "0.2.17"
+
+log = { version = "0.4.27", optional = true }
+simple_logger = { version = "5.0.0", optional = true }
+tokio = { version = "1.45.0", optional = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "time",
+] }
+
+defmt = { version = "1.0.1", optional = true }
 
 [dev-dependencies]
 approx = "0.5.1"
-futures = { version = "0.3.30", features = ["executor"] }
-futures-test = "0.3.30"
+futures = { version = "0.3.31", features = ["executor"] }
+futures-test = "0.3.31"
+test-log = "0.2.17"

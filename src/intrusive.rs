@@ -24,7 +24,6 @@ use core::{
     ptr::{self, NonNull},
 };
 use embedded_storage_async::nor_flash::MultiwriteNorFlash;
-use log::{debug, error, info};
 use maitake_sync::{Mutex, WaitQueue};
 use minicbor::{
     CborLen, Decode, Encode,
@@ -33,7 +32,8 @@ use minicbor::{
 };
 use mutex::{ConstInit, ScopedRawMutex};
 use sequential_storage::{cache::NoCache, queue};
-use std::fmt::Debug;
+use core::fmt::Debug;
+use crate::logging::{debug, error, info};
 
 pub type Counter = Wrapping<u8>;
 
@@ -646,7 +646,7 @@ where
             } else {
                 ls.push_front(hdrnn);
             }
-            debug!("attach() release Lock on list")
+            debug!("attach() release Lock on list");
         }
 
         // now spin until we have a value, or we know it is non-resident
@@ -960,7 +960,6 @@ where
     };
 
     let len = len_with(&t, &mut ());
-    println!("Finished deserializing, len_with(): {}", len);
 
     noderef.t = MaybeUninit::new(t);
 
@@ -983,8 +982,9 @@ impl<'a> StaticRawIter<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "_test"))]
 mod test {
+ extern crate std;
     use std::time::Duration;
 
     use super::*;
@@ -1043,7 +1043,7 @@ mod test {
 
         info!("Spawn worker_task");
         let worker_task = tokio::task::spawn(async move {
-            let mut buf = vec![0u8; 4096];
+            let mut buf = std::vec![0u8; 4096];
 
             for _ in 0..10 {
                 GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
@@ -1149,7 +1149,7 @@ mod test {
             .expect("Serializing node should not fail");
 
         // Now serialize again by calling encode() directly and verify both match
-        let mut serialize_control = vec![];
+        let mut serialize_control = std::vec![];
         let len = len_with(&custom_config, &mut ());
         minicbor::encode(&custom_config, &mut serialize_control).unwrap();
         // The serialized node will contain some metadata, but the last `len` bytes must match
