@@ -181,6 +181,10 @@ pub enum State {
     /// In this state, `t` is NOT valid, and is uninitialized. it MUST NOT be
     /// read.
     NonResident,
+    /// The node has been found but did not have the latest counter value
+    /// assigned, so it is not from the latest write. The user must decide
+    /// what to do now.
+    OldData,
     /// The value has been initialized using a default value (NOT from flash)
     /// and needs to be written to flash.
     ///
@@ -320,6 +324,11 @@ impl<R: ScopedRawMutex> StorageList<R> {
         let mut ls = self.list.lock().await;
         debug!("process_reads locked list");
 
+        // Store the counter of the last write_confirm block we found so that later on
+        // we know if the latest counter we found has actually been confirmed
+        let mut latest_write_confirm: Option<Counter> = None;
+        let mut latest_counter: Option<Counter> = None;
+
         // Create a `QueueIterator` without caching
         let mut cache = NoCache::new();
         let mut queue_iter = queue::iter(&mut flash.flash, flash.range.clone(), &mut cache)
@@ -327,18 +336,17 @@ impl<R: ScopedRawMutex> StorageList<R> {
             .unwrap();
         while let Some(item) = queue_iter.next(buf).await.unwrap() {
             let key: &[u8; KEY_LEN] = extract_key(&item).expect("Invalid item: no key");
-            let counter: Counter = extract_counter(&item).expect("Invalid item: no counter"); // TODO handle counter
+            latest_counter.replace(extract_counter(&item).expect("Invalid item: no counter"));
             let payload: &[u8] = extract_payload(&item).expect("Invalid item: no payload");
 
             debug!(
                 "Extracted metadata: key {:?}, counter: {:?}, payload: {:?}",
-                key, counter, payload
+                key, latest_counter, payload
             );
             // Check for the write_confirm key
             if is_write_confirm(&item) {
-                info!("Found write_confirm");
-                // write_confirm_found = true;
-                // TODO: what next? And what if we don't find any write_confirm block?
+                info!("Found write_confirm for counter {:?}", latest_counter);
+                latest_write_confirm.replace(latest_counter.unwrap()); // Safe to unwrap because we replace it before
             } else if let Some(node_header) = find_node(&mut ls, key) {
                 // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
                 // to the contents of the node. We COPY OUT the vtable for later use,
@@ -349,6 +357,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
                         State::Initial => Some(node_header.vtable),
                         State::NonResident => None,
                         State::DefaultUnwritten => None,
+                        State::OldData => None,
                         // TODO: Handle the case where a key is found again (with a different counter value)
                         State::ValidNoWriteNeeded => None,
                         State::NeedsWrite => None,
@@ -376,9 +385,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
                     if res.is_ok() {
                         // If it went okay, let the node know that it has been hydrated with data
-                        // from the flash
-                        hdrmut.state = State::ValidNoWriteNeeded;
-                        hdrmut.counter.replace(counter);
+                        // from the flash by setting its counter value
+                        hdrmut.counter.replace(latest_counter.unwrap()); // Safe to unwrap because we replaced it before
                         self.reading_done.wake_all();
                     } else {
                         // If there WAS a key, but the deser failed, this means that either the data
@@ -397,7 +405,6 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 }
             }
         }
-        // TODO: handle write_confirm_found == false
 
         // Set nodes in initial states to non resident
         for node_header in ls.iter_raw() {
@@ -410,8 +417,41 @@ impl<R: ScopedRawMutex> StorageList<R> {
             // does not have a live reference anymore
             let hdrmut = unsafe { hdrptr.as_mut() };
 
+            // After reading has finished, there are several possible situations:
+            // - Node was found with the latest counter value
+            //   hdrmut.counter == latest_counter -> `ValidNoWriteNeeded`
+            // - Node was found, but with an older counter value
+            //   hdrmut.counter != latest_counter
+            //   - We have not found a write_confirm block (for the latest counter value)
+            //     latest_counter != latest_write_confirm -> `OldData` and return an error in attach
+            //   - We have found write_confirm block (for the latest counter value)
+            //     latest_counter == latest_write_confirm -> `NonResident` and delete its payload (?)
+            // - Node was not found - regardless of a write_confirm block -> `NonResident`
+            //   hdrmut.counter == None
+            //
+            // If the hdrmut.state is not initial, the node has already been handled elsewhere
             if let State::Initial = hdrmut.state {
-                hdrmut.state = State::NonResident
+                hdrmut.state = match (hdrmut.counter, latest_counter, latest_write_confirm) {
+                    // Best case: node counter matches the latest counter value
+                    (Some(counter), Some(latest), _) if counter == latest => {
+                        State::ValidNoWriteNeeded
+                    }
+                    // Node contains an old counter and the latest counter has a write_confirm block
+                    (Some(_counter), Some(latest), Some(write_confirm))
+                        if latest == write_confirm =>
+                    {
+                        State::NonResident
+                    }
+                    // Node contains an old counter but the newest one does not have a write_confirm block
+                    (Some(_counter), Some(_latest), _) => State::OldData,
+                    // Node has not occured once (hence its counter is None)
+                    (None, _, _) => State::NonResident,
+                    // Invalid: if the state is initial and the node occured, it MUST have updated
+                    // the latest_counter
+                    (Some(_), None, _) => {
+                        panic!("latest_counter has not been set. This can not happen.")
+                    }
+                };
             }
         }
         debug!("Reading done. Waking all.");
@@ -466,7 +506,9 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 State::ValidNoWriteNeeded => (),
                 // If the node hasn't been written to flash yet and we initialized it
                 // with a Default, we now write it to flash.
-                State::DefaultUnwritten | State::NeedsWrite => needs_writing = true,
+                State::DefaultUnwritten | State::NeedsWrite | State::OldData => {
+                    needs_writing = true
+                }
                 // TODO: Handle this differently?
                 // Neither of these cases should appear on a list that has been processed properly
                 State::Initial | State::NonResident | State::WriteStarted => {
@@ -578,7 +620,12 @@ where
     }
 
     // Attaches node to a list and waits for hydration.
-    // If the value is not found in flash, a default value is used
+    // If the value is not found in flash, a default value is used.
+    //
+    // If the value is found in flash but only from an older write (e.g.
+    // because the latest write operation was interrupted), the node
+    // is initialized with the default, and the value from flash is
+    // returned as an [`Error::OldData`].
     pub async fn attach<R>(
         &'static self,
         list: &'static StorageList<R>,
@@ -640,6 +687,23 @@ where
                     break;
                 }
                 State::DefaultUnwritten => todo!("shouldn't observe this in attach"),
+                State::OldData => {
+                    // TODO: Check safety requirements.
+                    // This is taken from write()
+                    //
+                    // SAFETY: we may access `noderef.t` because we hold the lock.
+                    // We do a swap instead of a write here, to ensure that we
+                    // call `drop` on the "old" contents of the buffer.
+                    let mut t = T::default();
+                    unsafe {
+                        let mutref: &mut T = noderef.t.assume_init_mut();
+                        core::mem::swap(&mut t, mutref);
+                    }
+                    return Err(Error::OldData((
+                        StorageListNodeHandle { list, inner: self },
+                        t,
+                    )));
+                }
                 State::ValidNoWriteNeeded => break,
                 State::NeedsWrite => todo!("shouldn't observe this in attach"),
                 State::WriteStarted => todo!("shouldn't observe this in attach"),
@@ -684,7 +748,10 @@ where
                     noderef.header.state.clone(),
                 )));
             }
-            State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
+            State::DefaultUnwritten
+            | State::ValidNoWriteNeeded
+            | State::NeedsWrite
+            | State::OldData => {}
         }
         // yes!
         Ok(unsafe { noderef.t.assume_init_ref().clone() })
@@ -704,7 +771,7 @@ where
             // `WriteStarted` can not happen either: process_writes locks the list and
             // therefore we cannot reach this code while process_writes is running and
             // it will not finish (and release the lock) until it finished writing.
-            State::WriteStarted | State::Initial | State::NonResident => {
+            State::WriteStarted | State::Initial | State::NonResident | State::OldData => {
                 return Err(Error::InvalidState((
                     noderef.header.key,
                     noderef.header.state.clone(),
