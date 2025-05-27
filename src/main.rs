@@ -77,7 +77,10 @@ struct EncabulatorConfigV2 {
 static ENCAB_CONFIG: StorageListNode<EncabulatorConfigV2> =
     StorageListNode::new("encabulator/config");
 async fn task_1(list: &'static StorageList<CriticalSectionRawMutex>) {
-    let config_handle = ENCAB_CONFIG.attach(list).await.unwrap();
+    let config_handle = match ENCAB_CONFIG.attach(list).await {
+        Ok(ch) => ch,
+        Err(_) => panic!("Could not attach config to list"),
+    };
     let data: EncabulatorConfigV2 = config_handle.load().await.unwrap();
     println!("T1 Got {data:?}");
     sleep(Duration::from_secs(1)).await;
@@ -101,7 +104,10 @@ struct GrammeterConfig {
 
 static GRAMM_CONFIG: StorageListNode<GrammeterConfig> = StorageListNode::new("grammeter/config");
 async fn task_2(list: &'static StorageList<CriticalSectionRawMutex>) {
-    let config_handle = GRAMM_CONFIG.attach(list).await.unwrap();
+    let config_handle = match GRAMM_CONFIG.attach(list).await {
+        Ok(ch) => ch,
+        Err(_) => panic!("Could not attach config to list"),
+    };
     let data: GrammeterConfig = config_handle.load().await.unwrap();
     println!("T2 Got {data:?}");
     sleep(Duration::from_secs(3)).await;
@@ -137,7 +143,10 @@ impl Default for PositronConfig {
 static POSITRON_CONFIG: StorageListNode<PositronConfig> = StorageListNode::new("positron/config");
 
 async fn task_3(list: &'static StorageList<CriticalSectionRawMutex>) {
-    let config_handle = POSITRON_CONFIG.attach(list).await.unwrap();
+    let config_handle = match POSITRON_CONFIG.attach(list).await {
+        Ok(ch) => ch,
+        Err(_) => panic!("Could not attach config to list"),
+    };
     let data: PositronConfig = config_handle.load().await.unwrap();
     println!("T3 Got {data:?}");
     sleep(Duration::from_secs(5)).await;

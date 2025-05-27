@@ -149,7 +149,7 @@ pub struct NodeHeader {
 /// of the `Node<T>`!
 ///
 /// ## State transition diagram
-/// TODO: Update this if necessary
+/// TODO: Update this!
 /// ```text
 /// ┌─────────┐    ┌─────────────┐   ┌────────────────────┐
 /// │ Initial │─┬─▶│ NonResident │──▶│  DefaultUnwritten  │─┐
@@ -182,8 +182,12 @@ pub enum State {
     /// read.
     NonResident,
     /// The node has been found but did not have the latest counter value
-    /// assigned, so it is not from the latest write. The user must decide
-    /// what to do now.
+    /// assigned, so it is not from the latest write. The attach() function
+    /// will set the config to the default value and return the old data, so
+    /// the user can decide.
+    ///
+    /// After assigning the default value, the state must be set to
+    /// `DefaultUnwritten`.
     OldData,
     /// The value has been initialized using a default value (NOT from flash)
     /// and needs to be written to flash.
@@ -625,11 +629,15 @@ where
     // If the value is found in flash but only from an older write (e.g.
     // because the latest write operation was interrupted), the node
     // is initialized with the default, and the value from flash is
-    // returned as an [`Error::OldData`].
+    // returned in the second element of the Result::Error tuple.
+    //
+    // # Panics
+    // This function will panic if a node with the same key(-hash) already
+    // exists in the list.
     pub async fn attach<R>(
         &'static self,
         list: &'static StorageList<R>,
-    ) -> Result<StorageListNodeHandle<T, R>, Error>
+    ) -> Result<StorageListNodeHandle<T, R>, (StorageListNodeHandle<T, R>, T)>
     where
         R: ScopedRawMutex + 'static,
     {
@@ -653,7 +661,7 @@ where
             let key = unsafe { &nodenn.as_ref().header.key };
             if find_node(&mut ls, key).is_some() {
                 error!("Key already in use: {:?}", key);
-                return Err(Error::DuplicateKey);
+                panic!("Node with the same key-hash already in the list");
             } else {
                 ls.push_front(hdrnn);
             }
@@ -699,10 +707,11 @@ where
                         let mutref: &mut T = noderef.t.assume_init_mut();
                         core::mem::swap(&mut t, mutref);
                     }
-                    return Err(Error::OldData((
-                        StorageListNodeHandle { list, inner: self },
-                        t,
-                    )));
+
+                    // Since we set the default value, it is effectively this state
+                    noderef.header.state = State::DefaultUnwritten;
+
+                    return Err((StorageListNodeHandle { list, inner: self }, t));
                 }
                 State::ValidNoWriteNeeded => break,
                 State::NeedsWrite => todo!("shouldn't observe this in attach"),
@@ -742,16 +751,14 @@ where
             // All these states implicate that process_reads/_writes has not finished
             // but they hold a lock on the list, so we should never reach this piece
             // of code while holding a lock ourselves
-            State::Initial | State::NonResident | State::WriteStarted => {
+            State::Initial | State::NonResident | State::WriteStarted | State::OldData => {
                 return Err(Error::InvalidState((
                     noderef.header.key,
                     noderef.header.state.clone(),
                 )));
             }
-            State::DefaultUnwritten
-            | State::ValidNoWriteNeeded
-            | State::NeedsWrite
-            | State::OldData => {}
+            // Handle all states here explicitly to avoid bugs with a catch-all
+            State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
         }
         // yes!
         Ok(unsafe { noderef.t.assume_init_ref().clone() })
@@ -1164,26 +1171,18 @@ mod test {
         });
 
         // Obtain a handle for the first config
-        let config_handle = POSITRON_CONFIG1
-            .attach(&GLOBAL_LIST)
-            .await
-            .expect("This should not error");
-
-        // Obtain another handle for the same config.
-        // This should error because we try adding the same key.
-        let expecting_error = POSITRON_CONFIG1.attach(&GLOBAL_LIST).await;
-        assert!(
-            expecting_error.is_err(),
-            "Second call to attach should fail"
-        );
+        let config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+            Ok(ch) => ch,
+            Err(_) => panic!("Could not attach config 1 to list"),
+        };
 
         // Obtain a handle for the second config. This should _not_ error!
-        let _expecting_no_error = POSITRON_CONFIG2
-            .attach(&GLOBAL_LIST)
-            .await
-            .expect("This should not error!");
+        let expecting_no_error = POSITRON_CONFIG2.attach(&GLOBAL_LIST).await;
+        if expecting_no_error.is_err() {
+            panic!("Could not attach config 2 to list");
+        }
 
-        // Load data for thje first handle
+        // Load data for the first handle
         let data: PositronConfig = config_handle.load().await.unwrap();
         info!("T3 Got {data:?}");
 
@@ -1301,10 +1300,10 @@ mod test {
 
         // Obtain a handle for the config. It should match the custom_config.
         // This should _not_ error!
-        let expecting_already_present = POSITRON_CONFIG
-            .attach(&GLOBAL_LIST)
-            .await
-            .expect("This should not error!");
+        let expecting_already_present = match POSITRON_CONFIG.attach(&GLOBAL_LIST).await {
+            Ok(ch) => ch,
+            Err(_) => panic!("Could not attach config to list"),
+        };
 
         assert_eq!(
             custom_config,
@@ -1331,7 +1330,56 @@ mod test {
 
         worker_task.await.unwrap();
     }
+    #[test(tokio::test)]
+    #[should_panic]
+    async fn test_duplicate_key() {
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config");
+        static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config");
 
+        let mut flash = Flash {
+            flash: MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true),
+            range: 0x0000..0x1000,
+        };
+        // TODO: Figure out why miri tests with unaligned buffers and whether
+        // this needs any fixing. For now just disable the alignment check in MockFlash
+        flash.flash().alignment_check = false;
+
+        let range = flash.range();
+        sequential_storage::erase_all(&mut flash.flash(), range)
+            .await
+            .unwrap();
+
+        info!("Spawn worker_task");
+        let worker_task = tokio::task::spawn(async move {
+            let mut buf = std::vec![0u8; 4096];
+
+            for _ in 0..10 {
+                GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                if let Err(e) = GLOBAL_LIST.process_writes(&mut flash, &mut buf).await {
+                    error!("Error in process_writes: {}", e);
+                }
+
+                info!("NEW WRITES: {}", flash.flash().print_items().await);
+            }
+        });
+
+        // Obtain a handle for the first config
+        let _config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+            Ok(ch) => ch,
+            Err(_) => panic!("Could not attach config 1 to list"),
+        };
+
+        // Obtain a handle for the second config. It has the same key as the first.
+        // This must panic!
+        let _expecting_panic = POSITRON_CONFIG2.attach(&GLOBAL_LIST).await;
+
+        // Wait for the worker task to finish
+        worker_task.await.unwrap();
+    }
     #[test(tokio::test)]
     async fn test_counter_comparison() {
         // Question: can we determine whether the right counter value is "newer"

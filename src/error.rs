@@ -1,6 +1,4 @@
-use mutex::ScopedRawMutex;
-
-use crate::intrusive::{KEY_LEN, State, StorageListNodeHandle};
+use crate::intrusive::{KEY_LEN, State};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

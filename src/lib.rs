@@ -36,5 +36,5 @@ pub(crate) mod logging {
         ($($arg:tt)*) => {};
     }
     #[cfg(not(any(feature = "std", feature = "defmt")))]
-    pub(crate) use {debug, error, info, trace, log_warn as warn};
+    pub(crate) use {debug, error, info, log_warn as warn, trace};
 }
