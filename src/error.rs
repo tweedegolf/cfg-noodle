@@ -1,3 +1,6 @@
+use embedded_storage_async::nor_flash::NorFlashError;
+use sequential_storage::Error as SecStorError;
+
 use crate::intrusive::{KEY_LEN, State};
 
 #[derive(thiserror::Error, Debug)]
@@ -12,4 +15,14 @@ pub enum Error {
     DuplicateKey,
     #[error("Invalid Node State! Key {:?}, {:?}", 0.0, 0.0)]
     InvalidState(([u8; KEY_LEN], State)),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum StoreError<F: NorFlashError> {
+    #[error("Writing to flash has failed.")]
+    FlashWrite(SecStorError<F>),
+    #[error("Value written to flash does not match serialized list node.")]
+    WriteVerificationFailed,
+    #[error(transparent)]
+    AppError(#[from] Error)
 }

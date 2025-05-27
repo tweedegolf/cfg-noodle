@@ -2,7 +2,7 @@
 //! This implements the [StorageList] and its [StorageListNode]s
 
 use crate::{
-    error::Error,
+    error::{Error, StoreError},
     logging::{debug, error, info},
 };
 use cordyceps::{
@@ -17,7 +17,8 @@ use core::{
     num::Wrapping,
     ptr::{self, NonNull},
 };
-use embedded_storage_async::nor_flash::MultiwriteNorFlash;
+use embedded_storage_async::nor_flash::NorFlash;
+use futures::TryFutureExt;
 use maitake_sync::{Mutex, MutexGuard, WaitQueue};
 use minicbor::{
     CborLen, Decode, Encode,
@@ -237,12 +238,12 @@ pub struct VTable {
 }
 
 /// Owns a flash and the range reserved for the `StorageList`
-pub struct Flash<T: MultiwriteNorFlash> {
+pub struct Flash<T: NorFlash> {
     flash: T,
     range: core::ops::Range<u32>,
 }
 
-impl<T: MultiwriteNorFlash> Flash<T> {
+impl<T: NorFlash> Flash<T> {
     pub fn new(flash: T, range: core::ops::Range<u32>) -> Self {
         Self { flash, range }
     }
@@ -317,11 +318,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// 4. On success, it will mark the node as now having valid data. On failure
     ///    it marks that (discussed more below, some of this might not be perfect
     ///    yet and requires more thought)
-    pub async fn process_reads(
-        &'static self,
-        flash: &mut Flash<impl MultiwriteNorFlash>,
-        buf: &mut [u8],
-    ) {
+    pub async fn process_reads(&'static self, flash: &mut Flash<impl NorFlash>, buf: &mut [u8]) {
         info!("Start process_reads, buffer has len {}", buf.len());
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
@@ -458,6 +455,14 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 };
             }
         }
+
+        // TODO: Clarify if we should set the counter here and whether we should already
+        // "bump" it at this point or only just before writing.
+        // Set the counter to the latest one because know its value here.
+        // Inside process_reads, it needs to be bumped, but there it is more difficult
+        // to find out what the latest counter was due to wrapping.
+        set_counter(&mut ls, latest_counter.unwrap_or_default());
+
         debug!("Reading done. Waking all.");
         self.reading_done.wake_all();
     }
@@ -480,11 +485,11 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// 3. For Each node that says "I have made changes", it will try to hand
     ///    control over to the node to serialize to a scratch buffer
     /// 4. On success, it will mark the node as no longer having changes
-    pub async fn process_writes(
+    pub async fn process_writes<F: NorFlash>(
         &'static self,
-        flash: &mut Flash<impl MultiwriteNorFlash>,
+        flash: &mut Flash<F>,
         buf: &mut [u8],
-    ) -> Result<(), Error> {
+    ) -> Result<(), StoreError<F::Error>> {
         debug!("Start process_writes");
 
         // Lock the list, remember, if we're touching nodes, we need to have the list
@@ -492,19 +497,28 @@ impl<R: ScopedRawMutex> StorageList<R> {
         let mut ls = self.list.lock().await;
         debug!("process_writes locked list");
 
-        // Check if any node in the list needs writing
+        // Set to true if any node in the list needs writing
         let mut needs_writing = false;
 
+        // Track the newest counter in the list. This will be the new counter value
+        // when the list is written.
+        // If no counter is present yet, continue with the default value.
         let mut max_counter: Counter = Default::default();
 
-        // TODO: Should we go over all nodes or just start writing once we hit the first node that needs writing?
+        // Iterate over all list nodes and
+        // 1. Store the counter (if present).
+        //    We technically only need the counter from one list item that has been
+        //    read from flash and has counter != None.
+        // 2. Check if any node needs writing or is in an invalid state.
         for hdrptr in ls.iter_raw() {
             let header = unsafe { hdrptr.as_ref() };
 
-            // Update the counter to the highest value we have in the list
-            if is_newer(header.counter.unwrap_or_default(), max_counter) {
-                max_counter = header.counter.unwrap_or_default();
+            // If the node has a counter, it must have been read from flash.
+            // If the counter is `None`, it can be ignored.
+            if let Some(counter) = header.counter {
+                max_counter = counter;
             }
+
             match header.state {
                 // If no write is needed, we obviously won't write.
                 State::ValidNoWriteNeeded => (),
@@ -513,68 +527,43 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 State::DefaultUnwritten | State::NeedsWrite | State::OldData => {
                     needs_writing = true
                 }
-                // TODO: Handle this differently?
-                // Neither of these cases should appear on a list that has been processed properly
+                // Neither of these cases can appear on a list that has been processed properly.
+                // Not sure how we should recover from this...
                 State::Initial | State::NonResident | State::WriteStarted => {
-                    return Err(Error::InvalidState((header.key, header.state.clone())));
+                    return Err(StoreError::AppError(Error::InvalidState((
+                        header.key,
+                        header.state.clone(),
+                    ))));
                 }
             }
         }
 
         // If the list is unchanged, there is no need to write it to flash!
         if !needs_writing {
-            debug!("List does not need writing. Exiting.");
+            debug!("List does not need writing. Returning.");
             return Ok(());
         }
 
-        // Increase the counter for this list by one
-        let counter = max_counter + Wrapping(1);
-        debug!("New counter: {}", counter);
+        // Increase the counter for this list by one...
+        set_counter(&mut ls, max_counter + Wrapping(1));
 
-        // Update counters before writing the list to flash
-        // We do this before serialization because that may fail and
-        // we want to avoid diverging counter values...
-        for mut hdrptr in ls.iter_raw() {
-            let header = unsafe { hdrptr.as_mut() };
-            header.counter.replace(counter);
+        // ... and try writing the list to flash one time.
+        // If this fails, try again. If it fails again, return the error.
+        if let Err(e) = write_to_flash(&mut ls, buf, flash).await {
+            error!(
+                "First writing attempt failed! Error: {}. Trying again...",
+                e
+            );
+
+            // Increase the counter for this list by two
+            set_counter(&mut ls, max_counter + Wrapping(2));
+            // Try one more time, but return any error
+            write_to_flash(&mut ls, buf, flash).await?;
         }
 
-        let mut iter = StaticRawIter {
-            iter: ls.iter_raw(),
-        };
+        verify_list_in_flash(&mut ls, buf, flash).await?;
 
-        while let Some(hdrptr) = iter.next() {
-            // Attempt to serialize
-            let res = serialize_node(hdrptr.ptr, buf);
-
-            if let Ok(used) = res {
-                debug!(
-                    "Pushing to flash: {:?}, addr {:x}",
-                    &buf[..used],
-                    buf.as_ptr() as usize
-                );
-                // Write to flash
-                queue::push(
-                    &mut flash.flash,
-                    flash.range.clone(),
-                    &mut NoCache::new(),
-                    &buf[..used],
-                    false,
-                )
-                .await
-                .unwrap();
-            } else {
-                // I'm honestly not sure what we should do if serialization failed.
-                // If it was a simple "out of space" because we have a batch of writes
-                // already, we might want to try again later. If it failed for some
-                // other reason, or it fails even with an empty page (e.g. serializes
-                // to more than 1k or 4k or something), there's really not much to be
-                // done, other than log.
-                // For now, we just return an error and let the caller decide what to do.
-                return Err(Error::Deserialization);
-            }
-        }
-
+        // The write must have succeeded. So mark all nodes accordingly.
         for mut hdrptr in ls.iter_raw() {
             // Mark the store as complete, wake the node if it cares about state
             // changes.
@@ -587,6 +576,136 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
         Ok(())
     }
+}
+
+/// Sets the counter value for all nodes in the storage list.
+///
+/// This function iterates through all nodes in the linked list and updates their
+/// counter field to the specified value. The counter is used to track write operations
+/// and determine which entries are newest when multiple entries exist for the same key.
+///
+/// # Arguments
+/// * `ls` - A mutable guard to the locked storage list
+/// * `new_counter` - The counter value to assign to all nodes
+///
+/// # Safety
+/// This function uses unsafe code to mutate node headers through raw pointers.
+/// It is safe because the caller must hold the storage list mutex (enforced by
+/// the `MutexGuard` parameter), ensuring exclusive access to the list contents.
+fn set_counter(
+    ls: &mut MutexGuard<'_, List<NodeHeader>, impl ScopedRawMutex>,
+    new_counter: Counter,
+) {
+    debug!("Setting counter for list to: {}", new_counter);
+    // Update counters before writing the list to flash
+    // We do this before serialization because that may fail and
+    // we want to avoid diverging counter values...
+    for mut hdrptr in ls.iter_raw() {
+        let header = unsafe { hdrptr.as_mut() };
+        header.counter.replace(new_counter);
+    }
+}
+
+async fn verify_list_in_flash<F: NorFlash>(
+    ls: &mut MutexGuard<'_, List<NodeHeader>, impl ScopedRawMutex>,
+    buf1: &mut [u8],
+    buf2: &mut [u8],
+    flash: &mut Flash<F>,
+) -> Result<(), StoreError<F::Error>> {
+    // Create a `QueueIterator` without caching
+    let mut cache = NoCache::new();
+    let mut queue_iter = queue::iter(&mut flash.flash, flash.range.clone(), &mut cache)
+        .await
+        .unwrap();
+
+    let mut iter = StaticRawIter {
+        iter: ls.iter_raw(),
+    };
+
+    while let Some(hdrptr) = iter.next() {
+        let header = unsafe { hdrptr.ptr.as_ref() };
+        while let Some(item) = queue_iter
+            .next(buf1)
+            .await
+            .map_err(|_| StoreError::AppError(Error::Deserialization))?
+        {
+            // Once we reach the correct counter, we are at the first element written and
+            // can start processing. If the counter is wrong (or not present), continue:
+            if !extract_counter(&item).is_ok_and(|counter| counter == header.counter.unwrap()) {
+                continue;
+            }
+            
+            // Serialize into the second buffer so we know what it *should* look like.
+            let res = serialize_node(hdrptr.ptr, buf2);
+            // Check if value in flash matches the serialized node
+            if !res.is_ok_and(|len| item.into_buf() == &buf2[..len]) {
+                return Err(StoreError::WriteVerificationFailed);
+            }
+        }
+    }
+    Ok(())
+}
+/// Writes all nodes in the storage list to flash memory.
+///
+/// This function iterates through all nodes in the storage list, serializes each node's
+/// data into the provided buffer, and writes it to flash using the sequential storage
+/// queue. Each node is written as a separate flash item containing its key, counter,
+/// and serialized payload.
+///
+/// # Arguments
+/// * `ls` - A mutable guard to the locked storage list containing nodes to write
+/// * `buf` - A scratch buffer used for serialization (must be large enough for the largest node)
+/// * `flash` - The flash storage device and address range to write to
+///
+/// # Returns
+/// * `Ok(())` - If all nodes were successfully serialized and written to flash
+/// * `Err(StoreError::FlashWrite)` - If a flash write operation failed
+/// * `Err(StoreError::AppError(Error::Serialization))` - If node serialization failed
+///
+/// # Safety
+/// The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
+/// to ensure exclusive access during the write operation.
+async fn write_to_flash<F: NorFlash>(
+    ls: &mut MutexGuard<'_, List<NodeHeader>, impl ScopedRawMutex>,
+    buf: &mut [u8],
+    flash: &mut Flash<F>,
+) -> Result<(), StoreError<F::Error>> {
+    let mut iter = StaticRawIter {
+        iter: ls.iter_raw(),
+    };
+
+    while let Some(hdrptr) = iter.next() {
+        // Attempt to serialize
+        let res = serialize_node(hdrptr.ptr, buf);
+
+        if let Ok(used) = res {
+            debug!(
+                "Pushing to flash: {:?}, addr {:x}",
+                &buf[..used],
+                buf.as_ptr() as usize
+            );
+            // Try writing to flash
+            queue::push(
+                &mut flash.flash,
+                flash.range.clone(),
+                &mut NoCache::new(),
+                &buf[..used],
+                false,
+            )
+            .await
+            .map_err(StoreError::FlashWrite)?;
+        } else {
+            // I'm honestly not sure what we should do if serialization failed.
+            // If it was a simple "out of space" because we have a batch of writes
+            // already, we might want to try again later. If it failed for some
+            // other reason, or it fails even with an empty page (e.g. serializes
+            // to more than 1k or 4k or something), there's really not much to be
+            // done, other than log.
+            // For now, we just return an error and let the caller decide what to do.
+            return Err(StoreError::AppError(Error::Serialization));
+        }
+    }
+    Ok(())
 }
 
 // --------------------------------------------------------------------------
@@ -1036,30 +1155,6 @@ fn is_write_confirm(item: &[u8]) -> bool {
     item[..KEY_LEN].iter().all(|&elem| elem == 0)
 }
 
-/// Defines the threshold for determining when a counter value should be considered "newer".
-///
-/// When comparing counters that use `Wrapping<u8>`, we need to handle counter wraparound.
-/// The threshold represents how far apart counters can be before we consider the higher
-/// counter to have wrapped around to a lower value.
-const COUNTER_THRESHOLD: u8 = 10;
-
-/// Determines if `counter` is newer than `compared_to`, handling wraparound for `Wrapping<u8>`.
-///
-/// This function uses an arithmetic trick to handle the wraparound case. When subtracting a
-/// newer counter from an older one, the result will be a large number due to wraparound.
-/// For example, if counter=5 and compared_to=250, then 250-5=245, which is greater than
-/// the threshold, indicating that 5 is newer than 250 (after wraparound).
-///
-/// # Arguments
-/// * `counter` - The counter to check if it's newer
-/// * `compared_to` - The counter to compare against
-///
-/// # Returns
-/// `true` if `counter` is newer than `compared_to`, accounting for wraparound
-fn is_newer(counter: Counter, compared_to: Counter) -> bool {
-    compared_to - counter > Wrapping(COUNTER_THRESHOLD)
-}
-
 /// This function serializes a storage node by writing its key, counter, and payload data
 /// into the provided buffer in a specific format:
 /// - Bytes 0..KEY_LEN: The node's key
@@ -1379,21 +1474,5 @@ mod test {
 
         // Wait for the worker task to finish
         worker_task.await.unwrap();
-    }
-    #[test(tokio::test)]
-    async fn test_counter_comparison() {
-        // Question: can we determine whether the right counter value is "newer"
-        // as in "a larger value considering it is of type `Wrapping`" by
-        // subtracting it from the left counter and comparing it to some threshold?
-        assert!(Wrapping::<u8>(0) - Wrapping::<u8>(1) > Wrapping::<u8>(10));
-        assert!(Wrapping::<u8>(1) - Wrapping::<u8>(2) > Wrapping::<u8>(10));
-        assert!(Wrapping::<u8>(255) - Wrapping::<u8>(0) > Wrapping::<u8>(10));
-
-        assert!(is_newer(Wrapping::<u8>(1), Wrapping::<u8>(0)));
-        assert!(is_newer(Wrapping::<u8>(3), Wrapping::<u8>(254)));
-        assert!(is_newer(
-            Wrapping::<u8>(COUNTER_THRESHOLD) + Wrapping::<u8>(254),
-            Wrapping::<u8>(254)
-        ));
     }
 }
