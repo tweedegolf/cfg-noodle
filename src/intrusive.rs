@@ -1,5 +1,5 @@
 //! # Intrusive Linked List for Configuration Storage
-//! This implements the [StorageList] and its [StorageListNode]s
+//! This implements the [`StorageList`] and its [`StorageListNode`]s
 
 use crate::{
     error::{Error, LoadStoreError},
@@ -18,7 +18,6 @@ use core::{
     ptr::{self, NonNull},
 };
 use embedded_storage_async::nor_flash::NorFlash;
-//use futures::TryFutureExt;
 use maitake_sync::{Mutex, MutexGuard, WaitQueue};
 use minicbor::{
     CborLen, Decode, Encode,
@@ -61,9 +60,17 @@ pub struct StorageList<R: ScopedRawMutex> {
     /// Header, which is the first field in `Node<T>`, which is repr-C, so we
     /// can cast this back to a `Node<T>` as needed
     list: Mutex<List<NodeHeader>, R>,
+    /// Notifies the worker task that nodes need to be read from flash.
+    /// Woken when a new node is attached and requires data to be loaded.
     needs_read: WaitQueue,
+    /// Notifies the worker task that nodes have pending writes to flash.
+    /// Woken when a node's data is modified and needs to be persisted.
     needs_write: WaitQueue,
+    /// Notifies waiting nodes that the read process has completed.
+    /// Woken after `process_reads` finishes loading data from flash.
     reading_done: WaitQueue,
+    /// Notifies waiting nodes that the write process has completed.
+    /// Woken after `process_writes` finishes persisting data to flash.
     writing_done: WaitQueue,
 }
 
@@ -142,7 +149,7 @@ pub struct NodeHeader {
     vtable: VTable,
 }
 
-/// The current state of the `Node<T>`.
+/// State of the [`Node<T>`].
 ///
 /// This is used to determine how to unsafely interact with other pieces
 /// of the `Node<T>`!
@@ -211,6 +218,9 @@ pub enum State {
     /// TODO: this state needs some more design. Especially how we mark the state
     /// if the owner of the node writes ANOTHER new value while we are waiting
     /// for the flush to "stick".
+    ///
+    /// TODO: This state is unused at the moment. I think we don't really need it
+    /// with the current design.
     ///
     /// In this state, `t` IS valid, and may be read at any time (by the holder
     /// of the lock).
@@ -358,7 +368,6 @@ impl<R: ScopedRawMutex> StorageList<R> {
                         State::NonResident => None,
                         State::DefaultUnwritten => None,
                         State::OldData => None,
-                        // TODO: Handle the case where a key is found again (with a different counter value)
                         State::ValidNoWriteNeeded => None,
                         State::NeedsWrite => None,
                         State::WriteStarted => None,
@@ -461,6 +470,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
         // TODO: Clarify if we should set the counter here and whether we should already
         // "bump" it at this point or only just before writing.
+        //
         // Set the counter to the latest one because know its value here.
         // Inside process_reads, it needs to be bumped, but there it is more difficult
         // to find out what the latest counter was due to wrapping.
@@ -585,8 +595,6 @@ impl<R: ScopedRawMutex> StorageList<R> {
         for mut hdrptr in ls.iter_raw() {
             // Mark the store as complete, wake the node if it cares about state
             // changes.
-            // TODO: will nodes ever care about state changes other than
-            // the initial hydration?
             let hdrmut = unsafe { hdrptr.as_mut() };
             hdrmut.state = State::ValidNoWriteNeeded;
             self.writing_done.wake_all();
@@ -864,7 +872,7 @@ where
             // Are we in a state with a valid T?
             match noderef.header.state {
                 // TODO: This should not really happen because it means we attached in
-                // the middle of the read process. Which would us and the read process
+                // the middle of the read process, which implies that we AND the read process
                 // have the list locked simultaneously.
                 State::Initial => continue,
                 State::NonResident => {
@@ -953,8 +961,6 @@ where
 
         let nodeptr: *mut Node<T> = self.inner.inner.get();
         let noderef = unsafe { &mut *nodeptr };
-        // determine state
-        // TODO: allow writes from uninit (`Initial`) state?
         match noderef.header.state {
             // `Initial` and `NonResident` can not occur for the same reason as
             // outlined in load().
@@ -981,6 +987,7 @@ where
 
         // Let the write task know we have work
         self.list.needs_write.wake();
+
         // old T is dropped
         Ok(())
     }
@@ -1494,7 +1501,7 @@ mod test {
         // Wait for the worker task to finish
         let _ = tokio::time::timeout(Duration::from_secs(2), worker_task).await;
     }
-    
+
     #[test(tokio::test)]
     #[should_panic]
     async fn test_duplicate_key() {
@@ -1504,13 +1511,7 @@ mod test {
         static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config");
 
-        let mut flash = Flash {
-            flash: MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true),
-            range: 0x0000..0x1000,
-        };
-        // TODO: Figure out why miri tests with unaligned buffers and whether
-        // this needs any fixing. For now just disable the alignment check in MockFlash
-        flash.flash().alignment_check = false;
+        let flash = get_mock_flash();
 
         info!("Spawn worker_task");
         let serde_buf = [0u8; 4096];
