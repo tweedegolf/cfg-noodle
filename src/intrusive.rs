@@ -61,10 +61,7 @@ pub struct StorageList<R: ScopedRawMutex> {
     /// Header, which is the first field in `Node<T>`, which is repr-C, so we
     /// can cast this back to a `Node<T>` as needed
     list: Mutex<List<NodeHeader>, R>,
-    // TODO: do we need a `needs_read` WaitQueue?
-    // Read is only needed after attaching, and attach() does not return before
-    // the node is hydrated or initialized with a default value.
-    // But what if a node is "late to the party"?
+    needs_read: WaitQueue,
     needs_write: WaitQueue,
     reading_done: WaitQueue,
     writing_done: WaitQueue,
@@ -273,6 +270,7 @@ impl<R: ScopedRawMutex + ConstInit> StorageList<R> {
     pub const fn new() -> Self {
         Self {
             list: Mutex::new_with_raw_mutex(List::new(), R::INIT),
+            needs_read: WaitQueue::new(),
             needs_write: WaitQueue::new(),
             reading_done: WaitQueue::new(),
             writing_done: WaitQueue::new(),
@@ -844,6 +842,8 @@ where
             } else {
                 ls.push_front(hdrnn);
             }
+            // Let read task know we have work
+            list.needs_read.wake();
             debug!("attach() release Lock on list");
         }
 
@@ -1269,9 +1269,13 @@ mod test {
     use core::time::Duration;
     use minicbor::CborLen;
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
+    use sequential_storage::mock_flash;
     use sequential_storage::mock_flash::MockFlashBase;
     use sequential_storage::mock_flash::WriteCountCheck;
     use test_log::test;
+    use tokio::select;
+    use tokio::task::JoinHandle;
+    use tokio::time::Timeout;
     use tokio::time::sleep;
 
     #[derive(Debug, Encode, Decode, Clone, PartialEq, CborLen)]
@@ -1294,6 +1298,41 @@ mod test {
         }
     }
 
+    fn get_mock_flash() -> Flash<MockFlashBase<10, 16, 256>> {
+        Flash {
+            flash: MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true),
+            range: 0x0000..0x1000,
+        }
+    }
+    fn spawn_worker_task<R: ScopedRawMutex + Sync>(
+        list: &'static StorageList<R>,
+        mut flash: Flash<MockFlashBase<10, 16, 256>>,
+        mut read_buf: [u8; 4096],
+        mut serde_buf: [u8; 4096],
+    ) -> Timeout<()> {
+        tokio::time::timeout(Duration::from_secs(2), async move {
+            loop {
+                match embassy_futures::select::select(
+                    list.needs_read.wait(),
+                    list.needs_write.wait(),
+                )
+                .await
+                {
+                    embassy_futures::select::Either::First(_) => {
+                        list.process_reads(&mut flash, &mut read_buf).await;
+                    }
+                    embassy_futures::select::Either::Second(_) => {
+                        if let Err(e) = list
+                            .process_writes(&mut flash, &mut read_buf, &mut serde_buf)
+                            .await
+                        {
+                            error!("Error in process_writes: {}", e);
+                        }
+                    }
+                }
+            }
+        })
+    }
     #[test(tokio::test)]
     async fn test_two_configs() {
         static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
@@ -1302,10 +1341,7 @@ mod test {
         static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config2");
 
-        let mut flash = Flash {
-            flash: MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true),
-            range: 0x0000..0x1000,
-        };
+        let mut flash = get_mock_flash();
         // TODO: Figure out why miri tests with unaligned buffers and whether
         // this needs any fixing. For now just disable the alignment check in MockFlash
         flash.flash().alignment_check = false;
@@ -1315,25 +1351,11 @@ mod test {
             .await
             .unwrap();
 
+        let read_buf = [0u8; 4096];
+        let serde_buf = [0u8; 4096];
+
         info!("Spawn worker_task");
-        let worker_task = tokio::task::spawn(async move {
-            let read_buf = &mut [0u8; 4096];
-            let serde_buf = &mut [0u8; 4096];
-
-            for _ in 0..10 {
-                GLOBAL_LIST.process_reads(&mut flash, read_buf).await;
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                match GLOBAL_LIST
-                    .process_writes(&mut flash, read_buf, serde_buf)
-                    .await
-                {
-                    Ok(_) | Err(LoadStoreError::NeedsRead) => continue,
-                    Err(e) => error!("Error in process_writes: {}", e),
-                }
-
-                info!("NEW WRITES: {}", flash.flash().print_items().await);
-            }
-        });
+        let worker_task = spawn_worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
 
         // Obtain a handle for the first config
         let config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
@@ -1342,12 +1364,10 @@ mod test {
         };
 
         // Obtain a handle for the second config. This should _not_ error!
-        let expecting_no_error = POSITRON_CONFIG2.attach(&GLOBAL_LIST).await;
-        if expecting_no_error.is_err() {
+        if POSITRON_CONFIG2.attach(&GLOBAL_LIST).await.is_err() {
             panic!("Could not attach config 2 to list");
         }
-       
-       
+
         // Load data for the first handle
         let data: PositronConfig = config_handle.load().await.unwrap();
         info!("T3 Got {data:?}");
@@ -1418,7 +1438,7 @@ mod test {
         let hdrnn: NonNull<NodeHeader> = nodenn.cast();
 
         let mut serde_buf = [0u8; 4096];
-        let mut read_buf = [0u8; 4096];
+        let read_buf = [0u8; 4096];
         let used = serialize_node(hdrnn, &mut serde_buf).expect("Serializing node should not fail");
 
         // Now serialize again by calling encode() directly and verify both match
@@ -1428,37 +1448,19 @@ mod test {
         // The serialized node will contain some metadata, but the last `len` bytes must match
         assert_eq!(serialize_control[..len], serde_buf[used - len..used]);
 
-        let worker_task = tokio::task::spawn(async move {
-            let mut flash = Flash {
-                flash: MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true),
-                range: 0x0000..0x1000,
-            };
-
-            info!("Pushing to flash: {:?}", &serde_buf[..used]);
-            let range = flash.range(); // get cloned range so we can borrow flash mutably in push()
-            queue::push(
-                &mut flash.flash(),
-                range,
-                &mut NoCache::new(),
-                &serde_buf[..used],
-                false,
-            )
-            .await
-            .expect("pushing to flash should not fail here");
-
-            for _ in 0..10 {
-                warn!("Flash content: {}", flash.flash.print_items().await);
-                // Reuse the serialization buf, no need to create a new one
-                GLOBAL_LIST.process_reads(&mut flash, &mut read_buf).await;
-                if let Err(e) = GLOBAL_LIST
-                    .process_writes(&mut flash, &mut read_buf, &mut serde_buf)
-                    .await
-                {
-                    error!("Error in process_writes: {}", e);
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        });
+        let mut flash = get_mock_flash();
+        info!("Pushing to flash: {:?}", &serde_buf[..used]);
+        let range = flash.range(); // get cloned range so we can borrow flash mutably in push()
+        queue::push(
+            &mut flash.flash(),
+            range,
+            &mut NoCache::new(),
+            &serde_buf[..used],
+            false,
+        )
+        .await
+        .expect("pushing to flash should not fail here");
+        let worker_task = spawn_worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
 
         // Obtain a handle for the config. It should match the custom_config.
         // This should _not_ error!

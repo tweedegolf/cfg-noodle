@@ -148,6 +148,7 @@ dependencies = [
  "cordyceps",
  "critical-section",
  "defmt",
+ "embassy-futures",
  "embedded-storage-async",
  "futures",
  "futures-test",
@@ -241,6 +242,12 @@ checksum = "9c9e6a11ca8224451684bc0d7d5a7adbf8f2fd6887261a1cfc3c0432f9d4068e"
 dependencies = [
  "powerfmt",
 ]
+
+[[package]]
+name = "embassy-futures"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f878075b9794c1e4ac788c95b728f26aa6366d32eeb10c7051389f898f7d067"
 
 [[package]]
 name = "embedded-storage"
