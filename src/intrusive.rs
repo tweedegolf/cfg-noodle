@@ -2,7 +2,7 @@
 //! This implements the [StorageList] and its [StorageListNode]s
 
 use crate::{
-    error::{Error, StoreError},
+    error::{Error, LoadStoreError},
     logging::{debug, error, info},
 };
 use cordyceps::{
@@ -18,7 +18,7 @@ use core::{
     ptr::{self, NonNull},
 };
 use embedded_storage_async::nor_flash::NorFlash;
-use futures::TryFutureExt;
+//use futures::TryFutureExt;
 use maitake_sync::{Mutex, MutexGuard, WaitQueue};
 use minicbor::{
     CborLen, Decode, Encode,
@@ -63,7 +63,8 @@ pub struct StorageList<R: ScopedRawMutex> {
     list: Mutex<List<NodeHeader>, R>,
     // TODO: do we need a `needs_read` WaitQueue?
     // Read is only needed after attaching, and attach() does not return before
-    // the node is hydrated or initialized with a default value
+    // the node is hydrated or initialized with a default value.
+    // But what if a node is "late to the party"?
     needs_write: WaitQueue,
     reading_done: WaitQueue,
     writing_done: WaitQueue,
@@ -432,6 +433,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
             //
             // If the hdrmut.state is not initial, the node has already been handled elsewhere
             if let State::Initial = hdrmut.state {
+                debug!(
+                    "post-processing node in initial state with counter {:?}, latest_counter {:?} and latest_write_confirm {:?}",
+                    hdrmut.counter, latest_counter, latest_write_confirm
+                );
                 hdrmut.state = match (hdrmut.counter, latest_counter, latest_write_confirm) {
                     // Best case: node counter matches the latest counter value
                     (Some(counter), Some(latest), _) if counter == latest => {
@@ -474,22 +479,28 @@ impl<R: ScopedRawMutex> StorageList<R> {
     ///
     /// ## Arguments:
     /// * `flash`: a [`Flash`] object containing the necessary information to call [`queue::push`]
-    /// * `buf`: a scratch-buffer that must be large enough to hold the largest serialized node
-    ///   In practice, a buffer as large as the flash's page size is enough because sequential
-    ///   storage can not store larger items.
+    /// * `read_buf`: a scratch buffer used to store data read from flash during verification.
+    ///   Must be able to hold any serialized node.
+    /// * `serde_buf`: a scratch buffer used to serialize nodes for writing and verification.
+    ///   Must be able to hold any serialized node.
     ///
-    /// TODO: update this description
+    /// Both buffers have the same minimum size requirement: they must be large enough to hold
+    /// the largest serialized node. In practice, a buffer as large as the flash's page size is
+    /// sufficient because sequential storage cannot store larger items.
+    ///
     /// This method:
     /// 1. Locks the mutex
     /// 2. Iterates through each node currently linked in the list
-    /// 3. For Each node that says "I have made changes", it will try to hand
-    ///    control over to the node to serialize to a scratch buffer
-    /// 4. On success, it will mark the node as no longer having changes
+    /// 3. For each node that has pending changes, serializes the node data
+    /// 4. Writes all changed nodes to flash using sequential storage
+    /// 5. Verifies the written data matches what was intended to be written
+    /// 6. On success, marks all nodes as no longer having pending changes
     pub async fn process_writes<F: NorFlash>(
         &'static self,
         flash: &mut Flash<F>,
-        buf: &mut [u8],
-    ) -> Result<(), StoreError<F::Error>> {
+        read_buf: &mut [u8],
+        serde_buf: &mut [u8],
+    ) -> Result<(), LoadStoreError<F::Error>> {
         debug!("Start process_writes");
 
         // Lock the list, remember, if we're touching nodes, we need to have the list
@@ -527,13 +538,18 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 State::DefaultUnwritten | State::NeedsWrite | State::OldData => {
                     needs_writing = true
                 }
+                // TODO: A node may be in `Initial` state, if it has been attached but
+                // `process_reads` hasn't run, yet. Should we return early here and trigger
+                // another process_reads?
                 // Neither of these cases can appear on a list that has been processed properly.
                 // Not sure how we should recover from this...
                 State::Initial | State::NonResident | State::WriteStarted => {
-                    return Err(StoreError::AppError(Error::InvalidState((
+                    debug!("process_writes() on invalid state: {:?}", header.state);
+
+                    return Err(LoadStoreError::AppError(Error::InvalidState(
                         header.key,
                         header.state.clone(),
-                    ))));
+                    )));
                 }
             }
         }
@@ -547,9 +563,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
         // Increase the counter for this list by one...
         set_counter(&mut ls, max_counter + Wrapping(1));
 
+        debug!("Attempt write_to_flash");
         // ... and try writing the list to flash one time.
         // If this fails, try again. If it fails again, return the error.
-        if let Err(e) = write_to_flash(&mut ls, buf, flash).await {
+        if let Err(e) = write_to_flash(&mut ls, serde_buf, flash).await {
             error!(
                 "First writing attempt failed! Error: {}. Trying again...",
                 e
@@ -558,10 +575,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
             // Increase the counter for this list by two
             set_counter(&mut ls, max_counter + Wrapping(2));
             // Try one more time, but return any error
-            write_to_flash(&mut ls, buf, flash).await?;
+            write_to_flash(&mut ls, serde_buf, flash).await?;
         }
 
-        verify_list_in_flash(&mut ls, buf, flash).await?;
+        verify_list_in_flash(&mut ls, read_buf, serde_buf, flash).await?;
 
         // The write must have succeeded. So mark all nodes accordingly.
         for mut hdrptr in ls.iter_raw() {
@@ -606,12 +623,34 @@ fn set_counter(
     }
 }
 
+/// Verifies that the storage list was correctly written to flash memory.
+///
+/// This function compares each node in the storage list against the corresponding
+/// items stored in flash to ensure data integrity after a write operation. It iterates
+/// through flash items until it finds the beginning of the newly-written list (identified
+/// by matching counter values), then serializes each list node and compares it with
+/// the flash data.
+///
+/// # Arguments
+/// * `ls` - A mutable guard to the locked storage list containing nodes to verify
+/// * `read_buf` - Buffer used for reading items from flash
+/// * `serde_buf` - Buffer used for serializing nodes for comparison
+/// * `flash` - The flash storage device and address range to read from
+///
+/// # Returns
+/// * `Ok(())` - If all nodes match their corresponding flash entries
+/// * `Err(LoadError::WriteVerificationFailed)` - If any node doesn't match its flash entry
+/// * `Err(LoadError::FlashRead)` - If reading from flash fails
+///
+/// # Safety
+/// The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
+/// to ensure exclusive access during verification.
 async fn verify_list_in_flash<F: NorFlash>(
     ls: &mut MutexGuard<'_, List<NodeHeader>, impl ScopedRawMutex>,
-    buf1: &mut [u8],
-    buf2: &mut [u8],
+    read_buf: &mut [u8],
+    serde_buf: &mut [u8],
     flash: &mut Flash<F>,
-) -> Result<(), StoreError<F::Error>> {
+) -> Result<(), LoadStoreError<F::Error>> {
     // Create a `QueueIterator` without caching
     let mut cache = NoCache::new();
     let mut queue_iter = queue::iter(&mut flash.flash, flash.range.clone(), &mut cache)
@@ -622,25 +661,43 @@ async fn verify_list_in_flash<F: NorFlash>(
         iter: ls.iter_raw(),
     };
 
+    // Set true on the first occurence of the correct counter.
+    // That means, we have hit the first element the newly-written list.
+    let mut counter_found = false;
+
+    // Iterate over the nodes in the list and...
     while let Some(hdrptr) = iter.next() {
         let header = unsafe { hdrptr.ptr.as_ref() };
+
+        // Get the next item from the queue.
+        // This loop will continue until we hit the first correct counter
+        // in the flash. That will be the beginning of the newly-written list.
+        // Then serialize the node and compare to the item in flash.
         while let Some(item) = queue_iter
-            .next(buf1)
+            .next(read_buf)
             .await
-            .map_err(|_| StoreError::AppError(Error::Deserialization))?
+            .map_err(LoadStoreError::FlashRead)?
         {
+            // If the counter was found already, skip the check. If the counter is wrong,
+            // comparing the serialized values will fail anyway.
             // Once we reach the correct counter, we are at the first element written and
             // can start processing. If the counter is wrong (or not present), continue:
-            if !extract_counter(&item).is_ok_and(|counter| counter == header.counter.unwrap()) {
+            if !counter_found
+                && !extract_counter(&item).is_ok_and(|counter| counter == header.counter.unwrap())
+            {
                 continue;
             }
-            
+            counter_found = true;
+
             // Serialize into the second buffer so we know what it *should* look like.
-            let res = serialize_node(hdrptr.ptr, buf2);
+            let res = serialize_node(hdrptr.ptr, serde_buf);
+
             // Check if value in flash matches the serialized node
-            if !res.is_ok_and(|len| item.into_buf() == &buf2[..len]) {
-                return Err(StoreError::WriteVerificationFailed);
+            if !res.is_ok_and(|len| item.into_buf() == &serde_buf[..len]) {
+                return Err(LoadStoreError::WriteVerificationFailed);
             }
+            // Value matched, so we can continue with the next list node
+            break;
         }
     }
     Ok(())
@@ -669,7 +726,7 @@ async fn write_to_flash<F: NorFlash>(
     ls: &mut MutexGuard<'_, List<NodeHeader>, impl ScopedRawMutex>,
     buf: &mut [u8],
     flash: &mut Flash<F>,
-) -> Result<(), StoreError<F::Error>> {
+) -> Result<(), LoadStoreError<F::Error>> {
     let mut iter = StaticRawIter {
         iter: ls.iter_raw(),
     };
@@ -693,7 +750,7 @@ async fn write_to_flash<F: NorFlash>(
                 false,
             )
             .await
-            .map_err(StoreError::FlashWrite)?;
+            .map_err(LoadStoreError::FlashWrite)?;
         } else {
             // I'm honestly not sure what we should do if serialization failed.
             // If it was a simple "out of space" because we have a batch of writes
@@ -702,7 +759,7 @@ async fn write_to_flash<F: NorFlash>(
             // to more than 1k or 4k or something), there's really not much to be
             // done, other than log.
             // For now, we just return an error and let the caller decide what to do.
-            return Err(StoreError::AppError(Error::Serialization));
+            return Err(LoadStoreError::AppError(Error::Serialization));
         }
     }
     Ok(())
@@ -808,6 +865,10 @@ where
                 // have the list locked simultaneously.
                 State::Initial => continue,
                 State::NonResident => {
+                    debug!(
+                        "Node with key {:?} non resident. Init with default",
+                        noderef.header.key
+                    );
                     // We are nonresident, we need to initialize
                     noderef.t = MaybeUninit::new(T::default());
                     noderef.header.state = State::DefaultUnwritten;
@@ -871,10 +932,10 @@ where
             // but they hold a lock on the list, so we should never reach this piece
             // of code while holding a lock ourselves
             State::Initial | State::NonResident | State::WriteStarted | State::OldData => {
-                return Err(Error::InvalidState((
+                return Err(Error::InvalidState(
                     noderef.header.key,
                     noderef.header.state.clone(),
-                )));
+                ));
             }
             // Handle all states here explicitly to avoid bugs with a catch-all
             State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
@@ -898,10 +959,11 @@ where
             // therefore we cannot reach this code while process_writes is running and
             // it will not finish (and release the lock) until it finished writing.
             State::WriteStarted | State::Initial | State::NonResident | State::OldData => {
-                return Err(Error::InvalidState((
+                debug!("write() on invalid state: {:?}", noderef.header.state);
+                return Err(Error::InvalidState(
                     noderef.header.key,
                     noderef.header.state.clone(),
-                )));
+                ));
             }
             State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
         }
@@ -1252,12 +1314,16 @@ mod test {
 
         info!("Spawn worker_task");
         let worker_task = tokio::task::spawn(async move {
-            let mut buf = std::vec![0u8; 4096];
+            let read_buf = &mut [0u8; 4096];
+            let serde_buf = &mut [0u8; 4096];
 
             for _ in 0..10 {
-                GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                if let Err(e) = GLOBAL_LIST.process_writes(&mut flash, &mut buf).await {
+                GLOBAL_LIST.process_reads(&mut flash, read_buf).await;
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                if let Err(e) = GLOBAL_LIST
+                    .process_writes(&mut flash, read_buf, serde_buf)
+                    .await
+                {
                     error!("Error in process_writes: {}", e);
                 }
 
@@ -1345,19 +1411,16 @@ mod test {
         let nodenn: NonNull<Node<PositronConfig>> = unsafe { NonNull::new_unchecked(nodeptr) };
         let hdrnn: NonNull<NodeHeader> = nodenn.cast();
 
-        let mut serialization_buf = [0u8; 4096];
-        let used = serialize_node(hdrnn, &mut serialization_buf)
-            .expect("Serializing node should not fail");
+        let mut serde_buf = [0u8; 4096];
+        let mut read_buf = [0u8; 4096];
+        let used = serialize_node(hdrnn, &mut serde_buf).expect("Serializing node should not fail");
 
         // Now serialize again by calling encode() directly and verify both match
         let mut serialize_control = std::vec![];
         let len = len_with(&custom_config, &mut ());
         minicbor::encode(&custom_config, &mut serialize_control).unwrap();
         // The serialized node will contain some metadata, but the last `len` bytes must match
-        assert_eq!(
-            serialize_control[..len],
-            serialization_buf[used - len..used]
-        );
+        assert_eq!(serialize_control[..len], serde_buf[used - len..used]);
 
         let worker_task = tokio::task::spawn(async move {
             let mut flash = Flash {
@@ -1365,13 +1428,13 @@ mod test {
                 range: 0x0000..0x1000,
             };
 
-            info!("Pushing to flash: {:?}", &serialization_buf[..used]);
+            info!("Pushing to flash: {:?}", &serde_buf[..used]);
             let range = flash.range(); // get cloned range so we can borrow flash mutably in push()
             queue::push(
                 &mut flash.flash(),
                 range,
                 &mut NoCache::new(),
-                &serialization_buf[..used],
+                &serde_buf[..used],
                 false,
             )
             .await
@@ -1380,11 +1443,9 @@ mod test {
             for _ in 0..10 {
                 warn!("Flash content: {}", flash.flash.print_items().await);
                 // Reuse the serialization buf, no need to create a new one
-                GLOBAL_LIST
-                    .process_reads(&mut flash, &mut serialization_buf)
-                    .await;
+                GLOBAL_LIST.process_reads(&mut flash, &mut read_buf).await;
                 if let Err(e) = GLOBAL_LIST
-                    .process_writes(&mut flash, &mut serialization_buf)
+                    .process_writes(&mut flash, &mut read_buf, &mut serde_buf)
                     .await
                 {
                     error!("Error in process_writes: {}", e);
@@ -1449,12 +1510,16 @@ mod test {
 
         info!("Spawn worker_task");
         let worker_task = tokio::task::spawn(async move {
-            let mut buf = std::vec![0u8; 4096];
+            let mut serde_buf = std::vec![0u8; 4096];
+            let mut read_buf = std::vec![0u8; 4096];
 
             for _ in 0..10 {
-                GLOBAL_LIST.process_reads(&mut flash, &mut buf).await;
+                GLOBAL_LIST.process_reads(&mut flash, &mut read_buf).await;
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                if let Err(e) = GLOBAL_LIST.process_writes(&mut flash, &mut buf).await {
+                if let Err(e) = GLOBAL_LIST
+                    .process_writes(&mut flash, &mut read_buf, &mut serde_buf)
+                    .await
+                {
                     error!("Error in process_writes: {}", e);
                 }
 

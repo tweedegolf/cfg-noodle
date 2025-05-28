@@ -13,14 +13,16 @@ pub enum Error {
     OldData,
     #[error("Duplicate key!")]
     DuplicateKey,
-    #[error("Invalid Node State! Key {:?}, {:?}", 0.0, 0.0)]
-    InvalidState(([u8; KEY_LEN], State)),
+    #[error("Invalid Node State! Key {:?}, {:?}", .0, .1)]
+    InvalidState([u8; KEY_LEN], State),
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum StoreError<F: NorFlashError> {
+pub enum LoadStoreError<F: NorFlashError> {
     #[error("Writing to flash has failed.")]
     FlashWrite(SecStorError<F>),
+    #[error("Reading from flash has failed.")]
+    FlashRead(SecStorError<F>),
     #[error("Value written to flash does not match serialized list node.")]
     WriteVerificationFailed,
     #[error(transparent)]

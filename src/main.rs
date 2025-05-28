@@ -35,8 +35,9 @@ async fn main() {
     // give time for tasks to attach
     sleep(Duration::from_millis(100)).await;
     // process reads
-    let buf = &mut [0u8; 4096];
-    GLOBAL_LIST.process_reads(&mut flash, buf).await;
+    let read_buf = &mut [0u8; 4096];
+    let serde_buf = &mut [0u8; 4096];
+    GLOBAL_LIST.process_reads(&mut flash, read_buf).await;
 
     for _ in 0..10 {
         sleep(Duration::from_secs(1)).await;
@@ -48,7 +49,7 @@ async fn main() {
             ),
             0x0000..0x1000,
         );
-        if let Err(e) = GLOBAL_LIST.process_writes(&mut flash2, buf).await {
+        if let Err(e) = GLOBAL_LIST.process_writes(&mut flash2, read_buf, serde_buf).await {
             error!("Error in process_writes: {}", e);
         }
         info!("NEW WRITES: {}", flash2.flash().print_items().await);
