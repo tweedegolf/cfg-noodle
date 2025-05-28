@@ -25,6 +25,8 @@ pub enum LoadStoreError<F: NorFlashError> {
     FlashRead(SecStorError<F>),
     #[error("Value written to flash does not match serialized list node.")]
     WriteVerificationFailed,
+    #[error("List needs to be read first because some node is in Initial state and cannot be written.")]
+    NeedsRead,
     #[error(transparent)]
     AppError(#[from] Error)
 }

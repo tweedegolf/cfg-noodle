@@ -541,9 +541,12 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 // TODO: A node may be in `Initial` state, if it has been attached but
                 // `process_reads` hasn't run, yet. Should we return early here and trigger
                 // another process_reads?
+                State::Initial => {
+                    return Err(LoadStoreError::NeedsRead);
+                }
                 // Neither of these cases can appear on a list that has been processed properly.
                 // Not sure how we should recover from this...
-                State::Initial | State::NonResident | State::WriteStarted => {
+                State::NonResident | State::WriteStarted => {
                     debug!("process_writes() on invalid state: {:?}", header.state);
 
                     return Err(LoadStoreError::AppError(Error::InvalidState(
@@ -1319,12 +1322,13 @@ mod test {
 
             for _ in 0..10 {
                 GLOBAL_LIST.process_reads(&mut flash, read_buf).await;
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                if let Err(e) = GLOBAL_LIST
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                match GLOBAL_LIST
                     .process_writes(&mut flash, read_buf, serde_buf)
                     .await
                 {
-                    error!("Error in process_writes: {}", e);
+                    Ok(_) | Err(LoadStoreError::NeedsRead) => continue,
+                    Err(e) => error!("Error in process_writes: {}", e),
                 }
 
                 info!("NEW WRITES: {}", flash.flash().print_items().await);
@@ -1342,18 +1346,20 @@ mod test {
         if expecting_no_error.is_err() {
             panic!("Could not attach config 2 to list");
         }
-
+       
+       
         // Load data for the first handle
         let data: PositronConfig = config_handle.load().await.unwrap();
         info!("T3 Got {data:?}");
 
-        // Assert that the counter is still None
+        // Assert that the counter is at default value because we
+        // haven't read this from flash
         assert_eq!(
             unsafe { config_handle.inner.inner.get().as_ref() }
                 .unwrap()
                 .header
                 .counter,
-            None
+            Some(Counter::default())
         );
 
         // Write a new config to first handle
