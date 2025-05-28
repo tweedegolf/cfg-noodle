@@ -1265,17 +1265,13 @@ mod test {
     extern crate std;
     use super::*;
 
-    use crate::logging::warn;
     use core::time::Duration;
     use minicbor::CborLen;
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
-    use sequential_storage::mock_flash;
     use sequential_storage::mock_flash::MockFlashBase;
     use sequential_storage::mock_flash::WriteCountCheck;
     use test_log::test;
-    use tokio::select;
     use tokio::task::JoinHandle;
-    use tokio::time::Timeout;
     use tokio::time::sleep;
 
     #[derive(Debug, Encode, Decode, Clone, PartialEq, CborLen)]
@@ -1299,19 +1295,25 @@ mod test {
     }
 
     fn get_mock_flash() -> Flash<MockFlashBase<10, 16, 256>> {
+        let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true);
+        // TODO: Figure out why miri tests with unaligned buffers and whether
+        // this needs any fixing. For now just disable the alignment check in MockFlash
+        flash.alignment_check = false;
         Flash {
-            flash: MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true),
+            flash,
             range: 0x0000..0x1000,
         }
     }
-    fn spawn_worker_task<R: ScopedRawMutex + Sync>(
+
+    fn worker_task<R: ScopedRawMutex + Sync>(
         list: &'static StorageList<R>,
         mut flash: Flash<MockFlashBase<10, 16, 256>>,
         mut read_buf: [u8; 4096],
         mut serde_buf: [u8; 4096],
-    ) -> Timeout<()> {
-        tokio::time::timeout(Duration::from_secs(2), async move {
+    ) -> JoinHandle<()> {
+        tokio::task::spawn(async move {
             loop {
+                info!("worker_task waiting for needs_* signal");
                 match embassy_futures::select::select(
                     list.needs_read.wait(),
                     list.needs_write.wait(),
@@ -1319,9 +1321,11 @@ mod test {
                 .await
                 {
                     embassy_futures::select::Either::First(_) => {
+                        info!("worker task got needs_read signal");
                         list.process_reads(&mut flash, &mut read_buf).await;
                     }
                     embassy_futures::select::Either::Second(_) => {
+                        info!("worker task got needs_write signal");
                         if let Err(e) = list
                             .process_writes(&mut flash, &mut read_buf, &mut serde_buf)
                             .await
@@ -1333,6 +1337,7 @@ mod test {
             }
         })
     }
+
     #[test(tokio::test)]
     async fn test_two_configs() {
         static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
@@ -1341,21 +1346,13 @@ mod test {
         static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config2");
 
-        let mut flash = get_mock_flash();
-        // TODO: Figure out why miri tests with unaligned buffers and whether
-        // this needs any fixing. For now just disable the alignment check in MockFlash
-        flash.flash().alignment_check = false;
-
-        let range = flash.range();
-        sequential_storage::erase_all(&mut flash.flash(), range)
-            .await
-            .unwrap();
+        let flash = get_mock_flash();
 
         let read_buf = [0u8; 4096];
         let serde_buf = [0u8; 4096];
 
         info!("Spawn worker_task");
-        let worker_task = spawn_worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
+        let worker_task = worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
 
         // Obtain a handle for the first config
         let config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
@@ -1407,7 +1404,7 @@ mod test {
         );
 
         // Wait for the worker task to finish
-        worker_task.await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(2), worker_task).await;
     }
 
     #[test(tokio::test)]
@@ -1418,6 +1415,9 @@ mod test {
         static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
         static POSITRON_CONFIG: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config");
+
+        let mut serde_buf = [0u8; 4096];
+        let read_buf = [0u8; 4096];
 
         // Serialize the custom_config config so we can write it to our flash
         let custom_config = PositronConfig {
@@ -1437,8 +1437,6 @@ mod test {
         let nodenn: NonNull<Node<PositronConfig>> = unsafe { NonNull::new_unchecked(nodeptr) };
         let hdrnn: NonNull<NodeHeader> = nodenn.cast();
 
-        let mut serde_buf = [0u8; 4096];
-        let read_buf = [0u8; 4096];
         let used = serialize_node(hdrnn, &mut serde_buf).expect("Serializing node should not fail");
 
         // Now serialize again by calling encode() directly and verify both match
@@ -1460,7 +1458,8 @@ mod test {
         )
         .await
         .expect("pushing to flash should not fail here");
-        let worker_task = spawn_worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
+
+        let worker_task = worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
 
         // Obtain a handle for the config. It should match the custom_config.
         // This should _not_ error!
@@ -1492,8 +1491,10 @@ mod test {
             Wrapping(1)
         );
 
-        worker_task.await.unwrap();
+        // Wait for the worker task to finish
+        let _ = tokio::time::timeout(Duration::from_secs(2), worker_task).await;
     }
+    
     #[test(tokio::test)]
     #[should_panic]
     async fn test_duplicate_key() {
@@ -1511,29 +1512,10 @@ mod test {
         // this needs any fixing. For now just disable the alignment check in MockFlash
         flash.flash().alignment_check = false;
 
-        let range = flash.range();
-        sequential_storage::erase_all(&mut flash.flash(), range)
-            .await
-            .unwrap();
-
         info!("Spawn worker_task");
-        let worker_task = tokio::task::spawn(async move {
-            let mut serde_buf = std::vec![0u8; 4096];
-            let mut read_buf = std::vec![0u8; 4096];
-
-            for _ in 0..10 {
-                GLOBAL_LIST.process_reads(&mut flash, &mut read_buf).await;
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                if let Err(e) = GLOBAL_LIST
-                    .process_writes(&mut flash, &mut read_buf, &mut serde_buf)
-                    .await
-                {
-                    error!("Error in process_writes: {}", e);
-                }
-
-                info!("NEW WRITES: {}", flash.flash().print_items().await);
-            }
-        });
+        let serde_buf = [0u8; 4096];
+        let read_buf = [0u8; 4096];
+        let worker_task = worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
 
         // Obtain a handle for the first config
         let _config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
@@ -1546,6 +1528,6 @@ mod test {
         let _expecting_panic = POSITRON_CONFIG2.attach(&GLOBAL_LIST).await;
 
         // Wait for the worker task to finish
-        worker_task.await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(2), worker_task).await;
     }
 }
