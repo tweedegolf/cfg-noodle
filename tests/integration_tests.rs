@@ -1,5 +1,5 @@
 use cfg_noodle::intrusive::{Flash, StorageList, StorageListNode};
-use log::{error, info};
+use log::{error, info, warn};
 use minicbor::{CborLen, Decode, Encode};
 use mutex::{ScopedRawMutex, raw_impls::cs::CriticalSectionRawMutex};
 use sequential_storage::cache::NoCache;
@@ -150,6 +150,80 @@ async fn test_read_clean_state() {
     assert_eq!(
         loaded_config, test_config,
         "Loaded config should match default config"
+    );
+}
+
+#[test(tokio::test)]
+async fn test_read_interrupted_write() {
+    static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    static NODE1: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
+    static NODE2: StorageListNode<TestConfig> = StorageListNode::new("test/config2");
+
+    let flash = get_test_flash();
+    info!("Spawning worker task");
+    let (tx, rx) = watch::channel(());
+    let worker = worker_task(&LIST, flash, Some(rx));
+
+    let handle1 = NODE1.attach(&LIST).await.unwrap();
+    let handle2 = NODE2.attach(&LIST).await.unwrap();
+    let test_config2 = TestConfig {
+        value: 1,
+        truth: true,
+        optional_truth: Some(true),
+    };
+    handle1
+        .write(&TestConfig {
+            value: 2,
+            truth: false,
+            optional_truth: Some(false),
+        })
+        .await
+        .unwrap();
+    handle2.write(&test_config2).await.unwrap();
+
+    // Write the two nodes to the list
+    LIST.needs_write().wake_all();
+
+    // Give worker time to process the write
+    sleep(Duration::from_millis(100)).await;
+
+    // Stop worker task and save the flash data it produced
+    tx.send(()).unwrap();
+    let mut flash = worker.await.unwrap();
+
+    warn!("Set some bytes in flash to zero");
+    warn!("Flash before: {}", flash.flash().print_items().await);
+    let flash_bytes = flash.flash().as_bytes_mut();
+    // at byte 48 the 2nd item starts (may need to be adapted! check the print_items output)
+    // The second item seems to be the first node, so this relies on knowing what the layout in flash is
+    // TODO: improve how the flash is partly erased...
+    flash_bytes[48..].fill(0xFF);
+
+    warn!("Flash after: {}", flash.flash().print_items().await);
+
+    // Create new list and node to simulate restart
+    static LIST2: StorageList<CriticalSectionRawMutex> = StorageList::new();
+
+    static NODE1_2: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
+    static NODE2_2: StorageListNode<TestConfig> = StorageListNode::new("test/config2");
+
+    info!("Spawning new worker task");
+    // Spawn worker task with the used flash
+    let _worker = worker_task(&LIST2, flash, None);
+
+    let handle1 = NODE1_2.attach(&LIST2).await.unwrap();
+    let handle2 = NODE2_2.attach(&LIST2).await.unwrap();
+
+    let loaded_config1 = handle1.load().await.unwrap();
+    let loaded_config2 = handle2.load().await.unwrap();
+    assert_eq!(
+        loaded_config1,
+        TestConfig::default(),
+        "Loaded config1 should match default config (was zeroed before)"
+    );
+    assert_eq!(
+        loaded_config2, test_config2,
+        "Loaded config1 should match test_config"
     );
 }
 
