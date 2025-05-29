@@ -27,6 +27,7 @@ use minicbor::{
 use mutex::{ConstInit, ScopedRawMutex};
 use sequential_storage::{cache::NoCache, queue};
 
+/// Node counter, only an alias for `Wrapping<u8>`
 pub type Counter = Wrapping<u8>;
 
 /// "Global anchor" of all storage items.
@@ -74,7 +75,7 @@ pub struct StorageList<R: ScopedRawMutex> {
     writing_done: WaitQueue,
 }
 
-/// StorageListNode represents the storage of a single `T`, linkable to a `StorageList`
+/// Represents the storage of a single `T`, linkable to a `StorageList`
 ///
 /// Users will [`attach`](Self::attach) it to the [`StorageList`] to make it part of
 /// the "connected configuration system".
@@ -239,8 +240,22 @@ type SerFn = fn(NonNull<Node<()>>, &mut [u8]) -> Result<usize, ()>;
 /// If successful, returns the number of bytes read from the buffer.
 type DeserFn = fn(NonNull<Node<()>>, &[u8], bool) -> Result<usize, ()>;
 
+/// Function table for type-erased serialization and deserialization operations.
+///
+/// The `VTable` contains function pointers that allow the storage system to serialize
+/// and deserialize nodes without knowing their concrete types at compile time. Each
+/// node type `T` gets its own vtable instance created via [`VTable::for_ty`], which
+/// stores monomorphized function pointers for that specific type.
+///
+/// This enables the storage worker to operate on a heterogeneous linked list of
+/// nodes with different payload types (`Node<T1>`, `Node<T2>`, etc.) through a
+/// uniform interface using type erasure.
+///
+/// # Fields
+/// * `serialize` - Function pointer to serialize a `T` value to a byte buffer
+/// * `deserialize` - Function pointer to deserialize a `T` value from a byte buffer
 #[derive(Clone, Copy)]
-pub struct VTable {
+struct VTable {
     serialize: SerFn,
     deserialize: DeserFn,
 }
@@ -251,14 +266,25 @@ pub struct Flash<T: NorFlash> {
     range: core::ops::Range<u32>,
 }
 
+// TODO: consider exposing some functions on the seq-storage queue
+// via the flash to avoid some code duplication for queue::push/iter/...
+// Also, this would allow caching if desired
 impl<T: NorFlash> Flash<T> {
+    /// Creates a new Flash instance with the given flash device and address range.
+    /// 
+    /// # Arguments
+    /// * `flash` - The NorFlash device to use for storage operations
+    /// * `range` - The address range within the flash device reserved for this storage
     pub fn new(flash: T, range: core::ops::Range<u32>) -> Self {
         Self { flash, range }
     }
 
+    /// Returns a mutable reference to the underlying flash device.
     pub fn flash(&mut self) -> &mut T {
         &mut self.flash
     }
+
+    /// Returns a clone of the address range reserved for this storage.
     pub fn range(&mut self) -> core::ops::Range<u32> {
         self.range.clone()
     }
@@ -636,6 +662,24 @@ fn set_counter(
     }
 }
 
+/// Writes a write confirmation block to flash memory to mark a successful write operation.
+///
+/// This function creates and writes a special "write_confirm" block to flash that serves as
+/// a marker indicating that a write operation with the given counter value has been successfully
+/// completed. The write_confirm block consists of an all-zeros key followed by the counter value.
+///
+/// This confirmation mechanism helps distinguish between complete and incomplete write operations
+/// during recovery, allowing the system to determine which data entries are valid and which may
+/// have been interrupted mid-write.
+///
+/// # Arguments
+/// * `flash` - A mutable reference to the Flash storage device and address range to write to
+/// * `counter` - The counter value associated with the write operation being confirmed.
+///   This counter helps identify which specific write operation is being confirmed.
+///
+/// # Returns
+/// * `Ok(())` - If the write confirmation block was successfully written to flash
+/// * `Err(LoadStoreError::FlashWrite)` - If the flash write operation failed
 async fn confirm_write<F: NorFlash>(
     flash: &mut Flash<F>,
     counter: Counter,
@@ -643,7 +687,6 @@ async fn confirm_write<F: NorFlash>(
     // Assemble a write_confirm block consisting of an all-zeros key and the counter
     let write_confirm = &mut [0u8; KEY_LEN + 1];
     write_confirm[KEY_LEN] = counter.0;
-
     // Try writing to flash
     queue::push(
         &mut flash.flash,
@@ -753,8 +796,9 @@ async fn verify_list_in_flash<F: NorFlash>(
 /// * `Err(StoreError::AppError(Error::Serialization))` - If node serialization failed
 ///
 /// # Safety
-/// The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
-/// to ensure exclusive access during the write operation.
+/// - The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
+///   to ensure exclusive access during the write operation.
+/// - The list nodes must be in a valid state for writing (e.g., counter must be set)
 async fn write_to_flash<F: NorFlash>(
     ls: &mut MutexGuard<'_, List<NodeHeader>, impl ScopedRawMutex>,
     buf: &mut [u8],
@@ -832,17 +876,17 @@ where
         }
     }
 
-    // Attaches node to a list and waits for hydration.
-    // If the value is not found in flash, a default value is used.
-    //
-    // If the value is found in flash but only from an older write (e.g.
-    // because the latest write operation was interrupted), the node
-    // is initialized with the default, and the value from flash is
-    // returned in the second element of the Result::Error tuple.
-    //
-    // # Panics
-    // This function will panic if a node with the same key(-hash) already
-    // exists in the list.
+    /// Attaches node to a list and waits for hydration.
+    /// If the value is not found in flash, a default value is used.
+    ///
+    /// If the value is found in flash but only from an older write (e.g.
+    /// because the latest write operation was interrupted), the node
+    /// is initialized with the default, and the value from flash is
+    /// returned in the second element of the Result::Error tuple.
+    ///
+    /// # Panics
+    /// This function will panic if a node with the same key(-hash) already
+    /// exists in the list.
     pub async fn attach<R>(
         &'static self,
         list: &'static StorageList<R>,
@@ -1186,8 +1230,10 @@ where
 // Helper structs and functions
 // --------------------------------------------------------------------------
 
-/// Wrapper for [`IterRaw`] that implements `Send`, until this issue is resolved:
-/// https://github.com/hawkw/mycelium/issues/535
+/// Wrapper for [`IterRaw`] that implements `Send`
+///
+/// This is only a helper struct until this issue is resolved:
+/// <https://github.com/hawkw/mycelium/issues/535>
 struct StaticRawIter<'a> {
     iter: IterRaw<'a, NodeHeader>,
 }
@@ -1247,6 +1293,7 @@ fn find_node<R: ScopedRawMutex>(
 }
 
 /// Get the `key` bytes from a list item in the flash.
+///
 /// Used to extract the key from a `QueueIteratorItem`.
 fn extract_key(item: &[u8]) -> Result<&[u8; KEY_LEN], Error> {
     item[..KEY_LEN]
@@ -1255,6 +1302,7 @@ fn extract_key(item: &[u8]) -> Result<&[u8; KEY_LEN], Error> {
 }
 
 /// Get the `counter` byte from a list item in the flash.
+///
 /// Used to extract the counter from a `QueueIteratorItem`.
 fn extract_counter(item: &[u8]) -> Result<Counter, Error> {
     item.get(KEY_LEN)
@@ -1263,6 +1311,7 @@ fn extract_counter(item: &[u8]) -> Result<Counter, Error> {
 }
 
 /// Get the `payload` bytes from a list item in the flash.
+///
 /// Used to extract the payload from a `QueueIteratorItem`.
 fn extract_payload(item: &[u8]) -> Result<&[u8], Error> {
     item.get(KEY_LEN + 1..).ok_or(Error::Deserialization)
@@ -1273,11 +1322,13 @@ fn is_write_confirm(item: &[u8]) -> bool {
     item[..KEY_LEN].iter().all(|&elem| elem == 0)
 }
 
-/// This function serializes a storage node by writing its key, counter, and payload data
-/// into the provided buffer in a specific format:
-/// - Bytes 0..KEY_LEN: The node's key
-/// - Byte KEY_LEN: The counter value (or 0 if no counter is set)
-/// - Bytes KEY_LEN+1..: The serialized payload data (using the node's vtable)
+/// Serialize a storage node by writing its key, counter, and payload data
+/// into the provided buffer.
+///
+/// # Format
+/// - `0..KEY_LEN`: The node's key
+/// - `KEY_LEN`: The counter value
+/// - `KEY_LEN+1..`: The serialized payload data (using the node's vtable)
 ///
 /// # Arguments
 /// * `headerptr` - A non-null pointer to the NodeHeader to serialize
@@ -1301,6 +1352,10 @@ pub fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Result<
     debug!(
         "serializing node with key <{:?}>, counter <{:?}>",
         key, counter
+    );
+    debug_assert!(
+        counter.is_some(),
+        "Counter value expected to be set before writing the list"
     );
 
     let nodeptr: NonNull<Node<()>> = headerptr.cast();

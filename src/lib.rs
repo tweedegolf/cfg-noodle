@@ -1,4 +1,6 @@
+//! Configuration management
 #![no_std]
+#![warn(missing_docs)]
 pub mod error;
 pub mod intrusive;
 
@@ -10,7 +12,7 @@ pub(crate) mod logging {
     #[cfg(feature = "defmt")]
     pub use defmt::*;
 
-    // No-op macros when no logging feature is enabled
+    /// No-op macros when no logging feature is enabled
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! trace {
         ($($arg:tt)*) => {};
