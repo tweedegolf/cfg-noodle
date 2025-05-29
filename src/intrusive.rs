@@ -75,6 +75,20 @@ pub struct StorageList<R: ScopedRawMutex> {
     writing_done: WaitQueue,
 }
 
+impl<R: ScopedRawMutex> StorageList<R> {
+    /// Returns a reference to the wait queue that signals when nodes need to be read from flash.
+    /// This queue is woken when new nodes are attached and require data to be loaded.
+    pub fn needs_read(&self) -> &WaitQueue {
+        &self.needs_read
+    }
+
+    /// Returns a reference to the wait queue that signals when nodes have pending writes to flash.
+    /// This queue is woken when node data is modified and needs to be persisted.
+    pub fn needs_write(&self) -> &WaitQueue {
+        &self.needs_write
+    }
+}
+
 /// Represents the storage of a single `T`, linkable to a `StorageList`
 ///
 /// Users will [`attach`](Self::attach) it to the [`StorageList`] to make it part of
@@ -100,6 +114,20 @@ where
 
     /// Store the StorageListNode for this handle
     inner: &'static StorageListNode<T>,
+}
+
+/// Impl Debug to allow for using unwrap in tests.
+impl<T, R> Debug for StorageListNodeHandle<T, R>
+where
+    T: 'static,
+    R: ScopedRawMutex + 'static,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StorageListNodeHandle")
+            .field("list", &"StorageList<R>")
+            .field("inner", &"StorageListNode<T>")
+            .finish()
+    }
 }
 
 /// This is the actual "linked list node" that is chained to the list
@@ -271,7 +299,7 @@ pub struct Flash<T: NorFlash> {
 // Also, this would allow caching if desired
 impl<T: NorFlash> Flash<T> {
     /// Creates a new Flash instance with the given flash device and address range.
-    /// 
+    ///
     /// # Arguments
     /// * `flash` - The NorFlash device to use for storage operations
     /// * `range` - The address range within the flash device reserved for this storage
