@@ -237,7 +237,7 @@ type SerFn = fn(NonNull<Node<()>>, &mut [u8]) -> Result<usize, ()>;
 /// to deserialize a T from the buffer.
 ///
 /// If successful, returns the number of bytes read from the buffer.
-type DeserFn = fn(NonNull<Node<()>>, &[u8]) -> Result<usize, ()>;
+type DeserFn = fn(NonNull<Node<()>>, &[u8], bool) -> Result<usize, ()>;
 
 #[derive(Clone, Copy)]
 pub struct VTable {
@@ -361,10 +361,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
                 // to the contents of the node. We COPY OUT the vtable for later use,
                 // which is important because we might throw away our `node` ptr shortly.
-                let vtable = {
+                let header_meta = {
                     let node_header = unsafe { node_header.as_ref() };
                     match node_header.state {
-                        State::Initial => Some(node_header.vtable),
+                        State::Initial => Some((node_header.vtable, node_header.counter.is_some())),
                         State::NonResident => None,
                         State::DefaultUnwritten => None,
                         State::OldData => None,
@@ -373,7 +373,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
                         State::WriteStarted => None,
                     }
                 };
-                if let Some(vtable) = vtable {
+                if let Some((vtable, counter_is_some)) = header_meta {
                     // Make a node pointer from a header pointer. This *consumes* the `Pin<&mut NodeHeader>`, meaning
                     // we are free to later re-invent other mutable ptrs/refs, AS LONG AS we still treat the data
                     // as pinned.
@@ -383,10 +383,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
                     // Note: We MUST have destroyed `node` at this point, so we don't have aliasing
                     // references of both the Node and the NodeHeader. Pointers are fine!
                     //
-                    // TODO: right now we only read if `t` is uninhabited, so we don't care about dropping
-                    // or overwriting the value. IF WE EVER want the ability to "reload from flash", we
-                    // might want to think about drop!
-                    let res = (vtable.deserialize)(nodeptr, payload);
+                    // Pass the `counter_is_some` as the `drop_old` flag because if the counter has been
+                    // populated, we must have read that node from flash once already and need to drop
+                    // the old value of `node.t`.
+                    let res = (vtable.deserialize)(nodeptr, payload, counter_is_some);
 
                     // SAFETY: We can re-magic a reference to the header, because the NonNull<Node<()>>
                     // does not have a live reference anymore
@@ -1125,18 +1125,30 @@ where
 
 /// Tricky monomorphizing deserialization function.
 ///
-/// Casts a type-erased node pointer into the "right" type, so that we can do
-/// deserialization with it.
+/// This function performs type-erased deserialization by casting a generic node pointer
+/// to the correct concrete type, then deserializing CBOR data from a buffer into that
+/// type. It handles both initialization of uninitialized data and replacement of existing
+/// data with proper drop semantics.
+///
+/// # Arguments
+/// * `node` - A type-erased pointer to a `Node<()>` that will be cast to `Node<T>`
+/// * `buf` - A byte slice containing CBOR-encoded data to deserialize into type `T`
+/// * `drop_old`
+///     - If `true`, properly drops the existing value before replacing it.
+///     - If `false`, assumes the target is uninitialized and directly writes to it.
+///
+/// # Returns
+/// * `Ok(usize)` - The number of bytes consumed from the buffer during deserialization
+/// * `Err(())` - If CBOR deserialization fails
 ///
 /// # Safety
-/// The mutex must be held the whole time we are here, because we are
-/// writing to `t`!
-///
-/// TODO: this ASSUMES that we will only ever call `deserialize` once, on initial
-/// hydration, so we don't need to worry about dropping the previous contents of `t`,
-/// because there shouldn't be any. If we want to offer a "reload from flash" feature,
-/// we may need to add a `needs drop` flag here to swap out the data.
-fn deserialize<T>(node: NonNull<Node<()>>, buf: &[u8]) -> Result<usize, ()>
+/// The caller must ensure that:
+/// - The storage list mutex is held during the entire operation to prevent concurrent access
+/// - The `node` pointer is valid and points to a properly initialized `Node<T>`
+/// - If `drop_old` is `true`, the target `MaybeUninit<T>` contains a valid, initialized `T`
+/// - If `drop_old` is `false`, the target `MaybeUninit<T>` is uninitialized
+/// - The buffer contains valid CBOR data that can be decoded into type `T`
+fn deserialize<T>(node: NonNull<Node<()>>, buf: &[u8], drop_old: bool) -> Result<usize, ()>
 where
     T: 'static,
     T: CborLen<()>,
@@ -1147,7 +1159,7 @@ where
 
     let res = minicbor::decode::<T>(buf);
 
-    let t = match res {
+    let mut t = match res {
         Ok(t) => t,
         // TODO: Should we return the actual error here or not?
         Err(_) => return Err(()),
@@ -1155,8 +1167,18 @@ where
 
     let len = len_with(&t, &mut ());
 
-    noderef.t = MaybeUninit::new(t);
-
+    // If we are asked to drop the old value, we need to swap `t`
+    // with the Node's `t`. Otherwise, just store the `t`.
+    if drop_old {
+        // We do a swap instead of a write here, to ensure that we
+        // call `drop` on the "old" contents of the buffer.
+        unsafe {
+            let mutref: &mut T = noderef.t.assume_init_mut();
+            core::mem::swap(&mut t, mutref);
+        }
+    } else {
+        noderef.t = MaybeUninit::new(t);
+    }
     Ok(len)
 }
 
