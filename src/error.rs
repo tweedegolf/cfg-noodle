@@ -32,10 +32,10 @@ pub enum Error {
 /// Sometimes specific to the flash implementation.
 pub enum LoadStoreError<F: NorFlashError> {
     /// Writing to flash has failed. Contains the error returned by sequential storage.
-    #[error("Writing to flash has failed.")]
+    #[error("Writing to flash has failed: {0:?}")]
     FlashWrite(SecStorError<F>),
     /// Reading from flash has failed. Contains the error returned by sequential storage.
-    #[error("Reading from flash has failed.")]
+    #[error("Reading from flash has failed: {0:?}")]
     FlashRead(SecStorError<F>),
     /// Value read back from the flash during verification did not match serialized list node.
     #[error("Value written to flash does not match serialized list node.")]

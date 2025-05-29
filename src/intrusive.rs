@@ -17,7 +17,7 @@ use core::{
     num::Wrapping,
     ptr::{self, NonNull},
 };
-use embedded_storage_async::nor_flash::NorFlash;
+use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash};
 use maitake_sync::{Mutex, MutexGuard, WaitQueue};
 use minicbor::{
     CborLen, Decode, Encode,
@@ -297,11 +297,11 @@ pub struct Flash<T: NorFlash> {
 // TODO: consider exposing some functions on the seq-storage queue
 // via the flash to avoid some code duplication for queue::push/iter/...
 // Also, this would allow caching if desired
-impl<T: NorFlash> Flash<T> {
+impl<T: MultiwriteNorFlash> Flash<T> {
     /// Creates a new Flash instance with the given flash device and address range.
     ///
     /// # Arguments
-    /// * `flash` - The NorFlash device to use for storage operations
+    /// * `flash` - The MultiwriteNorFlash device to use for storage operations
     /// * `range` - The address range within the flash device reserved for this storage
     pub fn new(flash: T, range: core::ops::Range<u32>) -> Self {
         Self { flash, range }
@@ -313,7 +313,7 @@ impl<T: NorFlash> Flash<T> {
     }
 
     /// Returns a clone of the address range reserved for this storage.
-    pub fn range(&mut self) -> core::ops::Range<u32> {
+    pub fn range(&self) -> core::ops::Range<u32> {
         self.range.clone()
     }
 }
@@ -381,7 +381,11 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// 4. On success, it will mark the node as now having valid data. On failure
     ///    it marks that (discussed more below, some of this might not be perfect
     ///    yet and requires more thought)
-    pub async fn process_reads(&'static self, flash: &mut Flash<impl NorFlash>, buf: &mut [u8]) {
+    pub async fn process_reads(
+        &'static self,
+        flash: &mut Flash<impl MultiwriteNorFlash>,
+        buf: &mut [u8],
+    ) {
         info!("Start process_reads, buffer has len {}", buf.len());
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
@@ -557,7 +561,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// 4. Writes all changed nodes to flash using sequential storage
     /// 5. Verifies the written data matches what was intended to be written
     /// 6. On success, marks all nodes as no longer having pending changes
-    pub async fn process_writes<F: NorFlash>(
+    pub async fn process_writes<F: MultiwriteNorFlash>(
         &'static self,
         flash: &mut Flash<F>,
         read_buf: &mut [u8],
@@ -649,6 +653,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
         confirm_write(flash, max_counter).await?;
 
+        delete_old_items(flash, max_counter, serde_buf).await?;
+
         // The write must have succeeded. So mark all nodes accordingly.
         for mut hdrptr in ls.iter_raw() {
             // Mark the store as complete, wake the node if it cares about state
@@ -708,7 +714,7 @@ fn set_counter(
 /// # Returns
 /// * `Ok(())` - If the write confirmation block was successfully written to flash
 /// * `Err(LoadStoreError::FlashWrite)` - If the flash write operation failed
-async fn confirm_write<F: NorFlash>(
+async fn confirm_write<F: MultiwriteNorFlash>(
     flash: &mut Flash<F>,
     counter: Counter,
 ) -> Result<(), LoadStoreError<F::Error>> {
@@ -727,6 +733,47 @@ async fn confirm_write<F: NorFlash>(
     .map_err(LoadStoreError::FlashWrite)
 }
 
+/// Removes old flash entries until reaching the newly written list with the specified counter.
+///
+/// This function iterates through flash storage, removing outdated entries by popping them
+/// from the queue until it encounters an entry with the target counter value, which indicates
+/// the beginning of the newly written list.
+///
+/// # Arguments
+/// * `flash` - The flash storage device and address range to clean up
+/// * `counter` - The counter value that marks the start of the newly written list
+/// * `serde_buf` - Buffer used for flash operations (must be large enough for any flash item)
+///
+/// # Returns
+/// * `Ok(())` - If cleanup completed successfully
+/// * `Err(LoadStoreError::FlashRead)` - If reading from flash fails
+/// * `Err(LoadStoreError::FlashWrite)` - If removing old items fails
+async fn delete_old_items<F: MultiwriteNorFlash>(
+    flash: &mut Flash<F>,
+    counter: Counter,
+    serde_buf: &mut [u8],
+) -> Result<(), LoadStoreError<F::Error>> {
+    // Iterate over the items in the flash.
+    // First only peek() and check if it is the desired counter.
+    // If so, return – we have reached the newly written list.
+    // If not, pop that item from the list.
+    loop {
+        let range = flash.range();
+        if let Some(item) =
+            queue::peek(flash.flash(), range.clone(), &mut NoCache::new(), serde_buf)
+                .await
+                .map_err(LoadStoreError::FlashRead)?
+        {
+            if extract_counter(item).is_ok_and(|c| c == counter) {
+                return Ok(());
+            } else {
+                queue::pop(flash.flash(), range, &mut NoCache::new(), serde_buf)
+                    .await
+                    .map_err(LoadStoreError::FlashWrite)?;
+            }
+        }
+    }
+}
 /// Verifies that the storage list was correctly written to flash memory.
 ///
 /// This function compares each node in the storage list against the corresponding
