@@ -4,7 +4,7 @@ use cfg_noodle::intrusive::{Flash, StorageList, StorageListNode};
 use log::{error, info};
 use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
-use sequential_storage::mock_flash::WriteCountCheck;
+use sequential_storage::mock_flash::{MockFlashBase, WriteCountCheck};
 use tokio::time::sleep;
 
 #[tokio::main]
@@ -17,20 +17,7 @@ async fn main() {
     tokio::task::spawn(task_2(&GLOBAL_LIST));
     tokio::task::spawn(task_3(&GLOBAL_LIST));
 
-    //let mut flash = HashMap::<String, Vec<u8>>::new();
-    let mut flash = Flash::new(
-        sequential_storage::mock_flash::MockFlashBase::<10, 16, 256>::new(
-            WriteCountCheck::OnceOnly,
-            None,
-            true,
-        ),
-        0x0000..0x1000,
-    );
-    let range = flash.range();
-
-    sequential_storage::erase_all(&mut flash.flash(), range)
-        .await
-        .unwrap();
+    let mut flash = get_mock_flash();
 
     // give time for tasks to attach
     sleep(Duration::from_millis(100)).await;
@@ -41,19 +28,23 @@ async fn main() {
 
     for _ in 0..10 {
         sleep(Duration::from_secs(1)).await;
-        let mut flash2 = Flash::new(
-            sequential_storage::mock_flash::MockFlashBase::<10, 16, 256>::new(
-                WriteCountCheck::OnceOnly,
-                None,
-                true,
-            ),
-            0x0000..0x1000,
-        );
-        if let Err(e) = GLOBAL_LIST.process_writes(&mut flash2, read_buf, serde_buf).await {
+        let mut flash2 = get_mock_flash();
+        if let Err(e) = GLOBAL_LIST
+            .process_writes(&mut flash2, read_buf, serde_buf)
+            .await
+        {
             error!("Error in process_writes: {}", e);
         }
         info!("NEW WRITES: {}", flash2.flash().print_items().await);
     }
+}
+
+fn get_mock_flash() -> Flash<MockFlashBase<10, 16, 256>> {
+    let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true);
+    // TODO: Figure out why miri tests with unaligned buffers and whether
+    // this needs any fixing. For now just disable the alignment check in MockFlash
+    flash.alignment_check = false;
+    Flash::new(flash, 0x0000..0x1000)
 }
 
 static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();

@@ -1352,10 +1352,7 @@ mod test {
         // TODO: Figure out why miri tests with unaligned buffers and whether
         // this needs any fixing. For now just disable the alignment check in MockFlash
         flash.alignment_check = false;
-        Flash {
-            flash,
-            range: 0x0000..0x1000,
-        }
+        Flash::new(flash, 0x0000..0x1000)
     }
 
     fn worker_task<R: ScopedRawMutex + Sync>(
