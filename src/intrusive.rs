@@ -572,7 +572,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
         }
 
         // Increase the counter for this list by one...
-        set_counter(&mut ls, max_counter + Wrapping(1));
+        max_counter += Wrapping(1);
+        set_counter(&mut ls, max_counter);
 
         debug!("Attempt write_to_flash");
         // ... and try writing the list to flash one time.
@@ -584,12 +585,15 @@ impl<R: ScopedRawMutex> StorageList<R> {
             );
 
             // Increase the counter for this list by two
+            max_counter += Wrapping(1);
             set_counter(&mut ls, max_counter + Wrapping(2));
             // Try one more time, but return any error
             write_to_flash(&mut ls, serde_buf, flash).await?;
         }
 
         verify_list_in_flash(&mut ls, read_buf, serde_buf, flash).await?;
+
+        confirm_write(flash, max_counter).await?;
 
         // The write must have succeeded. So mark all nodes accordingly.
         for mut hdrptr in ls.iter_raw() {
@@ -630,6 +634,26 @@ fn set_counter(
         let header = unsafe { hdrptr.as_mut() };
         header.counter.replace(new_counter);
     }
+}
+
+async fn confirm_write<F: NorFlash>(
+    flash: &mut Flash<F>,
+    counter: Counter,
+) -> Result<(), LoadStoreError<F::Error>> {
+    // Assemble a write_confirm block consisting of an all-zeros key and the counter
+    let write_confirm = &mut [0u8; KEY_LEN + 1];
+    write_confirm[KEY_LEN] = counter.0;
+
+    // Try writing to flash
+    queue::push(
+        &mut flash.flash,
+        flash.range.clone(),
+        &mut NoCache::new(),
+        write_confirm,
+        false,
+    )
+    .await
+    .map_err(LoadStoreError::FlashWrite)
 }
 
 /// Verifies that the storage list was correctly written to flash memory.
@@ -1339,6 +1363,8 @@ mod test {
                         {
                             error!("Error in process_writes: {}", e);
                         }
+
+                        info!("Wrote to flash: {}", flash.flash().print_items().await);
                     }
                 }
             }
