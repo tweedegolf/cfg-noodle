@@ -6,19 +6,19 @@ version = "0.1.0"
 [[bin]]
 name = "main"
 path = "src/main.rs"
-required-features = ["_test"]
-
+required-features = ["std"]
 
 [[test]]
 name = "integration_tests"
-required-features = ["_test"]
+required-features = ["std"]
 
 [features]
-# TODO: Delete this feature? On std it will always be enabled
-_test = ["std", "sequential-storage/_test", "tokio/sync"]
+default = ["std"]
 std = [
     "minicbor/std",
     "sequential-storage/std",
+    "sequential-storage/_test",
+    "tokio/sync",
     "critical-section/std",
     "maitake-sync/std",
     "mutex/std",

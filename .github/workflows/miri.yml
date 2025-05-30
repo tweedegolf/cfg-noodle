@@ -23,6 +23,6 @@ jobs:
           rustup override set nightly
           cargo miri setup
       - name: Test with Miri
-        run: cargo miri test --features _test
+        run: cargo miri test --features std
       - name: Run with Miri
-        run: cargo miri run --features _test
+        run: cargo miri run --features std

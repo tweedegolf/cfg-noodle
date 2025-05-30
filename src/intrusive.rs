@@ -1413,7 +1413,7 @@ pub fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Result<
         .map_err(|_| Error::Serialization)
 }
 
-#[cfg(all(test, feature = "_test"))]
+#[cfg(test)]
 mod test {
     extern crate std;
     use super::*;
