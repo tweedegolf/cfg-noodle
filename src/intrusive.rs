@@ -200,6 +200,7 @@ pub struct NodeHeader {
 ///                                                 └──────────────┘
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum State {
     /// The node has been created, but never "hydrated" with data from the
     /// flash. In this state, we are waiting to be notified whether we can

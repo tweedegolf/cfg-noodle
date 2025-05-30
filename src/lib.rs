@@ -1,5 +1,5 @@
 //! Configuration management
-#![no_std]
+#![cfg_attr(not(any(test, doctest, feature = "std")), no_std)]
 #![warn(missing_docs)]
 pub mod error;
 pub mod intrusive;

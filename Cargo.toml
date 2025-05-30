@@ -27,6 +27,7 @@ std = [
     "dep:tokio",
 ]
 defmt = ["dep:defmt"]
+arbitrary = ["dep:arbitrary"]
 
 [dependencies]
 const-fnv1a-hash = "1.1.0"
@@ -52,6 +53,8 @@ tokio = { version = "1.45.1", optional = true, features = [
 
 defmt = { version = "1.0.1", optional = true }
 embassy-futures = "0.1.1"
+
+arbitrary = { version = "1", optional = true, features = ["derive"] }
 
 [dev-dependencies]
 approx = "0.5.1"
