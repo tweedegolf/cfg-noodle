@@ -1,11 +1,13 @@
-use cfg_noodle::intrusive::{Flash, StorageList, StorageListNode};
+use cfg_noodle::{
+    flash::Flash,
+    intrusive::{StorageList, StorageListNode},
+};
 use log::{error, info, warn};
 use minicbor::{CborLen, Decode, Encode};
 use mutex::{ScopedRawMutex, raw_impls::cs::CriticalSectionRawMutex};
 use sequential_storage::{
     cache::NoCache,
     mock_flash::{MockFlashBase, WriteCountCheck},
-    queue,
 };
 use test_log::test;
 use tokio::{
@@ -32,11 +34,14 @@ struct SimpleConfig {
     #[n(0)]
     data: u8,
 }
+
+type MockFlash = Flash<MockFlashBase<10, 16, 256>, NoCache>;
+
 /// Creates a test flash instance with mock storage for testing purposes.
-fn get_test_flash() -> Flash<MockFlashBase<10, 16, 256>> {
+fn get_test_flash() -> MockFlash {
     let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::Twice, None, true);
     flash.alignment_check = false;
-    Flash::new(flash, 0x0000..0x1000)
+    Flash::new(flash, 0x0000..0x1000, NoCache::new())
 }
 
 /// Spawns an asynchronous worker task that manages storage operations for a storage list.
@@ -69,9 +74,9 @@ fn get_test_flash() -> Flash<MockFlashBase<10, 16, 256>> {
 /// returning the flash instance to the caller.
 fn worker_task<R: ScopedRawMutex + Sync>(
     list: &'static StorageList<R>,
-    mut flash: Flash<MockFlashBase<10, 16, 256>>,
+    mut flash: MockFlash,
     mut kill_signal: Option<Receiver<()>>,
-) -> JoinHandle<Flash<MockFlashBase<10, 16, 256>>> {
+) -> JoinHandle<MockFlash> {
     // Clear any pending default value from the kill signal receiver to ensure
     // we only respond to new termination signals sent after task startup
     if let Some(rx) = kill_signal.as_mut() {
@@ -110,7 +115,9 @@ fn worker_task<R: ScopedRawMutex + Sync>(
                 // Handle read request from storage list
                 embassy_futures::select::Either3::First(_) => {
                     info!("worker task got needs_read signal");
-                    list.process_reads(&mut flash, &mut read_buf).await;
+                    if let Err(e) = list.process_reads(&mut flash, &mut read_buf).await {
+                        error!("Error in process_writes: {}", e);
+                    }
                 }
                 // Handle write request from storage list
                 embassy_futures::select::Either3::Second(_) => {
@@ -423,9 +430,7 @@ async fn test_multiple_writes() {
     info!("Flash content: {}", flash.flash().print_items().await);
 
     // Iterate over the flash and count the number of items
-    let range = flash.range();
-    let mut cache = NoCache::new();
-    let mut iter = queue::iter(flash.flash(), range, &mut cache).await.unwrap();
+    let mut iter = flash.iter().await.unwrap();
     let mut item_counter = 0;
     while iter.next(&mut [0u8; BUF_LEN]).await.unwrap().is_some() {
         item_counter += 1;

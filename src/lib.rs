@@ -1,8 +1,10 @@
 //! Configuration management
 #![cfg_attr(not(any(test, doctest, feature = "std")), no_std)]
 #![warn(missing_docs)]
+#![deny(clippy::unwrap_used)]
 pub mod error;
 pub mod intrusive;
+pub mod flash;
 
 #[allow(unused)]
 pub(crate) mod logging {

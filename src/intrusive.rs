@@ -3,6 +3,7 @@
 
 use crate::{
     error::{Error, LoadStoreError},
+    flash::Flash,
     logging::{debug, error, info},
 };
 use cordyceps::{
@@ -17,7 +18,7 @@ use core::{
     num::Wrapping,
     ptr::{self, NonNull},
 };
-use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash};
+use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use maitake_sync::{Mutex, MutexGuard, WaitQueue};
 use minicbor::{
     CborLen, Decode, Encode,
@@ -25,7 +26,7 @@ use minicbor::{
     len_with,
 };
 use mutex::{ConstInit, ScopedRawMutex};
-use sequential_storage::{cache::NoCache, queue};
+use sequential_storage::cache::CacheImpl;
 
 /// Node counter, only an alias for `Wrapping<u8>`
 pub type Counter = Wrapping<u8>;
@@ -289,36 +290,6 @@ struct VTable {
     deserialize: DeserFn,
 }
 
-/// Owns a flash and the range reserved for the `StorageList`
-pub struct Flash<T: NorFlash> {
-    flash: T,
-    range: core::ops::Range<u32>,
-}
-
-// TODO: consider exposing some functions on the seq-storage queue
-// via the flash to avoid some code duplication for queue::push/iter/...
-// Also, this would allow caching if desired
-impl<T: MultiwriteNorFlash> Flash<T> {
-    /// Creates a new Flash instance with the given flash device and address range.
-    ///
-    /// # Arguments
-    /// * `flash` - The MultiwriteNorFlash device to use for storage operations
-    /// * `range` - The address range within the flash device reserved for this storage
-    pub fn new(flash: T, range: core::ops::Range<u32>) -> Self {
-        Self { flash, range }
-    }
-
-    /// Returns a mutable reference to the underlying flash device.
-    pub fn flash(&mut self) -> &mut T {
-        &mut self.flash
-    }
-
-    /// Returns a clone of the address range reserved for this storage.
-    pub fn range(&self) -> core::ops::Range<u32> {
-        self.range.clone()
-    }
-}
-
 // --------------------------------------------------------------------------
 // impl StorageList
 // --------------------------------------------------------------------------
@@ -382,11 +353,11 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// 4. On success, it will mark the node as now having valid data. On failure
     ///    it marks that (discussed more below, some of this might not be perfect
     ///    yet and requires more thought)
-    pub async fn process_reads(
+    pub async fn process_reads<T: MultiwriteNorFlash>(
         &'static self,
-        flash: &mut Flash<impl MultiwriteNorFlash>,
+        flash: &mut Flash<T, impl CacheImpl>,
         buf: &mut [u8],
-    ) {
+    ) -> Result<(), LoadStoreError<T::Error>> {
         info!("Start process_reads, buffer has len {}", buf.len());
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
@@ -399,11 +370,12 @@ impl<R: ScopedRawMutex> StorageList<R> {
         let mut latest_counter: Option<Counter> = None;
 
         // Create a `QueueIterator` without caching
-        let mut cache = NoCache::new();
-        let mut queue_iter = queue::iter(&mut flash.flash, flash.range.clone(), &mut cache)
+        let mut queue_iter = flash.iter().await.map_err(LoadStoreError::FlashRead)?;
+        while let Some(item) = queue_iter
+            .next(buf)
             .await
-            .unwrap();
-        while let Some(item) = queue_iter.next(buf).await.unwrap() {
+            .map_err(LoadStoreError::FlashRead)?
+        {
             let key: &[u8; KEY_LEN] = extract_key(&item).expect("Invalid item: no key");
             latest_counter.replace(extract_counter(&item).expect("Invalid item: no counter"));
             let payload: &[u8] = extract_payload(&item).expect("Invalid item: no payload");
@@ -415,7 +387,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
             // Check for the write_confirm key
             if is_write_confirm(&item) {
                 info!("Found write_confirm for counter {:?}", latest_counter);
-                latest_write_confirm.replace(latest_counter.unwrap()); // Safe to unwrap because we replace it before
+                latest_write_confirm.replace(
+                    latest_counter
+                        .expect("Counter should be replaced by value extracted from flash"),
+                ); // Safe to unwrap because we replace it before
             } else if let Some(node_header) = find_node(&mut ls, key) {
                 // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
                 // to the contents of the node. We COPY OUT the vtable for later use,
@@ -454,7 +429,11 @@ impl<R: ScopedRawMutex> StorageList<R> {
                     if res.is_ok() {
                         // If it went okay, let the node know that it has been hydrated with data
                         // from the flash by setting its counter value
-                        hdrmut.counter.replace(latest_counter.unwrap()); // Safe to unwrap because we replaced it before
+                        hdrmut
+                            .counter
+                            .replace(latest_counter.expect(
+                                "Counter should be replaced by value extracted from flash",
+                            ));
                         self.reading_done.wake_all();
                     } else {
                         // If there WAS a key, but the deser failed, this means that either the data
@@ -537,6 +516,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
         debug!("Reading done. Waking all.");
         self.reading_done.wake_all();
+        Ok(())
     }
 
     /// Process writes to flash.
@@ -564,7 +544,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// 6. On success, marks all nodes as no longer having pending changes
     pub async fn process_writes<F: MultiwriteNorFlash>(
         &'static self,
-        flash: &mut Flash<F>,
+        flash: &mut Flash<F, impl CacheImpl>,
         read_buf: &mut [u8],
         serde_buf: &mut [u8],
     ) -> Result<(), LoadStoreError<F::Error>> {
@@ -716,22 +696,17 @@ fn set_counter(
 /// * `Ok(())` - If the write confirmation block was successfully written to flash
 /// * `Err(LoadStoreError::FlashWrite)` - If the flash write operation failed
 async fn confirm_write<F: MultiwriteNorFlash>(
-    flash: &mut Flash<F>,
+    flash: &mut Flash<F, impl CacheImpl>,
     counter: Counter,
 ) -> Result<(), LoadStoreError<F::Error>> {
     // Assemble a write_confirm block consisting of an all-zeros key and the counter
     let write_confirm = &mut [0u8; KEY_LEN + 1];
     write_confirm[KEY_LEN] = counter.0;
     // Try writing to flash
-    queue::push(
-        &mut flash.flash,
-        flash.range.clone(),
-        &mut NoCache::new(),
-        write_confirm,
-        false,
-    )
-    .await
-    .map_err(LoadStoreError::FlashWrite)
+    flash
+        .push(write_confirm)
+        .await
+        .map_err(LoadStoreError::FlashWrite)
 }
 
 /// Removes old flash entries until reaching the newly written list with the specified counter.
@@ -750,7 +725,7 @@ async fn confirm_write<F: MultiwriteNorFlash>(
 /// * `Err(LoadStoreError::FlashRead)` - If reading from flash fails
 /// * `Err(LoadStoreError::FlashWrite)` - If removing old items fails
 async fn delete_old_items<F: MultiwriteNorFlash>(
-    flash: &mut Flash<F>,
+    flash: &mut Flash<F, impl CacheImpl>,
     counter: Counter,
     serde_buf: &mut [u8],
 ) -> Result<(), LoadStoreError<F::Error>> {
@@ -759,16 +734,16 @@ async fn delete_old_items<F: MultiwriteNorFlash>(
     // If so, return – we have reached the newly written list.
     // If not, pop that item from the list.
     loop {
-        let range = flash.range();
-        if let Some(item) =
-            queue::peek(flash.flash(), range.clone(), &mut NoCache::new(), serde_buf)
-                .await
-                .map_err(LoadStoreError::FlashRead)?
+        if let Some(item) = flash
+            .peek(serde_buf)
+            .await
+            .map_err(LoadStoreError::FlashRead)?
         {
             if extract_counter(item).is_ok_and(|c| c == counter) {
                 return Ok(());
             } else {
-                queue::pop(flash.flash(), range, &mut NoCache::new(), serde_buf)
+                flash
+                    .pop(serde_buf)
                     .await
                     .map_err(LoadStoreError::FlashWrite)?;
             }
@@ -797,17 +772,14 @@ async fn delete_old_items<F: MultiwriteNorFlash>(
 /// # Safety
 /// The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
 /// to ensure exclusive access during verification.
-async fn verify_list_in_flash<F: NorFlash>(
+async fn verify_list_in_flash<F: MultiwriteNorFlash>(
     ls: &mut MutexGuard<'_, List<NodeHeader>, impl ScopedRawMutex>,
     read_buf: &mut [u8],
     serde_buf: &mut [u8],
-    flash: &mut Flash<F>,
+    flash: &mut Flash<F, impl CacheImpl>,
 ) -> Result<(), LoadStoreError<F::Error>> {
-    // Create a `QueueIterator` without caching
-    let mut cache = NoCache::new();
-    let mut queue_iter = queue::iter(&mut flash.flash, flash.range.clone(), &mut cache)
-        .await
-        .unwrap();
+    // Create a `QueueIterator`
+    let mut queue_iter = flash.iter().await.map_err(LoadStoreError::FlashRead)?;
 
     let mut iter = StaticRawIter {
         iter: ls.iter_raw(),
@@ -835,7 +807,9 @@ async fn verify_list_in_flash<F: NorFlash>(
             // Once we reach the correct counter, we are at the first element written and
             // can start processing. If the counter is wrong (or not present), continue:
             if !counter_found
-                && !extract_counter(&item).is_ok_and(|counter| counter == header.counter.unwrap())
+                && !extract_counter(&item).is_ok_and(|counter| {
+                    counter == header.counter.expect("Counter should have been set!")
+                })
             {
                 continue;
             }
@@ -875,10 +849,10 @@ async fn verify_list_in_flash<F: NorFlash>(
 /// - The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
 ///   to ensure exclusive access during the write operation.
 /// - The list nodes must be in a valid state for writing (e.g., counter must be set)
-async fn write_to_flash<F: NorFlash>(
+async fn write_to_flash<F: MultiwriteNorFlash>(
     ls: &mut MutexGuard<'_, List<NodeHeader>, impl ScopedRawMutex>,
     buf: &mut [u8],
-    flash: &mut Flash<F>,
+    flash: &mut Flash<F, impl CacheImpl>,
 ) -> Result<(), LoadStoreError<F::Error>> {
     let mut iter = StaticRawIter {
         iter: ls.iter_raw(),
@@ -895,15 +869,10 @@ async fn write_to_flash<F: NorFlash>(
                 buf.as_ptr() as usize
             );
             // Try writing to flash
-            queue::push(
-                &mut flash.flash,
-                flash.range.clone(),
-                &mut NoCache::new(),
-                &buf[..used],
-                false,
-            )
-            .await
-            .map_err(LoadStoreError::FlashWrite)?;
+            flash
+                .push(&buf[..used])
+                .await
+                .map_err(LoadStoreError::FlashWrite)?;
         } else {
             // I'm honestly not sure what we should do if serialization failed.
             // If it was a simple "out of space" because we have a batch of writes
@@ -1452,6 +1421,7 @@ mod test {
     use core::time::Duration;
     use minicbor::CborLen;
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
+    use sequential_storage::cache::NoCache;
     use sequential_storage::mock_flash::MockFlashBase;
     use sequential_storage::mock_flash::WriteCountCheck;
     use test_log::test;
@@ -1478,17 +1448,19 @@ mod test {
         }
     }
 
-    fn get_mock_flash() -> Flash<MockFlashBase<10, 16, 256>> {
+    type MockFlash = Flash<MockFlashBase<10, 16, 256>, NoCache>;
+
+    fn get_mock_flash() -> MockFlash {
         let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true);
         // TODO: Figure out why miri tests with unaligned buffers and whether
         // this needs any fixing. For now just disable the alignment check in MockFlash
         flash.alignment_check = false;
-        Flash::new(flash, 0x0000..0x1000)
+        Flash::new(flash, 0x0000..0x1000, NoCache::new())
     }
 
     fn worker_task<R: ScopedRawMutex + Sync>(
         list: &'static StorageList<R>,
-        mut flash: Flash<MockFlashBase<10, 16, 256>>,
+        mut flash: MockFlash,
         mut read_buf: [u8; 4096],
         mut serde_buf: [u8; 4096],
     ) -> JoinHandle<()> {
@@ -1503,7 +1475,9 @@ mod test {
                 {
                     embassy_futures::select::Either::First(_) => {
                         info!("worker task got needs_read signal");
-                        list.process_reads(&mut flash, &mut read_buf).await;
+                        if let Err(e) = list.process_reads(&mut flash, &mut read_buf).await {
+                            error!("Error in process_writes: {}", e);
+                        }
                     }
                     embassy_futures::select::Either::Second(_) => {
                         info!("worker task got needs_write signal");
@@ -1549,14 +1523,17 @@ mod test {
         }
 
         // Load data for the first handle
-        let data: PositronConfig = config_handle.load().await.unwrap();
+        let data: PositronConfig = config_handle
+            .load()
+            .await
+            .expect("Loading config should not fail");
         info!("T3 Got {data:?}");
 
         // Assert that the counter is at default value because we
         // haven't read this from flash
         assert_eq!(
             unsafe { config_handle.inner.inner.get().as_ref() }
-                .unwrap()
+                .expect("Getting inner at this point should not fail")
                 .header
                 .counter,
             Some(Counter::default())
@@ -1568,21 +1545,30 @@ mod test {
             down: 25,
             strange: 108,
         };
-        config_handle.write(&new_config).await.unwrap();
+        config_handle
+            .write(&new_config)
+            .await
+            .expect("Writing config to node should not fail");
 
         // Give the worker_task some time to process the write
         sleep(Duration::from_millis(100)).await;
 
         // Assert that the loaded value equals the written value
-        assert_eq!(config_handle.load().await.unwrap(), new_config);
+        assert_eq!(
+            config_handle
+                .load()
+                .await
+                .expect("Loading config should not fail"),
+            new_config
+        );
 
         // Assert that the counter is now 1
         assert_eq!(
             unsafe { config_handle.inner.inner.get().as_ref() }
-                .unwrap()
+                .expect("Getting inner at this point should not fail")
                 .header
                 .counter
-                .unwrap(),
+                .expect("Counter should have a value at this point"),
             Wrapping(1)
         );
 
@@ -1612,9 +1598,19 @@ mod test {
         // TODO: The following pointer operations are a very cumbersome way
         // of serializing the node just so we can push it to the flash and read back...
         unsafe {
-            POSITRON_CONFIG.inner.get().as_mut().unwrap().t =
-                MaybeUninit::new(custom_config.clone());
-            POSITRON_CONFIG.inner.get().as_mut().unwrap().header.counter = Some(Wrapping(0));
+            POSITRON_CONFIG
+                .inner
+                .get()
+                .as_mut()
+                .expect("Pointer should not be null")
+                .t = MaybeUninit::new(custom_config.clone());
+            POSITRON_CONFIG
+                .inner
+                .get()
+                .as_mut()
+                .expect("Pointer should not be null")
+                .header
+                .counter = Some(Wrapping(0));
         }
         let nodeptr: *mut Node<PositronConfig> = POSITRON_CONFIG.inner.get();
         let nodenn: NonNull<Node<PositronConfig>> = unsafe { NonNull::new_unchecked(nodeptr) };
@@ -1625,22 +1621,16 @@ mod test {
         // Now serialize again by calling encode() directly and verify both match
         let mut serialize_control = std::vec![];
         let len = len_with(&custom_config, &mut ());
-        minicbor::encode(&custom_config, &mut serialize_control).unwrap();
+        minicbor::encode(&custom_config, &mut serialize_control).expect("Encoding should not fail");
         // The serialized node will contain some metadata, but the last `len` bytes must match
         assert_eq!(serialize_control[..len], serde_buf[used - len..used]);
 
         let mut flash = get_mock_flash();
         info!("Pushing to flash: {:?}", &serde_buf[..used]);
-        let range = flash.range(); // get cloned range so we can borrow flash mutably in push()
-        queue::push(
-            &mut flash.flash(),
-            range,
-            &mut NoCache::new(),
-            &serde_buf[..used],
-            false,
-        )
-        .await
-        .expect("pushing to flash should not fail here");
+        flash
+            .push(&serde_buf[..used])
+            .await
+            .expect("pushing to flash should not fail here");
 
         let worker_task = worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
 
@@ -1653,24 +1643,27 @@ mod test {
 
         assert_eq!(
             custom_config,
-            expecting_already_present.load().await.unwrap(),
+            expecting_already_present
+                .load()
+                .await
+                .expect("Loading config should not fail"),
             "Key should already be present"
         );
 
         expecting_already_present
             .write(&custom_config)
             .await
-            .unwrap();
+            .expect("Writing config to node should not fail");
 
         sleep(Duration::from_millis(50)).await;
 
         // Assert that the counter is now 1
         assert_eq!(
             unsafe { expecting_already_present.inner.inner.get().as_ref() }
-                .unwrap()
+                .expect("Node should exist")
                 .header
                 .counter
-                .unwrap(),
+                .expect("Counter should have a value"),
             Wrapping(1)
         );
 

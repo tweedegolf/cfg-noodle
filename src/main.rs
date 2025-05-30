@@ -1,10 +1,16 @@
 use std::time::Duration;
 
-use cfg_noodle::intrusive::{Flash, StorageList, StorageListNode};
+use cfg_noodle::{
+    flash::Flash,
+    intrusive::{StorageList, StorageListNode},
+};
 use log::{error, info};
 use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
-use sequential_storage::mock_flash::{MockFlashBase, WriteCountCheck};
+use sequential_storage::{
+    cache::NoCache,
+    mock_flash::{MockFlashBase, WriteCountCheck},
+};
 use tokio::time::sleep;
 
 #[tokio::main]
@@ -24,7 +30,10 @@ async fn main() {
     // process reads
     let read_buf = &mut [0u8; 4096];
     let serde_buf = &mut [0u8; 4096];
-    GLOBAL_LIST.process_reads(&mut flash, read_buf).await;
+    GLOBAL_LIST
+        .process_reads(&mut flash, read_buf)
+        .await
+        .expect("process_reads failed");
 
     for _ in 0..10 {
         sleep(Duration::from_secs(1)).await;
@@ -39,12 +48,12 @@ async fn main() {
     }
 }
 
-fn get_mock_flash() -> Flash<MockFlashBase<10, 16, 256>> {
+fn get_mock_flash() -> Flash<MockFlashBase<10, 16, 256>, NoCache> {
     let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true);
     // TODO: Figure out why miri tests with unaligned buffers and whether
     // this needs any fixing. For now just disable the alignment check in MockFlash
     flash.alignment_check = false;
-    Flash::new(flash, 0x0000..0x1000)
+    Flash::new(flash, 0x0000..0x1000, NoCache::new())
 }
 
 static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
