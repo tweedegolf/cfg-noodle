@@ -234,7 +234,7 @@ async fn test_read_clean_state() {
 /// This test writes a config to one node, simulates a system restart by creating new storage lists
 /// and nodes, then verifies that:
 /// 1. The previously written config is correctly loaded from flash storage
-/// 2. A new config node returns default values when no data exists for it
+/// 2. A newly added config node returns default values becauseno data exists for it
 ///
 /// The test demonstrates that the storage system can handle multiple configuration nodes
 /// independently and maintain data integrity across restarts.
