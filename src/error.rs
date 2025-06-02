@@ -26,6 +26,11 @@ pub enum Error {
     InvalidState([u8; KEY_LEN], State),
 }
 
+
+// TODO @James: I have created this error because it uses the generic <F>. Adding generics
+// to the generall error struct was super awkward. Is there any better way of wrapping errors
+// from other crates when they require generics?
+
 #[derive(thiserror::Error, Debug)]
 /// Errors during loading from and storing to flash.
 /// 
