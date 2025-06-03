@@ -150,6 +150,12 @@ pub struct Node<T> {
 
     // We generally want this to be in the tail position, because the size of T varies
     // and the pointer to the `NodeHeader` must not change as described above.
+    // 
+    // TODO @James: This is very difficult to access from tests but maybe we would
+    // want to have an (test-)interface that lets us create a node with a specific payload
+    // such that we can directly de-/serialize nodes and compare the results in a 
+    // unit test. Do you think that makes sense? Or is there a better way to
+    // have unit tests for this?
     t: MaybeUninit<T>,
 }
 
@@ -1096,7 +1102,7 @@ where
             // All these states implicate that process_reads/_writes has not finished
             // but they hold a lock on the list, so we should never reach this piece
             // of code while holding a lock ourselves
-            // 
+            //
             // TODO @James: Again, if we are in an invalid state, should we rather panic?
             State::Initial | State::NonResident | State::OldData => {
                 return Err(Error::InvalidState(
@@ -1279,7 +1285,7 @@ where
 /// - If `drop_old` is `true`, the target `MaybeUninit<T>` contains a valid, initialized `T`
 /// - If `drop_old` is `false`, the target `MaybeUninit<T>` is uninitialized
 /// - The buffer contains valid CBOR data that can be decoded into type `T`
-/// 
+///
 /// TODO @James: Please review these safety requirements. Are they correct and complete?
 fn deserialize<T>(node: NonNull<Node<()>>, buf: &[u8], drop_old: bool) -> Result<usize, ()>
 where
@@ -1346,7 +1352,7 @@ struct SendPtr {
 unsafe impl Send for SendPtr {}
 
 /// Node Key length in bytes
-/// 
+///
 /// TODO @James: Should this rather be a parameter and be tied to a hash function?
 /// It's pretty redundant because if we use a 32-bit hash, this will always be 4.
 pub const KEY_LEN: usize = 4;
@@ -1367,7 +1373,7 @@ pub const KEY_LEN: usize = 4;
 ///
 /// # Safety
 /// This function is safe to call as long as the caller holds the storage list mutex
-/// (which is enforced by taking a `MutexGuard` parameter). 
+/// (which is enforced by taking a `MutexGuard` parameter).
 fn find_node<R: ScopedRawMutex>(
     list: &mut MutexGuard<List<NodeHeader>, R>,
     key: &[u8; KEY_LEN],
@@ -1376,7 +1382,7 @@ fn find_node<R: ScopedRawMutex>(
     // are enough (together with explicity requiring a MutexGuard)
     // Also I think we should use `raw_iter` instead of `iter` for the same reason as we do everywhere else.
     // But is that true? Or could we use `iter` if we don't do any pointer casting.
-    // 
+    //
     // SAFETY: Since we hold a lock on the List (taking MutexGuard as a parameter)
     // we have exclusive access to the contents of the list.
     list.iter_raw()
@@ -1423,18 +1429,21 @@ fn is_write_confirm(item: &[u8]) -> bool {
 ///
 /// # Arguments
 /// * `headerptr` - A non-null pointer to the NodeHeader to serialize
-/// * `buf` - The buffer to write the serialized data into
+/// * `serde_buf` - The buffer to write the serialized data into
 ///
 /// # Returns
 /// * `Ok(usize)` - The total number of bytes written to the buffer
-/// * `Err(())` - If serialization fails (e.g., buffer too small, serialization error)
+/// * `Err(Error::Serialization)` - If serialization fails (e.g., buffer too small, serialization error)
 ///
 /// # Safety
 /// The caller must ensure that:
 /// - `headerptr` points to a valid NodeHeader
 /// - The storage list mutex is held during the entire operation
 /// - The buffer is large enough to hold the serialized data
-pub fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Result<usize, Error> {
+pub fn serialize_node(
+    headerptr: NonNull<NodeHeader>,
+    serde_buf: &mut [u8],
+) -> Result<usize, Error> {
     let (vtable, key, counter) = {
         let node = unsafe { headerptr.as_ref() };
         (node.vtable, node.key, node.counter)
@@ -1451,14 +1460,23 @@ pub fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Result<
 
     let nodeptr: NonNull<Node<()>> = headerptr.cast();
 
-    // Attempt to serialize
-    buf[0..KEY_LEN].copy_from_slice(&key);
-    buf[KEY_LEN] = counter.map(|c| c.0).unwrap_or(0);
-    (vtable.serialize)(nodeptr, &mut buf[KEY_LEN + 1..])
+    // Serialize metadata + payload into buffer
+    serde_buf[0..KEY_LEN].copy_from_slice(&key);
+    serde_buf[KEY_LEN] = counter.map(|c| c.0).unwrap_or(0);
+    (vtable.serialize)(nodeptr, &mut serde_buf[KEY_LEN + 1..])
         .map(|len| len + KEY_LEN + 1)
         .map_err(|_| Error::Serialization)
 }
 
+// TODO @James: I've already created some of the test cases from
+// https://github.com/tweedegolf/cfg-noodle/issues/16 in tests/integration_tests.rs
+// and the tests in this module are mostly obsolete. What is still missing, though, are
+// unit tests that could be (re)used for fuzzing.
+// I think we should first decide on entire counter handling before writing these since
+// the function signatures and output might change. But once that is done, we can gather
+// a list of tests that should be implemented and we both write some of them.
+// And we might want to keep in mind that the fuzzer probably wants to reuse some of that code.
+// In general, we probably must decide on what the interface to the outside looks, first.
 #[cfg(test)]
 mod test {
     extern crate std;
@@ -1494,6 +1512,9 @@ mod test {
         }
     }
 
+    // TODO: This type, the get_mock_flash() and worker_task() are not only specific to sequential storage's
+    // mock flash, but also copy&pasted in the integration tests. If we go with the flash-trait approach,
+    // these could be generic.
     type MockFlash = Flash<MockFlashBase<10, 16, 256>, NoCache>;
 
     fn get_mock_flash() -> MockFlash {
