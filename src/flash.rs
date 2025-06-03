@@ -36,26 +36,28 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> SeqStorFlash<T, C> {
     }
 }
 
-pub trait QueueIter {
-    type Error;
-    async fn next<'a>(&'a mut self, buf: &'a mut [u8]) -> Result<Option<&'a [u8]>, Self::Error>;
+pub trait QueueIter<E> {
+    fn next<'a>(&'a mut self, buf: &'a mut [u8]) -> impl Future<Output = Result<Option<&'a [u8]>, E>> + Send;
 }
 
 pub trait Flash {
-    type Error;
-    async fn push(&mut self, data: &[u8]) -> Result<(), Self::Error>;
-    async fn iter(&mut self) -> Result<impl QueueIter, Self::Error>;
-    async fn pop<'a>(&mut self, data: &'a mut [u8]) -> Result<Option<&'a mut [u8]>, Self::Error>;
-    async fn peek<'a>(&mut self, data: &'a mut [u8]) -> Result<Option<&'a mut [u8]>, Self::Error>;
+    type Error: core::fmt::Debug;
+    fn push(&mut self, data: &[u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn iter(&mut self) -> impl Future<Output = Result<impl QueueIter<Self::Error>, Self::Error>> + Send;
+    fn pop<'a>(&mut self, data: &'a mut [u8]) -> impl Future<Output = Result<Option<&'a mut [u8]>, Self::Error>> + Send;
+    fn peek<'a>(&mut self, data: &'a mut [u8]) -> impl Future<Output = Result<Option<&'a mut [u8]>, Self::Error>> + Send;
 }
 
 struct SeqStorQueueIter<'a, T: MultiwriteNorFlash, C: CacheImpl> {
     inner: QueueIterator<'a, T, C>,
 }
-impl<T: MultiwriteNorFlash, C: CacheImpl> QueueIter for SeqStorQueueIter<'_, T, C> {
-    type Error = SeqStorError<T::Error>;
-
-    async fn next<'a>(&'a mut self, buf: &'a mut [u8]) -> Result<Option<&'a [u8]>, Self::Error> {
+impl<T: MultiwriteNorFlash, C: CacheImpl> QueueIter<SeqStorError<T::Error>>
+    for SeqStorQueueIter<'_, T, C>
+{
+    async fn next<'a>(
+        &'a mut self,
+        buf: &'a mut [u8],
+    ) -> Result<Option<&'a [u8]>, SeqStorError<T::Error>> {
         Ok(self
             .inner
             .next(buf)
@@ -81,7 +83,9 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> Flash for SeqStorFlash<T, C> {
     }
 
     /// Creates an iterator over the sequential storage queue.
-    async fn iter(&mut self) -> Result<impl QueueIter, SeqStorError<T::Error>> {
+    async fn iter(
+        &mut self,
+    ) -> Result<impl QueueIter<SeqStorError<T::Error>>, SeqStorError<T::Error>> {
         Ok(SeqStorQueueIter {
             inner: queue::iter(&mut self.flash, self.range.clone(), &mut self.cache).await?,
         })

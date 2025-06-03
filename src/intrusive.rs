@@ -3,7 +3,7 @@
 
 use crate::{
     error::{Error, LoadStoreError},
-    flash::Flash,
+    flash::{Flash, QueueIter as _},
     logging::{debug, error, info},
 };
 use cordyceps::{
@@ -26,7 +26,6 @@ use minicbor::{
     len_with,
 };
 use mutex::{ConstInit, ScopedRawMutex};
-use sequential_storage::cache::CacheImpl;
 
 /// Node counter, only an alias for `Wrapping<u8>`
 pub type Counter = Wrapping<u8>;
@@ -150,10 +149,10 @@ pub struct Node<T> {
 
     // We generally want this to be in the tail position, because the size of T varies
     // and the pointer to the `NodeHeader` must not change as described above.
-    // 
+    //
     // TODO @James: This is very difficult to access from tests but maybe we would
     // want to have an (test-)interface that lets us create a node with a specific payload
-    // such that we can directly de-/serialize nodes and compare the results in a 
+    // such that we can directly de-/serialize nodes and compare the results in a
     // unit test. Do you think that makes sense? Or is there a better way to
     // have unit tests for this?
     t: MaybeUninit<T>,
@@ -333,11 +332,11 @@ impl<R: ScopedRawMutex> StorageList<R> {
     ///   storage can not store larger items.
     ///
     /// TODO: Document what this function does and when it must be called
-    pub async fn process_reads<T: MultiwriteNorFlash>(
+    pub async fn process_reads<F: Flash>(
         &'static self,
-        flash: &mut Flash<T, impl CacheImpl>,
+        flash: &mut F,
         buf: &mut [u8],
-    ) -> Result<(), LoadStoreError<T::Error>> {
+    ) -> Result<(), LoadStoreError<F::Error>> {
         info!("Start process_reads, buffer has len {}", buf.len());
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
@@ -357,9 +356,9 @@ impl<R: ScopedRawMutex> StorageList<R> {
             .map_err(LoadStoreError::FlashRead)?
         {
             // Extract metadata and payload from the item
-            let key: &[u8; KEY_LEN] = extract_key(&item).expect("Invalid item: no key");
-            latest_counter.replace(extract_counter(&item).expect("Invalid item: no counter"));
-            let payload: &[u8] = extract_payload(&item).expect("Invalid item: no payload");
+            let key: &[u8; KEY_LEN] = extract_key(item).expect("Invalid item: no key");
+            latest_counter.replace(extract_counter(item).expect("Invalid item: no counter"));
+            let payload: &[u8] = extract_payload(item).expect("Invalid item: no payload");
 
             debug!(
                 "Extracted metadata: key {:?}, counter: {:?}, payload: {:?}",
@@ -368,7 +367,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
             // Check for the write_confirm key and update the latest confirmed counter.
             // TODO @James: The entire counter handling feels very unergonomic and error-prone.
             // We should consider refactoring this logic to be more robust and easier to maintain.
-            if is_write_confirm(&item) {
+            if is_write_confirm(item) {
                 info!("Found write_confirm for counter {:?}", latest_counter);
                 latest_write_confirm.replace(
                     latest_counter
@@ -545,9 +544,9 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// 3. Serializes each node and writes it to flash
     /// 4. Verifies the written data matches what was intended to be written
     /// 5. On success, marks all nodes as no longer having pending changes
-    pub async fn process_writes<F: MultiwriteNorFlash>(
+    pub async fn process_writes<F: Flash>(
         &'static self,
-        flash: &mut Flash<F, impl CacheImpl>,
+        flash: &mut F,
         read_buf: &mut [u8],
         serde_buf: &mut [u8],
     ) -> Result<(), LoadStoreError<F::Error>> {
@@ -728,8 +727,8 @@ fn set_counter(
 /// # Returns
 /// * `Ok(())` - If the write confirmation block was successfully written to flash
 /// * `Err(LoadStoreError::FlashWrite)` - If the flash write operation failed
-async fn confirm_write<F: MultiwriteNorFlash>(
-    flash: &mut Flash<F, impl CacheImpl>,
+async fn confirm_write<F: Flash>(
+    flash: &mut F,
     counter: Counter,
 ) -> Result<(), LoadStoreError<F::Error>> {
     // Assemble a write_confirm block consisting of an all-zeros key and the counter
@@ -757,8 +756,8 @@ async fn confirm_write<F: MultiwriteNorFlash>(
 /// * `Ok(())` - If cleanup completed successfully
 /// * `Err(LoadStoreError::FlashRead)` - If reading from flash fails
 /// * `Err(LoadStoreError::FlashWrite)` - If removing old items fails
-async fn delete_old_items<F: MultiwriteNorFlash>(
-    flash: &mut Flash<F, impl CacheImpl>,
+async fn delete_old_items<F: Flash>(
+    flash: &mut F,
     counter: Counter,
     serde_buf: &mut [u8],
 ) -> Result<(), LoadStoreError<F::Error>> {
@@ -805,11 +804,11 @@ async fn delete_old_items<F: MultiwriteNorFlash>(
 /// # Safety
 /// The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
 /// to ensure exclusive access during verification.
-async fn verify_list_in_flash<F: MultiwriteNorFlash>(
+async fn verify_list_in_flash<F: Flash>(
     ls: &mut MutexGuard<'_, List<NodeHeader>, impl ScopedRawMutex>,
     read_buf: &mut [u8],
     serde_buf: &mut [u8],
-    flash: &mut Flash<F, impl CacheImpl>,
+    flash: &mut F,
 ) -> Result<(), LoadStoreError<F::Error>> {
     // Create a `QueueIterator`
     let mut queue_iter = flash.iter().await.map_err(LoadStoreError::FlashRead)?;
@@ -855,7 +854,7 @@ async fn verify_list_in_flash<F: MultiwriteNorFlash>(
             let res = serialize_node(hdrptr.ptr, serde_buf);
 
             // Check if value in flash matches the serialized node
-            if !res.is_ok_and(|len| item.into_buf() == &serde_buf[..len]) {
+            if !res.is_ok_and(|len| item == &serde_buf[..len]) {
                 return Err(LoadStoreError::WriteVerificationFailed);
             }
             // Value matched, so we can continue with the next list node
@@ -885,10 +884,10 @@ async fn verify_list_in_flash<F: MultiwriteNorFlash>(
 /// - The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
 ///   to ensure exclusive access during the write operation.
 /// - The list nodes must be in a valid state for writing (e.g., counter must be set)
-async fn write_to_flash<F: MultiwriteNorFlash>(
+async fn write_to_flash<F: Flash>(
     ls: &mut MutexGuard<'_, List<NodeHeader>, impl ScopedRawMutex>,
     buf: &mut [u8],
-    flash: &mut Flash<F, impl CacheImpl>,
+    flash: &mut F,
 ) -> Result<(), LoadStoreError<F::Error>> {
     let mut iter = StaticRawIter {
         iter: ls.iter_raw(),
@@ -1480,6 +1479,8 @@ pub fn serialize_node(
 #[cfg(test)]
 mod test {
     extern crate std;
+    use crate::flash::SeqStorFlash;
+
     use super::*;
 
     use core::time::Duration;
@@ -1515,14 +1516,14 @@ mod test {
     // TODO: This type, the get_mock_flash() and worker_task() are not only specific to sequential storage's
     // mock flash, but also copy&pasted in the integration tests. If we go with the flash-trait approach,
     // these could be generic.
-    type MockFlash = Flash<MockFlashBase<10, 16, 256>, NoCache>;
+    type MockFlash = SeqStorFlash<MockFlashBase<10, 16, 256>, NoCache>;
 
     fn get_mock_flash() -> MockFlash {
         let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true);
         // TODO: Figure out why miri tests with unaligned buffers and whether
         // this needs any fixing. For now just disable the alignment check in MockFlash
         flash.alignment_check = false;
-        Flash::new(flash, 0x0000..0x1000, NoCache::new())
+        SeqStorFlash::new(flash, 0x0000..0x1000, NoCache::new())
     }
 
     fn worker_task<R: ScopedRawMutex + Sync>(

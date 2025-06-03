@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use cfg_noodle::{
-    flash::Flash,
+    flash::{Flash, SeqStorFlash},
     intrusive::{StorageList, StorageListNode},
 };
 use log::{error, info};
@@ -48,12 +48,12 @@ async fn main() {
     }
 }
 
-fn get_mock_flash() -> Flash<MockFlashBase<10, 16, 256>, NoCache> {
+fn get_mock_flash() -> impl Flash {
     let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true);
     // TODO: Figure out why miri tests with unaligned buffers and whether
     // this needs any fixing. For now just disable the alignment check in MockFlash
     flash.alignment_check = false;
-    Flash::new(flash, 0x0000..0x1000, NoCache::new())
+    SeqStorFlash::new(flash, 0x0000..0x1000, NoCache::new())
 }
 
 static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
