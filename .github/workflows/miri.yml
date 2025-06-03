@@ -1,6 +1,11 @@
 name: Miri
 
-on: [push, pull_request]
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
 
 env:
   # Currently, we use timers + sleep, which require disabling isolation
@@ -18,6 +23,6 @@ jobs:
           rustup override set nightly
           cargo miri setup
       - name: Test with Miri
-        run: cargo miri test
+        run: cargo miri test --features std
       - name: Run with Miri
-        run: cargo miri run
+        run: cargo miri run --features std

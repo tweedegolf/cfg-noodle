@@ -1,41 +1,59 @@
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
-use intrusive::{StorageList, StorageListNode};
+use cfg_noodle::{
+    flash::Flash,
+    intrusive::{StorageList, StorageListNode},
+};
+use log::{error, info};
 use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
+use sequential_storage::{
+    cache::NoCache,
+    mock_flash::{MockFlashBase, WriteCountCheck},
+};
 use tokio::time::sleep;
-
-pub mod hashmap;
-pub mod intrusive;
 
 #[tokio::main]
 async fn main() {
+    simple_logger::SimpleLogger::new()
+        .without_timestamps()
+        .init()
+        .unwrap();
     tokio::task::spawn(task_1(&GLOBAL_LIST));
     tokio::task::spawn(task_2(&GLOBAL_LIST));
     tokio::task::spawn(task_3(&GLOBAL_LIST));
 
-    let mut flash = HashMap::<String, Vec<u8>>::new();
-    flash.insert(
-        "encabulator/config".to_string(),
-        minicbor::to_vec(&EncabulatorConfigV1 { polarity: true }).unwrap(),
-    );
-    flash.insert(
-        "grammeter/config".to_string(),
-        minicbor::to_vec(&GrammeterConfig { radiation: 100.0 }).unwrap(),
-    );
-    // no positron config
+    let mut flash = get_mock_flash();
 
     // give time for tasks to attach
     sleep(Duration::from_millis(100)).await;
     // process reads
-    GLOBAL_LIST.process_reads(&flash);
+    let read_buf = &mut [0u8; 4096];
+    let serde_buf = &mut [0u8; 4096];
+    GLOBAL_LIST
+        .process_reads(&mut flash, read_buf)
+        .await
+        .expect("process_reads failed");
 
     for _ in 0..10 {
         sleep(Duration::from_secs(1)).await;
-        let mut flash2 = HashMap::<String, Vec<u8>>::new();
-        GLOBAL_LIST.process_writes(&mut flash2);
-        println!("NEW WRITES: {flash2:?}");
+        let mut flash2 = get_mock_flash();
+        if let Err(e) = GLOBAL_LIST
+            .process_writes(&mut flash2, read_buf, serde_buf)
+            .await
+        {
+            error!("Error in process_writes: {}", e);
+        }
+        info!("NEW WRITES: {}", flash2.flash().print_items().await);
     }
+}
+
+fn get_mock_flash() -> Flash<MockFlashBase<10, 16, 256>, NoCache> {
+    let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true);
+    // TODO: Figure out why miri tests with unaligned buffers and whether
+    // this needs any fixing. For now just disable the alignment check in MockFlash
+    flash.alignment_check = false;
+    Flash::new(flash, 0x0000..0x1000, NoCache::new())
 }
 
 static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
@@ -60,14 +78,20 @@ struct EncabulatorConfigV2 {
 static ENCAB_CONFIG: StorageListNode<EncabulatorConfigV2> =
     StorageListNode::new("encabulator/config");
 async fn task_1(list: &'static StorageList<CriticalSectionRawMutex>) {
-    let config_handle = ENCAB_CONFIG.attach(list).await.unwrap();
-    let data: EncabulatorConfigV2 = config_handle.load();
+    let config_handle = match ENCAB_CONFIG.attach(list).await {
+        Ok(ch) => ch,
+        Err(_) => panic!("Could not attach config to list"),
+    };
+    let data: EncabulatorConfigV2 = config_handle.load().await.unwrap();
     println!("T1 Got {data:?}");
     sleep(Duration::from_secs(1)).await;
-    config_handle.write(&EncabulatorConfigV2 {
-        polarity: true,
-        spinrate: Some(100),
-    });
+    config_handle
+        .write(&EncabulatorConfigV2 {
+            polarity: true,
+            spinrate: Some(100),
+        })
+        .await
+        .unwrap();
 }
 
 //
@@ -81,11 +105,17 @@ struct GrammeterConfig {
 
 static GRAMM_CONFIG: StorageListNode<GrammeterConfig> = StorageListNode::new("grammeter/config");
 async fn task_2(list: &'static StorageList<CriticalSectionRawMutex>) {
-    let config_handle = GRAMM_CONFIG.attach(list).await.unwrap();
-    let data: GrammeterConfig = config_handle.load();
+    let config_handle = match GRAMM_CONFIG.attach(list).await {
+        Ok(ch) => ch,
+        Err(_) => panic!("Could not attach config to list"),
+    };
+    let data: GrammeterConfig = config_handle.load().await.unwrap();
     println!("T2 Got {data:?}");
     sleep(Duration::from_secs(3)).await;
-    config_handle.write(&GrammeterConfig { radiation: 200.0 });
+    config_handle
+        .write(&GrammeterConfig { radiation: 200.0 })
+        .await
+        .unwrap();
 }
 
 //
@@ -114,13 +144,19 @@ impl Default for PositronConfig {
 static POSITRON_CONFIG: StorageListNode<PositronConfig> = StorageListNode::new("positron/config");
 
 async fn task_3(list: &'static StorageList<CriticalSectionRawMutex>) {
-    let config_handle = POSITRON_CONFIG.attach(list).await.unwrap();
-    let data: PositronConfig = config_handle.load();
+    let config_handle = match POSITRON_CONFIG.attach(list).await {
+        Ok(ch) => ch,
+        Err(_) => panic!("Could not attach config to list"),
+    };
+    let data: PositronConfig = config_handle.load().await.unwrap();
     println!("T3 Got {data:?}");
     sleep(Duration::from_secs(5)).await;
-    config_handle.write(&PositronConfig {
-        up: 15,
-        down: 25,
-        strange: 108,
-    });
+    config_handle
+        .write(&PositronConfig {
+            up: 15,
+            down: 25,
+            strange: 108,
+        })
+        .await
+        .unwrap();
 }

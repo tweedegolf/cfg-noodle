@@ -1,24 +1,63 @@
 [package]
+edition = "2024"
 name = "cfg-noodle"
 version = "0.1.0"
-edition = "2024"
+
+[[bin]]
+name = "main"
+path = "src/main.rs"
+required-features = ["std"]
+
+[[test]]
+name = "integration_tests"
+required-features = ["std"]
+
+[features]
+default = ["std"]
+std = [
+    "minicbor/std",
+    "sequential-storage/std",
+    "sequential-storage/_test",
+    "tokio/sync",
+    "critical-section/std",
+    "maitake-sync/std",
+    "mutex/std",
+    "dep:log",
+    "dep:simple_logger",
+    "dep:tokio",
+]
+defmt = ["dep:defmt"]
+arbitrary = ["dep:arbitrary"]
 
 [dependencies]
 const-fnv1a-hash = "1.1.0"
 embedded-storage-async = "0.4.1"
-minicbor = { version = "0.26.5", features = ["std", "derive"] }
-sequential-storage = { version = "4.0.1", features = ["std", "_test"] }
-tokio = { version = "1.44.2", features = ["macros", "rt-multi-thread", "time"] }
+minicbor = { version = "1.0.0", features = ["derive"] }
+sequential-storage = "4.0.1"
 
-cordyceps = "0.3.3"
-critical-section = { version = "1.2.0", features = ["std"] }
-mutex = { version = "1.0.0", features = ["std", "impl-critical-section"] }
+cordyceps = "0.3.4"
+critical-section = "1.2.0"
+maitake-sync = "0.2.1"
+mutex = { version = "1.0.0", features = ["impl-critical-section"] }
+
 pin-project = "1.1.10"
-maitake-sync = { version = "0.2.1", features = ["std"] }
+thiserror = { version = "2.0.12", default-features = false }
 
+log = { version = "0.4.27", optional = true }
+simple_logger = { version = "5.0.0", optional = true }
+tokio = { version = "1.45.1", optional = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "time",
+] }
 
-# [patch.crates-io]
-# sequential-storage = { path = "../sequential-storage" }
+defmt = { version = "1.0.1", optional = true }
+embassy-futures = "0.1.1"
 
-[patch.crates-io]
-cordyceps = { git = "https://github.com/jamesmunns/mycelium", rev = "9c344032563c0b63a97f9aa16cf66aaef9eea6df" }
+arbitrary = { version = "1", optional = true, features = ["derive"] }
+
+[dev-dependencies]
+approx = "0.5.1"
+futures = { version = "0.3.31", features = ["executor"] }
+futures-test = "0.3.31"
+test-log = "0.2.17"
