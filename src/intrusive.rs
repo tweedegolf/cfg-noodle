@@ -815,7 +815,7 @@ async fn verify_list_in_flash<F: MultiwriteNorFlash>(
     let mut queue_iter = flash.iter().await.map_err(LoadStoreError::FlashRead)?;
 
     // Make it Send
-    let mut iter = StaticRawIter {
+    let iter = StaticRawIter {
         iter: ls.iter_raw(),
     };
 
@@ -824,7 +824,7 @@ async fn verify_list_in_flash<F: MultiwriteNorFlash>(
     let mut counter_found = false;
 
     // Iterate over the nodes in the list
-    while let Some(hdrptr) = iter.next() {
+    for hdrptr in iter {
         let header = unsafe { hdrptr.ptr.as_ref() };
 
         // TODO @James: Can you think of an easier way of doing things here?
@@ -890,11 +890,11 @@ async fn write_to_flash<F: MultiwriteNorFlash>(
     buf: &mut [u8],
     flash: &mut Flash<F, impl CacheImpl>,
 ) -> Result<(), LoadStoreError<F::Error>> {
-    let mut iter = StaticRawIter {
+    let iter = StaticRawIter {
         iter: ls.iter_raw(),
     };
 
-    while let Some(hdrptr) = iter.next() {
+    for hdrptr in iter {
         // Attempt to serialize
         let res = serialize_node(hdrptr.ptr, buf);
 
@@ -1325,16 +1325,27 @@ where
 // Helper structs and functions
 // --------------------------------------------------------------------------
 
-/// Wrapper for [`IterRaw`] that implements `Send`
+/// Wrapper for [`IterRaw`] that implements `Send`.
 ///
-/// This is only a helper struct until this issue is resolved:
-/// <https://github.com/hawkw/mycelium/issues/535>
+/// This WOULD be addressed by https://github.com/hawkw/mycelium/pull/536, which
+/// makes IterRaw impl Send, however we still need to wrap the yielded NonNulls,
+/// which are not Send. Therefore, we will keep this structure mostly for the
+/// ability to wrap the Iterator impl to return Send-implementing [`SendPtr`]s
+/// instead of `NonNull`s.
 struct StaticRawIter<'a> {
     iter: IterRaw<'a, NodeHeader>,
 }
+
+/// ## Safety
+/// The contained IterRaw is only valid for the lifetime of the List it comes
+/// from, which can only be obtained by holding the mutex. This means that we
+/// have exclusive access, and all nodes must be 'static. Therefore, it is
+/// sound to Send both the iterator, and the wrapped NonNulls it returns.
 unsafe impl Send for StaticRawIter<'_> {}
 
-impl StaticRawIter<'_> {
+impl Iterator for StaticRawIter<'_> {
+    type Item = SendPtr;
+
     fn next(&mut self) -> Option<SendPtr> {
         self.iter.next().map(|ptr| SendPtr { ptr })
     }
@@ -1342,10 +1353,15 @@ impl StaticRawIter<'_> {
 
 /// Wrapper for [`NonNull<NodeHeader>`] that implements `Send`.
 ///
+/// This is necessary because we iterate over the IterRaw in async context,
+/// and for testing this means that futures need to be Send. Since the IterRaw
+/// yields `NonNull<T>`s, the iterated nodes are not Send. This adapter is
+/// sound because for as long as we have the IterRaw live, the mutex must remain
+/// locked.
+///
 /// ## Safety
 /// This must only be used when the List mutex is locked and Node and Anchor
 /// live &'static.
-/// TODO: Remove this once https://github.com/hawkw/mycelium/pull/536 is merged.
 struct SendPtr {
     ptr: NonNull<NodeHeader>,
 }
