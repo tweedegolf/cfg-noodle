@@ -18,7 +18,6 @@ use core::{
     num::Wrapping,
     ptr::{self, NonNull},
 };
-use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use maitake_sync::{Mutex, MutexGuard, WaitQueue};
 use minicbor::{
     CborLen, Decode, Encode,
@@ -842,7 +841,7 @@ async fn verify_list_in_flash<F: Flash>(
             // This identifies the start of the newly-written list in flash.
             // Once found, we verify each subsequent item matches our serialized nodes.
             if !counter_found
-                && !extract_counter(&item).is_ok_and(|counter| {
+                && !extract_counter(item).is_ok_and(|counter| {
                     counter == header.counter.expect("Counter should have been set!")
                 })
             {
@@ -1532,7 +1531,7 @@ mod test {
         mut read_buf: [u8; 4096],
         mut serde_buf: [u8; 4096],
     ) -> JoinHandle<()> {
-        tokio::task::spawn(async move {
+        tokio::task::spawn_local(async move {
             loop {
                 info!("worker_task waiting for needs_* signal");
                 match embassy_futures::select::select(
@@ -1565,207 +1564,222 @@ mod test {
 
     #[test(tokio::test)]
     async fn test_two_configs() {
-        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-        static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
-            StorageListNode::new("positron/config1");
-        static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
-            StorageListNode::new("positron/config2");
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+                static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
+                    StorageListNode::new("positron/config1");
+                static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
+                    StorageListNode::new("positron/config2");
 
-        let flash = get_mock_flash();
+                let flash = get_mock_flash();
 
-        let read_buf = [0u8; 4096];
-        let serde_buf = [0u8; 4096];
+                let read_buf = [0u8; 4096];
+                let serde_buf = [0u8; 4096];
 
-        info!("Spawn worker_task");
-        let worker_task = worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
+                info!("Spawn worker_task");
+                let worker_task = worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
 
-        // Obtain a handle for the first config
-        let config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
-            Ok(ch) => ch,
-            Err(_) => panic!("Could not attach config 1 to list"),
-        };
+                // Obtain a handle for the first config
+                let config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+                    Ok(ch) => ch,
+                    Err(_) => panic!("Could not attach config 1 to list"),
+                };
 
-        // Obtain a handle for the second config. This should _not_ error!
-        if POSITRON_CONFIG2.attach(&GLOBAL_LIST).await.is_err() {
-            panic!("Could not attach config 2 to list");
-        }
+                // Obtain a handle for the second config. This should _not_ error!
+                if POSITRON_CONFIG2.attach(&GLOBAL_LIST).await.is_err() {
+                    panic!("Could not attach config 2 to list");
+                }
 
-        // Load data for the first handle
-        let data: PositronConfig = config_handle
-            .load()
-            .await
-            .expect("Loading config should not fail");
-        info!("T3 Got {data:?}");
+                // Load data for the first handle
+                let data: PositronConfig = config_handle
+                    .load()
+                    .await
+                    .expect("Loading config should not fail");
+                info!("T3 Got {data:?}");
 
-        // Assert that the counter is at default value because we
-        // haven't read this from flash
-        assert_eq!(
-            unsafe { config_handle.inner.inner.get().as_ref() }
-                .expect("Getting inner at this point should not fail")
-                .header
-                .counter,
-            Some(Counter::default())
-        );
+                // Assert that the counter is at default value because we
+                // haven't read this from flash
+                assert_eq!(
+                    unsafe { config_handle.inner.inner.get().as_ref() }
+                        .expect("Getting inner at this point should not fail")
+                        .header
+                        .counter,
+                    Some(Counter::default())
+                );
 
-        // Write a new config to first handle
-        let new_config = PositronConfig {
-            up: 15,
-            down: 25,
-            strange: 108,
-        };
-        config_handle
-            .write(&new_config)
-            .await
-            .expect("Writing config to node should not fail");
+                // Write a new config to first handle
+                let new_config = PositronConfig {
+                    up: 15,
+                    down: 25,
+                    strange: 108,
+                };
+                config_handle
+                    .write(&new_config)
+                    .await
+                    .expect("Writing config to node should not fail");
 
-        // Give the worker_task some time to process the write
-        sleep(Duration::from_millis(100)).await;
+                // Give the worker_task some time to process the write
+                sleep(Duration::from_millis(100)).await;
 
-        // Assert that the loaded value equals the written value
-        assert_eq!(
-            config_handle
-                .load()
-                .await
-                .expect("Loading config should not fail"),
-            new_config
-        );
+                // Assert that the loaded value equals the written value
+                assert_eq!(
+                    config_handle
+                        .load()
+                        .await
+                        .expect("Loading config should not fail"),
+                    new_config
+                );
 
-        // Assert that the counter is now 1
-        assert_eq!(
-            unsafe { config_handle.inner.inner.get().as_ref() }
-                .expect("Getting inner at this point should not fail")
-                .header
-                .counter
-                .expect("Counter should have a value at this point"),
-            Wrapping(1)
-        );
+                // Assert that the counter is now 1
+                assert_eq!(
+                    unsafe { config_handle.inner.inner.get().as_ref() }
+                        .expect("Getting inner at this point should not fail")
+                        .header
+                        .counter
+                        .expect("Counter should have a value at this point"),
+                    Wrapping(1)
+                );
 
-        // Wait for the worker task to finish
-        let _ = tokio::time::timeout(Duration::from_secs(2), worker_task).await;
+                // Wait for the worker task to finish
+                let _ = tokio::time::timeout(Duration::from_secs(2), worker_task).await;
+            })
+            .await;
     }
 
     #[test(tokio::test)]
     async fn test_load_existing() {
-        // This test will write a config to the flash first and then read it back to check
-        // whether reading an item from flash works.
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                // This test will write a config to the flash first and then read it back to check
+                // whether reading an item from flash works.
 
-        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-        static POSITRON_CONFIG: StorageListNode<PositronConfig> =
-            StorageListNode::new("positron/config");
+                static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+                static POSITRON_CONFIG: StorageListNode<PositronConfig> =
+                    StorageListNode::new("positron/config");
 
-        let mut serde_buf = [0u8; 4096];
-        let read_buf = [0u8; 4096];
+                let mut serde_buf = [0u8; 4096];
+                let read_buf = [0u8; 4096];
 
-        // Serialize the custom_config config so we can write it to our flash
-        let custom_config = PositronConfig {
-            up: 1,
-            down: 22,
-            strange: 333,
-        };
+                // Serialize the custom_config config so we can write it to our flash
+                let custom_config = PositronConfig {
+                    up: 1,
+                    down: 22,
+                    strange: 333,
+                };
 
-        // TODO: The following pointer operations are a very cumbersome way
-        // of serializing the node just so we can push it to the flash and read back...
-        unsafe {
-            POSITRON_CONFIG
-                .inner
-                .get()
-                .as_mut()
-                .expect("Pointer should not be null")
-                .t = MaybeUninit::new(custom_config.clone());
-            POSITRON_CONFIG
-                .inner
-                .get()
-                .as_mut()
-                .expect("Pointer should not be null")
-                .header
-                .counter = Some(Wrapping(0));
-        }
-        let nodeptr: *mut Node<PositronConfig> = POSITRON_CONFIG.inner.get();
-        let nodenn: NonNull<Node<PositronConfig>> = unsafe { NonNull::new_unchecked(nodeptr) };
-        let hdrnn: NonNull<NodeHeader> = nodenn.cast();
+                // TODO: The following pointer operations are a very cumbersome way
+                // of serializing the node just so we can push it to the flash and read back...
+                unsafe {
+                    POSITRON_CONFIG
+                        .inner
+                        .get()
+                        .as_mut()
+                        .expect("Pointer should not be null")
+                        .t = MaybeUninit::new(custom_config.clone());
+                    POSITRON_CONFIG
+                        .inner
+                        .get()
+                        .as_mut()
+                        .expect("Pointer should not be null")
+                        .header
+                        .counter = Some(Wrapping(0));
+                }
+                let nodeptr: *mut Node<PositronConfig> = POSITRON_CONFIG.inner.get();
+                let nodenn: NonNull<Node<PositronConfig>> =
+                    unsafe { NonNull::new_unchecked(nodeptr) };
+                let hdrnn: NonNull<NodeHeader> = nodenn.cast();
 
-        let used = serialize_node(hdrnn, &mut serde_buf).expect("Serializing node should not fail");
+                let used = serialize_node(hdrnn, &mut serde_buf)
+                    .expect("Serializing node should not fail");
 
-        // Now serialize again by calling encode() directly and verify both match
-        let mut serialize_control = std::vec![];
-        let len = len_with(&custom_config, &mut ());
-        minicbor::encode(&custom_config, &mut serialize_control).expect("Encoding should not fail");
-        // The serialized node will contain some metadata, but the last `len` bytes must match
-        assert_eq!(serialize_control[..len], serde_buf[used - len..used]);
+                // Now serialize again by calling encode() directly and verify both match
+                let mut serialize_control = std::vec![];
+                let len = len_with(&custom_config, &mut ());
+                minicbor::encode(&custom_config, &mut serialize_control)
+                    .expect("Encoding should not fail");
+                // The serialized node will contain some metadata, but the last `len` bytes must match
+                assert_eq!(serialize_control[..len], serde_buf[used - len..used]);
 
-        let mut flash = get_mock_flash();
-        info!("Pushing to flash: {:?}", &serde_buf[..used]);
-        flash
-            .push(&serde_buf[..used])
-            .await
-            .expect("pushing to flash should not fail here");
+                let mut flash = get_mock_flash();
+                info!("Pushing to flash: {:?}", &serde_buf[..used]);
+                flash
+                    .push(&serde_buf[..used])
+                    .await
+                    .expect("pushing to flash should not fail here");
 
-        let worker_task = worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
+                let worker_task = worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
 
-        // Obtain a handle for the config. It should match the custom_config.
-        // This should _not_ error!
-        let expecting_already_present = match POSITRON_CONFIG.attach(&GLOBAL_LIST).await {
-            Ok(ch) => ch,
-            Err(_) => panic!("Could not attach config to list"),
-        };
+                // Obtain a handle for the config. It should match the custom_config.
+                // This should _not_ error!
+                let expecting_already_present = match POSITRON_CONFIG.attach(&GLOBAL_LIST).await {
+                    Ok(ch) => ch,
+                    Err(_) => panic!("Could not attach config to list"),
+                };
 
-        assert_eq!(
-            custom_config,
-            expecting_already_present
-                .load()
-                .await
-                .expect("Loading config should not fail"),
-            "Key should already be present"
-        );
+                assert_eq!(
+                    custom_config,
+                    expecting_already_present
+                        .load()
+                        .await
+                        .expect("Loading config should not fail"),
+                    "Key should already be present"
+                );
 
-        expecting_already_present
-            .write(&custom_config)
-            .await
-            .expect("Writing config to node should not fail");
+                expecting_already_present
+                    .write(&custom_config)
+                    .await
+                    .expect("Writing config to node should not fail");
 
-        sleep(Duration::from_millis(50)).await;
+                sleep(Duration::from_millis(50)).await;
 
-        // Assert that the counter is now 1
-        assert_eq!(
-            unsafe { expecting_already_present.inner.inner.get().as_ref() }
-                .expect("Node should exist")
-                .header
-                .counter
-                .expect("Counter should have a value"),
-            Wrapping(1)
-        );
+                // Assert that the counter is now 1
+                assert_eq!(
+                    unsafe { expecting_already_present.inner.inner.get().as_ref() }
+                        .expect("Node should exist")
+                        .header
+                        .counter
+                        .expect("Counter should have a value"),
+                    Wrapping(1)
+                );
 
-        // Wait for the worker task to finish
-        let _ = tokio::time::timeout(Duration::from_secs(2), worker_task).await;
+                // Wait for the worker task to finish
+                let _ = tokio::time::timeout(Duration::from_secs(2), worker_task).await;
+            })
+            .await;
     }
 
     #[test(tokio::test)]
     #[should_panic]
     async fn test_duplicate_key() {
-        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-        static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
-            StorageListNode::new("positron/config");
-        static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
-            StorageListNode::new("positron/config");
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+                static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
+                    StorageListNode::new("positron/config");
+                static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
+                    StorageListNode::new("positron/config");
 
-        let flash = get_mock_flash();
+                let flash = get_mock_flash();
 
-        info!("Spawn worker_task");
-        let serde_buf = [0u8; 4096];
-        let read_buf = [0u8; 4096];
-        let worker_task = worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
+                info!("Spawn worker_task");
+                let serde_buf = [0u8; 4096];
+                let read_buf = [0u8; 4096];
+                let worker_task = worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
 
-        // Obtain a handle for the first config
-        let _config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
-            Ok(ch) => ch,
-            Err(_) => panic!("Could not attach config 1 to list"),
-        };
+                // Obtain a handle for the first config
+                let _config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+                    Ok(ch) => ch,
+                    Err(_) => panic!("Could not attach config 1 to list"),
+                };
 
-        // Obtain a handle for the second config. It has the same key as the first.
-        // This must panic!
-        let _expecting_panic = POSITRON_CONFIG2.attach(&GLOBAL_LIST).await;
+                // Obtain a handle for the second config. It has the same key as the first.
+                // This must panic!
+                let _expecting_panic = POSITRON_CONFIG2.attach(&GLOBAL_LIST).await;
 
-        // Wait for the worker task to finish
-        let _ = tokio::time::timeout(Duration::from_secs(2), worker_task).await;
+                // Wait for the worker task to finish
+                let _ = tokio::time::timeout(Duration::from_secs(2), worker_task).await;
+            })
+            .await;
     }
 }

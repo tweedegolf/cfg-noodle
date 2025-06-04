@@ -10,14 +10,52 @@ use sequential_storage::{
     queue::{self, QueueIterator},
 };
 
+/// Simple iterator providing a `next` function to iterate over the elements in the queue.
+pub trait QueueIter<E> {
+    /// Gets the next element from the iterator.
+    /// Returns `None` when no more elements are left in the iterator.
+    fn next<'a>(
+        &'a mut self,
+        buf: &'a mut [u8],
+    ) -> impl Future<Output = Result<Option<&'a [u8]>, E>>;
+}
+
+/// Flash interface used by the configuration storage
+pub trait Flash {
+    /// Error type for flash operations.
+    type Error: core::fmt::Debug;
+    /// Pushes data to the flash storage.
+    fn push(&mut self, data: &[u8]) -> impl Future<Output = Result<(), Self::Error>>;
+    /// Returns an iterator over the flash storage.
+    fn iter(&mut self) -> impl Future<Output = Result<impl QueueIter<Self::Error>, Self::Error>>;
+    /// Pops data from the flash storage.
+    fn pop<'a>(
+        &mut self,
+        data: &'a mut [u8],
+    ) -> impl Future<Output = Result<Option<&'a mut [u8]>, Self::Error>>;
+    /// Peeks at data from the flash storage without removing it.
+    fn peek<'a>(
+        &mut self,
+        data: &'a mut [u8],
+    ) -> impl Future<Output = Result<Option<&'a mut [u8]>, Self::Error>>;
+}
+
 /// Owns a flash and the range reserved for the `StorageList`
-pub struct SeqStorFlash<T: MultiwriteNorFlash, C: CacheImpl> {
+pub struct SeqStorFlash<T, C>
+where
+    T: MultiwriteNorFlash,
+    C: CacheImpl,
+{
     flash: T,
     range: core::ops::Range<u32>,
     cache: C,
 }
 
-impl<T: MultiwriteNorFlash, C: CacheImpl> SeqStorFlash<T, C> {
+impl<T, C> SeqStorFlash<T, C>
+where
+    T: MultiwriteNorFlash,
+    C: CacheImpl,
+{
     /// Creates a new Flash instance with the given flash device and address range.
     ///
     /// # Arguments
@@ -35,39 +73,11 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> SeqStorFlash<T, C> {
         &mut self.flash
     }
 }
-
-pub trait QueueIter<E> {
-    fn next<'a>(&'a mut self, buf: &'a mut [u8]) -> impl Future<Output = Result<Option<&'a [u8]>, E>> + Send;
-}
-
-pub trait Flash {
-    type Error: core::fmt::Debug;
-    fn push(&mut self, data: &[u8]) -> impl Future<Output = Result<(), Self::Error>> + Send;
-    fn iter(&mut self) -> impl Future<Output = Result<impl QueueIter<Self::Error>, Self::Error>> + Send;
-    fn pop<'a>(&mut self, data: &'a mut [u8]) -> impl Future<Output = Result<Option<&'a mut [u8]>, Self::Error>> + Send;
-    fn peek<'a>(&mut self, data: &'a mut [u8]) -> impl Future<Output = Result<Option<&'a mut [u8]>, Self::Error>> + Send;
-}
-
-struct SeqStorQueueIter<'a, T: MultiwriteNorFlash, C: CacheImpl> {
-    inner: QueueIterator<'a, T, C>,
-}
-impl<T: MultiwriteNorFlash, C: CacheImpl> QueueIter<SeqStorError<T::Error>>
-    for SeqStorQueueIter<'_, T, C>
+impl<T, C> Flash for SeqStorFlash<T, C>
+where
+    T: MultiwriteNorFlash,
+    C: CacheImpl,
 {
-    async fn next<'a>(
-        &'a mut self,
-        buf: &'a mut [u8],
-    ) -> Result<Option<&'a [u8]>, SeqStorError<T::Error>> {
-        Ok(self
-            .inner
-            .next(buf)
-            .await?
-            .map(|data| data.into_buf())
-            .map(|data| &*data))
-    }
-}
-
-impl<T: MultiwriteNorFlash, C: CacheImpl> Flash for SeqStorFlash<T, C> {
     type Error = SeqStorError<T::Error>;
 
     /// Pushes data to the sequential storage queue.
@@ -104,5 +114,25 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> Flash for SeqStorFlash<T, C> {
         data: &'a mut [u8],
     ) -> Result<Option<&'a mut [u8]>, SeqStorError<T::Error>> {
         queue::peek(&mut self.flash, self.range.clone(), &mut self.cache, data).await
+    }
+}
+
+struct SeqStorQueueIter<'a, T: MultiwriteNorFlash, C: CacheImpl> {
+    inner: QueueIterator<'a, T, C>,
+}
+
+impl<T: MultiwriteNorFlash, C: CacheImpl> QueueIter<SeqStorError<T::Error>>
+    for SeqStorQueueIter<'_, T, C>
+{
+    async fn next<'a>(
+        &'a mut self,
+        buf: &'a mut [u8],
+    ) -> Result<Option<&'a [u8]>, SeqStorError<T::Error>> {
+        Ok(self
+            .inner
+            .next(buf)
+            .await?
+            .map(|data| data.into_buf())
+            .map(|data| &*data))
     }
 }

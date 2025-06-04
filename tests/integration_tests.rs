@@ -1,5 +1,5 @@
 use cfg_noodle::{
-    flash::Flash,
+    flash::{Flash, QueueIter as _, SeqStorFlash},
     intrusive::{StorageList, StorageListNode},
 };
 use log::{error, info, warn};
@@ -35,13 +35,13 @@ struct SimpleConfig {
     data: u8,
 }
 
-type MockFlash = Flash<MockFlashBase<10, 16, 256>, NoCache>;
+type MockFlash = SeqStorFlash<MockFlashBase<10, 16, 256>, NoCache>;
 
 /// Creates a test flash instance with mock storage for testing purposes.
 fn get_test_flash() -> MockFlash {
     let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::Twice, None, true);
     flash.alignment_check = false;
-    Flash::new(flash, 0x0000..0x1000, NoCache::new())
+    SeqStorFlash::new(flash, 0x0000..0x1000, NoCache::new())
 }
 
 /// Spawns an asynchronous worker task that manages storage operations for a storage list.
@@ -88,7 +88,7 @@ fn worker_task<R: ScopedRawMutex + Sync>(
     let mut read_buf = [0u8; BUF_LEN]; // Buffer for reading data from flash
     let mut serde_buf = [0u8; BUF_LEN]; // Buffer for serialization/deserialization
 
-    tokio::task::spawn(async move {
+    tokio::task::spawn_local(async move {
         loop {
             info!("worker_task waiting for needs_* signal");
 
@@ -152,25 +152,29 @@ fn worker_task<R: ScopedRawMutex + Sync>(
 /// flash memory has been completely erased.
 #[test(tokio::test)]
 async fn test_read_from_empty_flash() {
-    info!("Starting test");
-    static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-    static NODE: StorageListNode<TestConfig> = StorageListNode::new("test/config");
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            info!("Starting test");
+            static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+            static NODE: StorageListNode<TestConfig> = StorageListNode::new("test/config");
 
-    // Create flash but do not populate with any data
-    let flash = get_test_flash();
+            // Create flash but do not populate with any data
+            let flash = get_test_flash();
 
-    info!("Spawning worker task");
-    let _worker = worker_task(&LIST, flash, None);
+            info!("Spawning worker task");
+            let _worker = worker_task(&LIST, flash, None);
 
-    let handle = NODE.attach(&LIST).await.unwrap();
+            let handle = NODE.attach(&LIST).await.unwrap();
 
-    // Should return default value
-    let config = handle.load().await.unwrap();
-    let default_config = TestConfig::default();
-    assert_eq!(
-        config, default_config,
-        "Loaded config should match default config"
-    );
+            // Should return default value
+            let config = handle.load().await.unwrap();
+            let default_config = TestConfig::default();
+            assert_eq!(
+                config, default_config,
+                "Loaded config should match default config"
+            );
+        })
+        .await
 }
 
 /// Test that verifies configuration persistence across simulated system restarts.
@@ -185,48 +189,53 @@ async fn test_read_from_empty_flash() {
 /// 3. Data integrity is maintained across storage system lifecycle events
 #[test(tokio::test)]
 async fn test_read_clean_state() {
-    static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-    static NODE: StorageListNode<TestConfig> = StorageListNode::new("test/config");
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+            static NODE: StorageListNode<TestConfig> = StorageListNode::new("test/config");
 
-    let flash = get_test_flash();
-    info!("Spawning worker task");
-    let (tx, rx) = watch::channel(());
-    let worker = worker_task(&LIST, flash, Some(rx));
+            let flash = get_test_flash();
+            info!("Spawning worker task");
+            let (tx, rx) = watch::channel(());
 
-    let handle = NODE.attach(&LIST).await.unwrap();
+            let worker = worker_task(&LIST, flash, Some(rx));
 
-    let test_config = TestConfig {
-        value: 42,
-        truth: false,
-        optional_truth: Some(true),
-    };
-    handle.write(&test_config).await.unwrap();
+            let handle = NODE.attach(&LIST).await.unwrap();
 
-    // Give worker time to process the write
-    sleep(Duration::from_millis(100)).await;
+            let test_config = TestConfig {
+                value: 42,
+                truth: false,
+                optional_truth: Some(true),
+            };
+            handle.write(&test_config).await.unwrap();
 
-    // Stop worker task and save the flash data it produced
-    tx.send(()).unwrap();
-    let mut flash = worker.await.unwrap();
+            // Give worker time to process the write
+            sleep(Duration::from_millis(100)).await;
 
-    // Create new list and node to simulate restart
-    static LIST2: StorageList<CriticalSectionRawMutex> = StorageList::new();
-    static NODE2: StorageListNode<TestConfig> = StorageListNode::new("test/config");
+            // Stop worker task and save the flash data it produced
+            tx.send(()).unwrap();
+            let mut flash = worker.await.unwrap();
 
-    info!(
-        "Spawning new worker with flash content: {}",
-        flash.flash().print_items().await
-    );
-    // Spawn worker task with the used flash
-    let _worker = worker_task(&LIST2, flash, None);
+            // Create new list and node to simulate restart
+            static LIST2: StorageList<CriticalSectionRawMutex> = StorageList::new();
+            static NODE2: StorageListNode<TestConfig> = StorageListNode::new("test/config");
 
-    let handle2 = NODE2.attach(&LIST2).await.unwrap();
+            info!(
+                "Spawning new worker with flash content: {}",
+                flash.flash().print_items().await
+            );
+            // Spawn worker task with the used flash
+            let _worker = worker_task(&LIST2, flash, None);
 
-    let loaded_config = handle2.load().await.unwrap();
-    assert_eq!(
-        loaded_config, test_config,
-        "Loaded config should match test_config"
-    );
+            let handle2 = NODE2.attach(&LIST2).await.unwrap();
+
+            let loaded_config = handle2.load().await.unwrap();
+            assert_eq!(
+                loaded_config, test_config,
+                "Loaded config should match test_config"
+            );
+        })
+        .await;
 }
 
 /// Test that verifies config persistence across restarts and proper handling of multiple configs.
@@ -240,56 +249,60 @@ async fn test_read_clean_state() {
 /// independently and maintain data integrity across restarts.
 #[test(tokio::test)]
 async fn test_read_clean_state_new_config() {
-    static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-    static NODE: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+            static NODE: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
 
-    let flash = get_test_flash();
-    info!("Spawning worker task");
-    let (tx, rx) = watch::channel(());
-    let worker = worker_task(&LIST, flash, Some(rx));
+            let flash = get_test_flash();
+            info!("Spawning worker task");
+            let (tx, rx) = watch::channel(());
+            let worker = worker_task(&LIST, flash, Some(rx));
 
-    let handle = NODE.attach(&LIST).await.unwrap();
+            let handle = NODE.attach(&LIST).await.unwrap();
 
-    let test_config = TestConfig {
-        value: 42,
-        truth: false,
-        optional_truth: Some(true),
-    };
-    handle.write(&test_config).await.unwrap();
+            let test_config = TestConfig {
+                value: 42,
+                truth: false,
+                optional_truth: Some(true),
+            };
+            handle.write(&test_config).await.unwrap();
 
-    // Give worker time to process the write
-    sleep(Duration::from_millis(100)).await;
+            // Give worker time to process the write
+            sleep(Duration::from_millis(100)).await;
 
-    // Stop worker task and save the flash data it produced
-    tx.send(()).unwrap();
-    let mut flash = worker.await.unwrap();
+            // Stop worker task and save the flash data it produced
+            tx.send(()).unwrap();
+            let mut flash = worker.await.unwrap();
 
-    // Create new list and node to simulate restart
-    static LIST2: StorageList<CriticalSectionRawMutex> = StorageList::new();
-    static NODE1: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
-    static NODE2: StorageListNode<TestConfig> = StorageListNode::new("test/config2");
+            // Create new list and node to simulate restart
+            static LIST2: StorageList<CriticalSectionRawMutex> = StorageList::new();
+            static NODE1: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
+            static NODE2: StorageListNode<TestConfig> = StorageListNode::new("test/config2");
 
-    info!(
-        "Spawning new worker with flash content: {}",
-        flash.flash().print_items().await
-    );
-    // Spawn worker task with the used flash
-    let _worker = worker_task(&LIST2, flash, None);
+            info!(
+                "Spawning new worker with flash content: {}",
+                flash.flash().print_items().await
+            );
+            // Spawn worker task with the used flash
+            let _worker = worker_task(&LIST2, flash, None);
 
-    let handle1 = NODE1.attach(&LIST2).await.unwrap();
-    let handle2 = NODE2.attach(&LIST2).await.unwrap();
+            let handle1 = NODE1.attach(&LIST2).await.unwrap();
+            let handle2 = NODE2.attach(&LIST2).await.unwrap();
 
-    let loaded_config1 = handle1.load().await.unwrap();
-    let loaded_config2 = handle2.load().await.unwrap();
-    assert_eq!(
-        loaded_config1, test_config,
-        "Loaded config should match the test_config"
-    );
-    assert_eq!(
-        loaded_config2,
-        TestConfig::default(),
-        "Loaded config should match default config"
-    );
+            let loaded_config1 = handle1.load().await.unwrap();
+            let loaded_config2 = handle2.load().await.unwrap();
+            assert_eq!(
+                loaded_config1, test_config,
+                "Loaded config should match the test_config"
+            );
+            assert_eq!(
+                loaded_config2,
+                TestConfig::default(),
+                "Loaded config should match default config"
+            );
+        })
+        .await
 }
 
 /// Test that verifies the storage system's resilience to interrupted writes and flash corruption.
@@ -308,76 +321,80 @@ async fn test_read_clean_state_new_config() {
 /// power loss or other interruptions could corrupt flash memory during write operations.
 #[test(tokio::test)]
 async fn test_read_interrupted_write() {
-    static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-    static NODE1: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
-    static NODE2: StorageListNode<TestConfig> = StorageListNode::new("test/config2");
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+            static NODE1: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
+            static NODE2: StorageListNode<TestConfig> = StorageListNode::new("test/config2");
 
-    let flash = get_test_flash();
-    info!("Spawning worker task");
-    let (tx, rx) = watch::channel(());
-    let worker = worker_task(&LIST, flash, Some(rx));
+            let flash = get_test_flash();
+            info!("Spawning worker task");
+            let (tx, rx) = watch::channel(());
+            let worker = worker_task(&LIST, flash, Some(rx));
 
-    let handle1 = NODE1.attach(&LIST).await.unwrap();
-    let handle2 = NODE2.attach(&LIST).await.unwrap();
-    let test_config2 = TestConfig {
-        value: 1,
-        truth: true,
-        optional_truth: Some(true),
-    };
-    handle1
-        .write(&TestConfig {
-            value: 2,
-            truth: false,
-            optional_truth: Some(false),
+            let handle1 = NODE1.attach(&LIST).await.unwrap();
+            let handle2 = NODE2.attach(&LIST).await.unwrap();
+            let test_config2 = TestConfig {
+                value: 1,
+                truth: true,
+                optional_truth: Some(true),
+            };
+            handle1
+                .write(&TestConfig {
+                    value: 2,
+                    truth: false,
+                    optional_truth: Some(false),
+                })
+                .await
+                .unwrap();
+            handle2.write(&test_config2).await.unwrap();
+
+            // Write the two nodes to the list
+            LIST.needs_write().wake_all();
+
+            // Give worker time to process the write
+            sleep(Duration::from_millis(100)).await;
+
+            // Stop worker task and save the flash data it produced
+            tx.send(()).unwrap();
+            let mut flash = worker.await.unwrap();
+
+            warn!("Set some bytes in flash to zero");
+            warn!("Flash before: {}", flash.flash().print_items().await);
+            let flash_bytes = flash.flash().as_bytes_mut();
+            // at byte 48 the 2nd item starts (may need to be adapted! check the print_items output)
+            // The second item seems to be the first node, so this relies on knowing what the layout in flash is
+            // TODO: improve how the flash is partly erased...
+            flash_bytes[48..].fill(0xFF);
+
+            warn!("Flash after: {}", flash.flash().print_items().await);
+
+            // Create new list and node to simulate restart
+            static LIST2: StorageList<CriticalSectionRawMutex> = StorageList::new();
+
+            static NODE1_2: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
+            static NODE2_2: StorageListNode<TestConfig> = StorageListNode::new("test/config2");
+
+            info!("Spawning new worker task");
+            // Spawn worker task with the used flash
+            let _worker = worker_task(&LIST2, flash, None);
+
+            let handle1 = NODE1_2.attach(&LIST2).await.unwrap();
+            let handle2 = NODE2_2.attach(&LIST2).await.unwrap();
+
+            let loaded_config1 = handle1.load().await.unwrap();
+            let loaded_config2 = handle2.load().await.unwrap();
+            assert_eq!(
+                loaded_config1,
+                TestConfig::default(),
+                "Loaded config1 should match default config (was zeroed before)"
+            );
+            assert_eq!(
+                loaded_config2, test_config2,
+                "Loaded config1 should match test_config"
+            );
         })
         .await
-        .unwrap();
-    handle2.write(&test_config2).await.unwrap();
-
-    // Write the two nodes to the list
-    LIST.needs_write().wake_all();
-
-    // Give worker time to process the write
-    sleep(Duration::from_millis(100)).await;
-
-    // Stop worker task and save the flash data it produced
-    tx.send(()).unwrap();
-    let mut flash = worker.await.unwrap();
-
-    warn!("Set some bytes in flash to zero");
-    warn!("Flash before: {}", flash.flash().print_items().await);
-    let flash_bytes = flash.flash().as_bytes_mut();
-    // at byte 48 the 2nd item starts (may need to be adapted! check the print_items output)
-    // The second item seems to be the first node, so this relies on knowing what the layout in flash is
-    // TODO: improve how the flash is partly erased...
-    flash_bytes[48..].fill(0xFF);
-
-    warn!("Flash after: {}", flash.flash().print_items().await);
-
-    // Create new list and node to simulate restart
-    static LIST2: StorageList<CriticalSectionRawMutex> = StorageList::new();
-
-    static NODE1_2: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
-    static NODE2_2: StorageListNode<TestConfig> = StorageListNode::new("test/config2");
-
-    info!("Spawning new worker task");
-    // Spawn worker task with the used flash
-    let _worker = worker_task(&LIST2, flash, None);
-
-    let handle1 = NODE1_2.attach(&LIST2).await.unwrap();
-    let handle2 = NODE2_2.attach(&LIST2).await.unwrap();
-
-    let loaded_config1 = handle1.load().await.unwrap();
-    let loaded_config2 = handle2.load().await.unwrap();
-    assert_eq!(
-        loaded_config1,
-        TestConfig::default(),
-        "Loaded config1 should match default config (was zeroed before)"
-    );
-    assert_eq!(
-        loaded_config2, test_config2,
-        "Loaded config1 should match test_config"
-    );
 }
 
 /// Test that verifies the storage system's handling of multiple writes to the same configuration node.
@@ -395,49 +412,53 @@ async fn test_read_interrupted_write() {
 /// unnecessary duplicate configuration data over multiple write operations.
 #[test(tokio::test)]
 async fn test_multiple_writes() {
-    static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-    static NODE: StorageListNode<TestConfig> = StorageListNode::new("test/config");
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+            static NODE: StorageListNode<TestConfig> = StorageListNode::new("test/config");
 
-    let flash = get_test_flash();
+            let flash = get_test_flash();
 
-    info!("Spawning worker task");
-    let (tx, rx) = watch::channel(());
-    let worker = worker_task(&LIST, flash, Some(rx));
+            info!("Spawning worker task");
+            let (tx, rx) = watch::channel(());
+            let worker = worker_task(&LIST, flash, Some(rx));
 
-    let handle = NODE.attach(&LIST).await.unwrap();
+            let handle = NODE.attach(&LIST).await.unwrap();
 
-    let test_config = TestConfig {
-        value: 42,
-        truth: false,
-        optional_truth: Some(true),
-    };
-    // Write the config for the first time
-    handle.write(&test_config).await.unwrap();
+            let test_config = TestConfig {
+                value: 42,
+                truth: false,
+                optional_truth: Some(true),
+            };
+            // Write the config for the first time
+            handle.write(&test_config).await.unwrap();
 
-    // Give worker time to process the write
-    sleep(Duration::from_millis(100)).await;
+            // Give worker time to process the write
+            sleep(Duration::from_millis(100)).await;
 
-    // Write again. This should delete the old nodes when write was successful.
-    handle.write(&test_config).await.unwrap();
+            // Write again. This should delete the old nodes when write was successful.
+            handle.write(&test_config).await.unwrap();
 
-    // Give worker time to process the write
-    sleep(Duration::from_millis(100)).await;
+            // Give worker time to process the write
+            sleep(Duration::from_millis(100)).await;
 
-    // Stop worker task and save the flash data it produced
-    tx.send(()).unwrap();
-    let mut flash = worker.await.unwrap();
+            // Stop worker task and save the flash data it produced
+            tx.send(()).unwrap();
+            let mut flash = worker.await.unwrap();
 
-    info!("Flash content: {}", flash.flash().print_items().await);
+            info!("Flash content: {}", flash.flash().print_items().await);
 
-    // Iterate over the flash and count the number of items
-    let mut iter = flash.iter().await.unwrap();
-    let mut item_counter = 0;
-    while iter.next(&mut [0u8; BUF_LEN]).await.unwrap().is_some() {
-        item_counter += 1;
-    }
-    info!("Found {} items in flash (expecting 2).", item_counter);
-    assert_eq!(
-        item_counter, 2,
-        "expected 2 items in the flash (one node and one write_confirm)"
-    )
+            // Iterate over the flash and count the number of items
+            let mut iter = flash.iter().await.unwrap();
+            let mut item_counter = 0;
+            while iter.next(&mut [0u8; BUF_LEN]).await.unwrap().is_some() {
+                item_counter += 1;
+            }
+            info!("Found {} items in flash (expecting 2).", item_counter);
+            assert_eq!(
+                item_counter, 2,
+                "expected 2 items in the flash (one node and one write_confirm)"
+            )
+        })
+        .await;
 }
