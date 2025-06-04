@@ -1354,7 +1354,7 @@ impl Iterator for StaticRawIter<'_> {
 /// Wrapper for [`NonNull<NodeHeader>`] that implements `Send`.
 ///
 /// This is necessary because we iterate over the IterRaw in async context,
-/// and for testing this means that futures need to be send. Since the IterRaw
+/// and for testing this means that futures need to be Send. Since the IterRaw
 /// yields `NonNull<T>`s, the iterated nodes are not Send. This adapter is
 /// sound because for as long as we have the IterRaw live, the mutex must remain
 /// locked.
