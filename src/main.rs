@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use cfg_noodle::{
-    flash::SeqStorFlash,
+    flash::sequential_storage_backend::SeqStorFlash,
     intrusive::{StorageList, StorageListNode},
 };
 use log::{error, info};

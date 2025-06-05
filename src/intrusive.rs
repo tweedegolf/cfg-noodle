@@ -1478,7 +1478,7 @@ pub fn serialize_node(
 #[cfg(test)]
 mod test {
     extern crate std;
-    use crate::flash::SeqStorFlash;
+    use crate::flash::sequential_storage_backend::SeqStorFlash;
 
     use super::*;
 

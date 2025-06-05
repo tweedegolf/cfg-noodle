@@ -1,5 +1,5 @@
 use cfg_noodle::{
-    flash::{Flash, QueueIter as _, SeqStorFlash},
+    flash::{Flash, QueueIter as _, sequential_storage_backend::SeqStorFlash},
     intrusive::{StorageList, StorageListNode},
 };
 use log::{error, info, warn};

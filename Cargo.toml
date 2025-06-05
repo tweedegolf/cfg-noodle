@@ -13,7 +13,7 @@ name = "integration_tests"
 required-features = ["std"]
 
 [features]
-default = ["std"]
+default = ["std", "sequential-storage"]
 std = [
     "minicbor/std",
     "sequential-storage/std",
@@ -26,14 +26,20 @@ std = [
     "dep:simple_logger",
     "dep:tokio",
 ]
-defmt = ["dep:defmt"]
+
+# "sequential-storage" flash backend, also used for testing
+sequential-storage = ["dep:sequential-storage"]
+
+# Log with "defmt"
+defmt = ["dep:defmt", "sequential-storage?/defmt-03"]
+
+# Add "arbitrary" dependency, used for fuzzing
 arbitrary = ["dep:arbitrary"]
 
 [dependencies]
 const-fnv1a-hash = "1.1.0"
 embedded-storage-async = "0.4.1"
 minicbor = { version = "1.0.0", features = ["derive"] }
-sequential-storage = "4.0.1"
 
 cordyceps = "0.3.4"
 critical-section = "1.2.0"
@@ -51,6 +57,7 @@ tokio = { version = "1.45.1", optional = true, features = [
     "time",
 ] }
 
+sequential-storage = { version = "4.0.1", optional = true }
 defmt = { version = "1.0.1", optional = true }
 embassy-futures = "0.1.1"
 

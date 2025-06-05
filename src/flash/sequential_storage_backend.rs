@@ -1,8 +1,5 @@
-//! Flash storage wrapper for sequential storage operations.
-//!
-//! This module provides a `Flash` struct that wraps a MultiwriteNorFlash device
-//! and exposes async methods for queue-like operations on persistent storage.
-
+//! Flash trait implementation for sequential-storage
+use super::{Flash, QueueIter};
 use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use sequential_storage::{
     Error as SeqStorError,
@@ -10,37 +7,7 @@ use sequential_storage::{
     queue::{self, QueueIterator},
 };
 
-/// Simple iterator providing a `next` function to iterate over the elements in the queue.
-pub trait QueueIter<E> {
-    /// Gets the next element from the iterator.
-    /// Returns `None` when no more elements are left in the iterator.
-    fn next<'a>(
-        &'a mut self,
-        buf: &'a mut [u8],
-    ) -> impl Future<Output = Result<Option<&'a [u8]>, E>>;
-}
-
-/// Flash interface used by the configuration storage
-pub trait Flash {
-    /// Error type for flash operations.
-    type Error: core::fmt::Debug;
-    /// Pushes data to the flash storage.
-    fn push(&mut self, data: &[u8]) -> impl Future<Output = Result<(), Self::Error>>;
-    /// Returns an iterator over the flash storage.
-    fn iter(&mut self) -> impl Future<Output = Result<impl QueueIter<Self::Error>, Self::Error>>;
-    /// Pops data from the flash storage.
-    fn pop<'a>(
-        &mut self,
-        data: &'a mut [u8],
-    ) -> impl Future<Output = Result<Option<&'a mut [u8]>, Self::Error>>;
-    /// Peeks at data from the flash storage without removing it.
-    fn peek<'a>(
-        &mut self,
-        data: &'a mut [u8],
-    ) -> impl Future<Output = Result<Option<&'a mut [u8]>, Self::Error>>;
-}
-
-/// Owns a flash and the range reserved for the `StorageList`
+/// Flash wrapper for use with sequential-storage
 pub struct SeqStorFlash<T, C>
 where
     T: MultiwriteNorFlash,
@@ -73,6 +40,7 @@ where
         &mut self.flash
     }
 }
+
 impl<T, C> Flash for SeqStorFlash<T, C>
 where
     T: MultiwriteNorFlash,
@@ -128,11 +96,11 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> QueueIter<SeqStorError<T::Error>>
         &'a mut self,
         buf: &'a mut [u8],
     ) -> Result<Option<&'a [u8]>, SeqStorError<T::Error>> {
-        Ok(self
-            .inner
+        // Get next item from iterator and map the `QueueIteratorEntry`
+        // in the Ok(Some(_)) to &[]
+        self.inner
             .next(buf)
-            .await?
-            .map(|data| data.into_buf())
-            .map(|data| &*data))
+            .await
+            .map(|opt| opt.map(|data| &*data.into_buf()))
     }
 }
