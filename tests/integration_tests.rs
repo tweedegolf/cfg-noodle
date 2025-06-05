@@ -116,7 +116,7 @@ fn worker_task<R: ScopedRawMutex + Sync>(
                 embassy_futures::select::Either3::First(_) => {
                     info!("worker task got needs_read signal");
                     if let Err(e) = list.process_reads(&mut flash, &mut read_buf).await {
-                        error!("Error in process_writes: {}", e);
+                        error!("Error in process_reads: {:?}", e);
                     }
                 }
                 // Handle write request from storage list
@@ -127,7 +127,7 @@ fn worker_task<R: ScopedRawMutex + Sync>(
                         .process_writes(&mut flash, &mut read_buf, &mut serde_buf)
                         .await
                     {
-                        error!("Error in process_writes: {}", e);
+                        error!("Error in process_writes: {:?}", e);
                     }
                 }
                 // Handle termination signal or timeout - exit the loop and return flash

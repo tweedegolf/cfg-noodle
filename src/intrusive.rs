@@ -150,10 +150,10 @@ pub struct Node<T> {
 
     // We generally want this to be in the tail position, because the size of T varies
     // and the pointer to the `NodeHeader` must not change as described above.
-    // 
+    //
     // TODO @James: This is very difficult to access from tests but maybe we would
     // want to have an (test-)interface that lets us create a node with a specific payload
-    // such that we can directly de-/serialize nodes and compare the results in a 
+    // such that we can directly de-/serialize nodes and compare the results in a
     // unit test. Do you think that makes sense? Or is there a better way to
     // have unit tests for this?
     t: MaybeUninit<T>,
@@ -211,6 +211,7 @@ pub struct NodeHeader {
 /// ```
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum State {
     /// The node has been created, but never "hydrated" with data from the
     /// flash. In this state, we are waiting to be notified whether we can
@@ -630,11 +631,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
         debug!("Attempt write_to_flash");
         // ... and try writing the list to flash one time.
         // If this fails, try again. If it fails again, return the error.
-        if let Err(e) = write_to_flash(&mut ls, serde_buf, flash).await {
-            error!(
-                "First writing attempt failed! Error: {}. Trying again...",
-                e
-            );
+        if write_to_flash(&mut ls, serde_buf, flash).await.is_err() {
+            error!("First writing attempt failed!");
 
             // Increase the counter for this list by two
             max_counter += Wrapping(1);
@@ -1559,7 +1557,7 @@ mod test {
                     embassy_futures::select::Either::First(_) => {
                         info!("worker task got needs_read signal");
                         if let Err(e) = list.process_reads(&mut flash, &mut read_buf).await {
-                            error!("Error in process_writes: {}", e);
+                            error!("Error in process_reads: {:?}", e);
                         }
                     }
                     embassy_futures::select::Either::Second(_) => {
@@ -1568,7 +1566,7 @@ mod test {
                             .process_writes(&mut flash, &mut read_buf, &mut serde_buf)
                             .await
                         {
-                            error!("Error in process_writes: {}", e);
+                            error!("Error in process_writes: {:?}", e);
                         }
 
                         info!("Wrote to flash: {}", flash.flash().print_items().await);
