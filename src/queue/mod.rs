@@ -16,8 +16,8 @@ pub trait QueueIter<E> {
     ) -> impl Future<Output = Result<Option<&'a [u8]>, E>>;
 }
 
-/// Flash interface used by the configuration storage
-pub trait Flash {
+/// Fifo queue interface used by the configuration storage
+pub trait Queue {
     /// Error type for flash operations.
     type Error: core::fmt::Debug;
     /// Pushes data to the flash storage.

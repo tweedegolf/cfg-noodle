@@ -1,5 +1,5 @@
-//! Flash trait implementation for sequential-storage
-use super::{Flash, QueueIter};
+//! Queue trait implementation for sequential-storage
+use super::{Queue, QueueIter};
 use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use sequential_storage::{
     Error as SeqStorError,
@@ -7,8 +7,8 @@ use sequential_storage::{
     queue::{self, QueueIterator},
 };
 
-/// Flash wrapper for use with sequential-storage
-pub struct SeqStorFlash<T, C>
+/// Queue wrapper for use with sequential-storage
+pub struct SeqStorQueue<T, C>
 where
     T: MultiwriteNorFlash,
     C: CacheImpl,
@@ -18,12 +18,12 @@ where
     cache: C,
 }
 
-impl<T, C> SeqStorFlash<T, C>
+impl<T, C> SeqStorQueue<T, C>
 where
     T: MultiwriteNorFlash,
     C: CacheImpl,
 {
-    /// Creates a new Flash instance with the given flash device and address range.
+    /// Creates a new Queue instance with the given flash device and address range.
     ///
     /// # Arguments
     /// * `flash` - The MultiwriteNorFlash device to use for storage operations
@@ -41,7 +41,7 @@ where
     }
 }
 
-impl<T, C> Flash for SeqStorFlash<T, C>
+impl<T, C> Queue for SeqStorQueue<T, C>
 where
     T: MultiwriteNorFlash,
     C: CacheImpl,

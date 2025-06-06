@@ -3,7 +3,7 @@
 
 use crate::{
     error::{Error, LoadStoreError},
-    flash::{Flash, QueueIter as _},
+    queue::{Queue, QueueIter as _},
     logging::{debug, error, info},
 };
 use cordyceps::{
@@ -331,7 +331,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
     ///   storage can not store larger items.
     ///
     /// TODO: Document what this function does and when it must be called
-    pub async fn process_reads<F: Flash>(
+    pub async fn process_reads<F: Queue>(
         &'static self,
         flash: &mut F,
         buf: &mut [u8],
@@ -543,7 +543,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// 3. Serializes each node and writes it to flash
     /// 4. Verifies the written data matches what was intended to be written
     /// 5. On success, marks all nodes as no longer having pending changes
-    pub async fn process_writes<F: Flash>(
+    pub async fn process_writes<F: Queue>(
         &'static self,
         flash: &mut F,
         read_buf: &mut [u8],
@@ -726,7 +726,7 @@ fn set_counter(
 /// # Returns
 /// * `Ok(())` - If the write confirmation block was successfully written to flash
 /// * `Err(LoadStoreError::FlashWrite)` - If the flash write operation failed
-async fn confirm_write<F: Flash>(
+async fn confirm_write<F: Queue>(
     flash: &mut F,
     counter: Counter,
 ) -> Result<(), LoadStoreError<F::Error>> {
@@ -755,7 +755,7 @@ async fn confirm_write<F: Flash>(
 /// * `Ok(())` - If cleanup completed successfully
 /// * `Err(LoadStoreError::FlashRead)` - If reading from flash fails
 /// * `Err(LoadStoreError::FlashWrite)` - If removing old items fails
-async fn delete_old_items<F: Flash>(
+async fn delete_old_items<F: Queue>(
     flash: &mut F,
     counter: Counter,
     serde_buf: &mut [u8],
@@ -803,7 +803,7 @@ async fn delete_old_items<F: Flash>(
 /// # Safety
 /// The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
 /// to ensure exclusive access during verification.
-async fn verify_list_in_flash<F: Flash>(
+async fn verify_list_in_flash<F: Queue>(
     ls: &mut MutexGuard<'_, List<NodeHeader>, impl ScopedRawMutex>,
     read_buf: &mut [u8],
     serde_buf: &mut [u8],
@@ -883,7 +883,7 @@ async fn verify_list_in_flash<F: Flash>(
 /// - The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
 ///   to ensure exclusive access during the write operation.
 /// - The list nodes must be in a valid state for writing (e.g., counter must be set)
-async fn write_to_flash<F: Flash>(
+async fn write_to_flash<F: Queue>(
     ls: &mut MutexGuard<'_, List<NodeHeader>, impl ScopedRawMutex>,
     buf: &mut [u8],
     flash: &mut F,
@@ -1478,7 +1478,7 @@ pub fn serialize_node(
 #[cfg(test)]
 mod test {
     extern crate std;
-    use crate::flash::sequential_storage_backend::SeqStorFlash;
+    use crate::queue::sequential_storage_backend::SeqStorQueue;
 
     use super::*;
 
@@ -1515,14 +1515,14 @@ mod test {
     // TODO: This type, the get_mock_flash() and worker_task() are not only specific to sequential storage's
     // mock flash, but also copy&pasted in the integration tests. If we go with the flash-trait approach,
     // these could be generic.
-    type MockFlash = SeqStorFlash<MockFlashBase<10, 16, 256>, NoCache>;
+    type MockFlash = SeqStorQueue<MockFlashBase<10, 16, 256>, NoCache>;
 
     fn get_mock_flash() -> MockFlash {
         let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true);
         // TODO: Figure out why miri tests with unaligned buffers and whether
         // this needs any fixing. For now just disable the alignment check in MockFlash
         flash.alignment_check = false;
-        SeqStorFlash::new(flash, 0x0000..0x1000, NoCache::new())
+        SeqStorQueue::new(flash, 0x0000..0x1000, NoCache::new())
     }
 
     fn worker_task<R: ScopedRawMutex + Sync>(

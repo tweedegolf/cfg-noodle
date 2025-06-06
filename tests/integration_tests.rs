@@ -1,6 +1,6 @@
 use cfg_noodle::{
-    flash::{Flash, QueueIter as _, sequential_storage_backend::SeqStorFlash},
     intrusive::{StorageList, StorageListNode},
+    queue::{Queue, QueueIter as _, sequential_storage_backend::SeqStorQueue},
 };
 use log::{error, info, warn};
 use minicbor::{CborLen, Decode, Encode};
@@ -35,13 +35,13 @@ struct SimpleConfig {
     data: u8,
 }
 
-type MockFlash = SeqStorFlash<MockFlashBase<10, 16, 256>, NoCache>;
+type MockFlash = SeqStorQueue<MockFlashBase<10, 16, 256>, NoCache>;
 
 /// Creates a test flash instance with mock storage for testing purposes.
 fn get_test_flash() -> MockFlash {
     let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::Twice, None, true);
     flash.alignment_check = false;
-    SeqStorFlash::new(flash, 0x0000..0x1000, NoCache::new())
+    SeqStorQueue::new(flash, 0x0000..0x1000, NoCache::new())
 }
 
 /// Spawns an asynchronous worker task that manages storage operations for a storage list.
