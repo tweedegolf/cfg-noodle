@@ -49,7 +49,7 @@ where
     type Error = SeqStorError<T::Error>;
 
     /// Pushes data to the sequential storage queue.
-    async fn push(&mut self, data: &[u8]) -> Result<(), SeqStorError<T::Error>> {
+    async fn push_entry(&mut self, data: &[u8]) -> Result<(), SeqStorError<T::Error>> {
         queue::push(
             &mut self.flash,
             self.range.clone(),
@@ -61,7 +61,7 @@ where
     }
 
     /// Creates an iterator over the sequential storage queue.
-    async fn iter(
+    async fn iter_entries(
         &mut self,
     ) -> Result<impl QueueIter<SeqStorError<T::Error>>, SeqStorError<T::Error>> {
         Ok(SeqStorQueueIter {
@@ -70,14 +70,14 @@ where
     }
 
     /// Pops data from the sequential storage queue.
-    async fn pop<'a>(
+    async fn pop_entry<'a>(
         &mut self,
         data: &'a mut [u8],
     ) -> Result<Option<&'a mut [u8]>, SeqStorError<T::Error>> {
         queue::pop(&mut self.flash, self.range.clone(), &mut self.cache, data).await
     }
     /// Peeks at data from the sequential storage queue.
-    async fn peek<'a>(
+    async fn peek_entry<'a>(
         &mut self,
         data: &'a mut [u8],
     ) -> Result<Option<&'a mut [u8]>, SeqStorError<T::Error>> {

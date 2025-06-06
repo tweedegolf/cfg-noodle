@@ -348,7 +348,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
         let mut latest_counter: Option<Counter> = None;
 
         // Create a `QueueIterator` without caching
-        let mut queue_iter = flash.iter().await.map_err(LoadStoreError::FlashRead)?;
+        let mut queue_iter = flash.iter_entries().await.map_err(LoadStoreError::FlashRead)?;
         while let Some(item) = queue_iter
             .next(buf)
             .await
@@ -735,7 +735,7 @@ async fn confirm_write<F: Queue>(
     write_confirm[KEY_LEN] = counter.0;
     // Try writing to flash
     flash
-        .push(write_confirm)
+        .push_entry(write_confirm)
         .await
         .map_err(LoadStoreError::FlashWrite)
 }
@@ -766,7 +766,7 @@ async fn delete_old_items<F: Queue>(
     // If not, pop that item from the list.
     loop {
         if let Some(item) = flash
-            .peek(serde_buf)
+            .peek_entry(serde_buf)
             .await
             .map_err(LoadStoreError::FlashRead)?
         {
@@ -774,7 +774,7 @@ async fn delete_old_items<F: Queue>(
                 return Ok(());
             } else {
                 flash
-                    .pop(serde_buf)
+                    .pop_entry(serde_buf)
                     .await
                     .map_err(LoadStoreError::FlashWrite)?;
             }
@@ -810,7 +810,7 @@ async fn verify_list_in_flash<F: Queue>(
     flash: &mut F,
 ) -> Result<(), LoadStoreError<F::Error>> {
     // Create a `QueueIterator`
-    let mut queue_iter = flash.iter().await.map_err(LoadStoreError::FlashRead)?;
+    let mut queue_iter = flash.iter_entries().await.map_err(LoadStoreError::FlashRead)?;
 
     // Make it Send
     let mut iter = StaticRawIter {
@@ -904,7 +904,7 @@ async fn write_to_flash<F: Queue>(
             );
             // Try writing to flash
             flash
-                .push(&buf[..used])
+                .push_entry(&buf[..used])
                 .await
                 .map_err(LoadStoreError::FlashWrite)?;
         } else {
@@ -1704,7 +1704,7 @@ mod test {
                 let mut flash = get_mock_flash();
                 info!("Pushing to flash: {:?}", &serde_buf[..used]);
                 flash
-                    .push(&serde_buf[..used])
+                    .push_entry(&serde_buf[..used])
                     .await
                     .expect("pushing to flash should not fail here");
 
