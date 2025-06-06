@@ -1,7 +1,4 @@
 //! Error types used for the list
-use embedded_storage_async::nor_flash::NorFlashError;
-use sequential_storage::Error as SecStorError;
-
 use crate::intrusive::{KEY_LEN, State};
 
 /// General error that is not specific to the flash implementation
@@ -26,22 +23,21 @@ pub enum Error {
     InvalidState([u8; KEY_LEN], State),
 }
 
-
 // TODO @James: I have created this error because it uses the generic <F>. Adding generics
 // to the generall error struct was super awkward. Is there any better way of wrapping errors
 // from other crates when they require generics?
 
 #[derive(thiserror::Error, Debug)]
 /// Errors during loading from and storing to flash.
-/// 
+///
 /// Sometimes specific to the flash implementation.
-pub enum LoadStoreError<F: NorFlashError> {
+pub enum LoadStoreError<F> {
     /// Writing to flash has failed. Contains the error returned by sequential storage.
     #[error("Writing to flash has failed: {0:?}")]
-    FlashWrite(SecStorError<F>),
+    FlashWrite(F),
     /// Reading from flash has failed. Contains the error returned by sequential storage.
     #[error("Reading from flash has failed: {0:?}")]
-    FlashRead(SecStorError<F>),
+    FlashRead(F),
     /// Value read back from the flash during verification did not match serialized list node.
     #[error("Value written to flash does not match serialized list node.")]
     WriteVerificationFailed,

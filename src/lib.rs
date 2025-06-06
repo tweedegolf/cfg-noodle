@@ -3,8 +3,8 @@
 #![warn(missing_docs)]
 #![deny(clippy::unwrap_used)]
 pub mod error;
+pub mod queue;
 pub mod intrusive;
-pub mod flash;
 
 #[allow(unused)]
 pub(crate) mod logging {

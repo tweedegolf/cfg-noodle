@@ -157,7 +157,7 @@ dependencies = [
  "const-fnv1a-hash",
  "cordyceps",
  "critical-section",
- "defmt",
+ "defmt 1.0.1",
  "embassy-futures",
  "embedded-storage-async",
  "futures",
@@ -211,6 +211,15 @@ name = "critical-section"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
+
+[[package]]
+name = "defmt"
+version = "0.3.100"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0963443817029b2024136fc4dd07a5107eb8f977eaf18fcd1fdeb11306b64ad"
+dependencies = [
+ "defmt 1.0.1",
+]
 
 [[package]]
 name = "defmt"
@@ -789,6 +798,7 @@ checksum = "8d8e933f534642c25b7341338c10e2250187c8cd198c3957ef6894265eefda86"
 dependencies = [
  "approx",
  "arrayvec",
+ "defmt 0.3.100",
  "embedded-storage-async",
  "futures",
  "heapless",
