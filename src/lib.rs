@@ -3,8 +3,8 @@
 #![warn(missing_docs)]
 #![deny(clippy::unwrap_used)]
 pub mod error;
-pub mod intrusive;
 pub mod flash;
+pub mod intrusive;
 
 #[allow(unused)]
 pub(crate) mod logging {
@@ -13,6 +13,9 @@ pub(crate) mod logging {
 
     #[cfg(feature = "defmt")]
     pub use defmt::*;
+
+    #[cfg(all(feature = "std", feature = "defmt"))]
+    compile_error!("Cannot enable both 'std' and 'defmt' features simultaneously");
 
     /// No-op macros when no logging feature is enabled
     #[cfg(not(any(feature = "std", feature = "defmt")))]

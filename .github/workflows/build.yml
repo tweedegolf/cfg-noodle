@@ -1,0 +1,22 @@
+name: Build and Test
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  miri:
+    name: "Check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cargo-hack
+      - name: Check each feature
+        run: cargo hack check --each-feature --no-dev-deps --exclude-all-features --exclude-features arbitrary
+      - name: Build each feature
+        run: cargo hack build --each-feature --no-dev-deps --exclude-all-features --exclude-features arbitrary
+      - name: Test each feature
+        run: cargo hack test --features std

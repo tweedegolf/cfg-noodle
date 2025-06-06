@@ -42,7 +42,7 @@ async fn main() {
             .process_writes(&mut flash2, read_buf, serde_buf)
             .await
         {
-            error!("Error in process_writes: {}", e);
+            error!("Error in process_writes: {:?}", e);
         }
         info!("NEW WRITES: {}", flash2.flash().print_items().await);
     }
