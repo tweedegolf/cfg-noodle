@@ -449,7 +449,7 @@ async fn test_multiple_writes() {
             info!("Flash content: {}", flash.flash().print_items().await);
 
             // Iterate over the flash and count the number of items
-            let mut iter = flash.iter().await.unwrap();
+            let mut iter = flash.iter_entries().await.unwrap();
             let mut item_counter = 0;
             while iter.next(&mut [0u8; BUF_LEN]).await.unwrap().is_some() {
                 item_counter += 1;
