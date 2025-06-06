@@ -170,7 +170,6 @@ dependencies = [
  "sequential-storage",
  "simple_logger",
  "test-log",
- "thiserror",
  "tokio",
 ]
 
