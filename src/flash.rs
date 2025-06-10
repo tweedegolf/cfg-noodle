@@ -3,31 +3,150 @@
 //! This module provides a `Flash` struct that wraps a MultiwriteNorFlash device
 //! and exposes async methods for queue-like operations on persistent storage.
 
+use core::{marker::PhantomData, ops::Deref};
+
 use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use sequential_storage::{
     Error as SeqStorError,
     cache::CacheImpl,
-    queue::{self, QueueIterator},
+    queue::{self, QueueIterator, QueueIteratorEntry},
 };
 
 /// Owns a flash and the range reserved for the `StorageList`
-pub struct Flash<T: MultiwriteNorFlash, C: CacheImpl> {
+pub struct Flash<'a, T: MultiwriteNorFlash, C: CacheImpl> {
     flash: T,
     range: core::ops::Range<u32>,
     cache: C,
+    buf: &'a mut [u8],
 }
 
-impl<T: MultiwriteNorFlash, C: CacheImpl> Flash<T, C> {
+impl<'node, 'iter: 'node, 'sto: 'iter, 'a: 'sto, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlDataStorage<'node, 'iter, 'sto>
+    for Flash<'a, T, C>
+{
+    type Iter = FlashIter<'iter, T, C>;
+
+    type PushError = ();
+
+    async fn iter_elems(&mut self) -> Result<Self::Iter, <Self::Iter as NdlElemIter<'node, 'iter>>::Error> {
+        Ok(FlashIter {
+            iter: queue::iter(&mut self.flash, self.range.clone(), &mut self.cache).await?,
+            buf: self.buf,
+        })
+    }
+
+    async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::PushError> {
+        todo!()
+    }
+}
+
+pub struct FlashIter<'a, T: MultiwriteNorFlash, C: CacheImpl> {
+    iter: QueueIterator<'a, T, C>,
+    buf: &'a mut [u8],
+}
+
+impl<'node, 'iter: 'node, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIter<'node, 'iter> for FlashIter<'iter, T, C> {
+    type Item = FlashNode<'node, T, C>;
+
+    type Error = SeqStorError<T::Error>;
+
+    async fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
+        loop {
+            let iter = &mut self.iter;
+            let nxt = iter.next(self.buf).await?;
+            let Some(nxt) = nxt else { return Ok(None) };
+            if let Some(elem) = HalfElem::from_bytes(&nxt) {
+                return Ok(Some(FlashNode { half: elem, qit: nxt }))
+            }
+        }
+    }
+
+    async fn skip_to_seq(&mut self, seq_no: u32) -> Result<(), Self::Error> {
+        todo!()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HalfElem {
+    Start { seq_no: u32 },
+    Data,
+    End { seq_no: u32, calc_crc: u32 },
+}
+
+impl HalfElem {
+    fn from_bytes(data: &[u8]) -> Option<Self> {
+        let (first, rest) = data.split_first()?;
+        match *first {
+            0 => {
+                if rest.len() != 4 {
+                    return None;
+                }
+                let mut bytes = [0u8; 4];
+                bytes.copy_from_slice(rest);
+                Some(HalfElem::Start {
+                    seq_no: u32::from_le_bytes(bytes),
+                })
+            }
+            1 => {
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(HalfElem::Data)
+                }
+            }
+            2 => {
+                if rest.len() != 8 {
+                    return None;
+                }
+                let mut seq_bytes = [0u8; 4];
+                seq_bytes.copy_from_slice(&rest[..4]);
+                let mut crc_bytes = [0u8; 4];
+                crc_bytes.copy_from_slice(&rest[4..8]);
+                Some(HalfElem::End {
+                    seq_no: u32::from_le_bytes(seq_bytes),
+                    calc_crc: u32::from_le_bytes(crc_bytes),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+pub struct FlashNode<'a, T: MultiwriteNorFlash, C: CacheImpl> {
+    half: HalfElem,
+    qit: QueueIteratorEntry<'a, 'a, 'a, T, C>,
+}
+
+impl<'a, 'node, T: MultiwriteNorFlash, C: CacheImpl> NdlElemIterNode<'node> for FlashNode<'a, T, C> {
+    type InvalidateError = SeqStorError<T::Error>;
+
+    fn data(&self) -> Elem<'_> {
+        match self.half {
+            HalfElem::Start { seq_no } => Elem::Start { seq_no },
+            HalfElem::Data => Elem::Data {
+                data: &self.qit.deref()[1..],
+            },
+            HalfElem::End { seq_no, calc_crc } => Elem::End { seq_no, calc_crc },
+        }
+    }
+
+    async fn invalidate(self) -> Result<(), Self::InvalidateError> {
+        self.qit.pop().await?;
+        Ok(())
+    }
+}
+
+impl<'a, T: MultiwriteNorFlash, C: CacheImpl> Flash<'a, T, C> {
     /// Creates a new Flash instance with the given flash device and address range.
     ///
     /// # Arguments
     /// * `flash` - The MultiwriteNorFlash device to use for storage operations
     /// * `range` - The address range within the flash device reserved for this storage
-    pub fn new(flash: T, range: core::ops::Range<u32>, cache: C) -> Self {
+    pub fn new(flash: T, range: core::ops::Range<u32>, cache: C, buf: &'a mut [u8]) -> Self {
         Self {
             flash,
             range,
             cache,
+            buf,
         }
     }
 
@@ -54,32 +173,41 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> Flash<T, C> {
     }
 
     /// Pops data from the sequential storage queue.
-    pub async fn pop<'a>(
-        &mut self,
-        data: &'a mut [u8],
-    ) -> Result<Option<&'a mut [u8]>, SeqStorError<T::Error>> {
-        queue::pop(&mut self.flash, self.range.clone(), &mut self.cache, data).await
+    pub async fn pop(&mut self) -> Result<Option<&mut [u8]>, SeqStorError<T::Error>> {
+        let Flash {
+            flash,
+            range,
+            cache,
+            buf,
+        } = self;
+        queue::pop(flash, range.clone(), cache, buf).await
     }
     /// Peeks at data from the sequential storage queue.
-    pub async fn peek<'a>(
-        &mut self,
-        data: &'a mut [u8],
-    ) -> Result<Option<&'a mut [u8]>, SeqStorError<T::Error>> {
-        queue::peek(&mut self.flash, self.range.clone(), &mut self.cache, data).await
+    pub async fn peek(&mut self) -> Result<Option<&mut [u8]>, SeqStorError<T::Error>> {
+        let Flash {
+            flash,
+            range,
+            cache,
+            buf,
+        } = self;
+        queue::peek(flash, range.clone(), cache, buf).await
     }
 }
 
 /// A single element stored in flash
 #[derive(Debug, PartialEq)]
 pub enum Elem<'a> {
+    /// Start element
     Start {
         /// The "write record" sequence number
         seq_no: u32,
     },
+    /// Data element
     Data {
         /// Contains the serialized key and value for the current data element
         data: &'a [u8],
     },
+    /// End element
     End {
         /// The "write record" sequence number. Must match `Elem::Start { seq_no }`
         /// to properly end a "write record".
@@ -91,7 +219,7 @@ pub enum Elem<'a> {
 }
 
 /// A single element yielded from a NdlElemIter implementation
-pub trait NdlElemIterNode {
+pub trait NdlElemIterNode<'node> {
     /// Error encountered while invalidating an element
     ///
     /// TODO: make this a concrete type? some kind of InvalidateErrorKind bound?
@@ -119,9 +247,9 @@ pub trait NdlElemIterNode {
 }
 
 /// An iterator over `Elem`s stored in the queue.
-pub trait NdlElemIter {
+pub trait NdlElemIter<'node, 'iter: 'node> {
     /// Items yielded by this iterator
-    type Item: NdlElemIterNode;
+    type Item: NdlElemIterNode<'node>;
     /// The error returned when next/skip_to_seq or NdlDataStorage::iter_elems fails
     ///
     /// TODO: make this a concrete type? some kind of ErrorKind bound?
@@ -133,7 +261,7 @@ pub trait NdlElemIter {
     /// may require re-creation of the iterator (e.g. the iterator may return a
     /// latched Error of some kind after cancellation). Cancellation MUST NOT lead
     /// to data loss.
-    async fn next(&mut self) -> Result<Option<Self::Item>, Self::Error>;
+    async fn next(&'node mut self) -> Result<Option<Self::Item>, Self::Error>;
 
     /// Fast-forwards the iterator to the Elem::Start item with the given seq_no.
     /// Returns an error if not found. If Err is returned, the iterator
@@ -148,9 +276,9 @@ pub trait NdlElemIter {
 }
 
 /// A storage backend representing a FIFO queue of elements
-pub trait NdlDataStorage {
+pub trait NdlDataStorage<'node, 'iter: 'node, 'sto: 'iter> {
     /// The type of iterator returned by this implementation
-    type Iter: NdlElemIter;
+    type Iter: NdlElemIter<'node, 'iter>;
     /// The error returned when pushing fails
     ///
     /// TODO: make this a concrete type? some kind of PushErrorKind bound?
@@ -160,7 +288,7 @@ pub trait NdlDataStorage {
     ///
     /// This method MUST be cancellation safe, and cancellation MUST NOT lead to
     /// data loss.
-    async fn iter_elems(&mut self) -> Result<Self::Iter, <Self::Iter as NdlElemIter>::Error>;
+    async fn iter_elems(&'iter mut self) -> Result<Self::Iter, <Self::Iter as NdlElemIter<'node, 'iter>>::Error>;
 
     /// Insert an element at the FRONT of the list.
     ///

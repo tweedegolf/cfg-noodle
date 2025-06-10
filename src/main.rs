@@ -49,115 +49,115 @@ async fn main() {
     todo!()
 }
 
-fn get_mock_flash() -> Flash<MockFlashBase<10, 16, 256>, NoCache> {
-    let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true);
-    // TODO: Figure out why miri tests with unaligned buffers and whether
-    // this needs any fixing. For now just disable the alignment check in MockFlash
-    flash.alignment_check = false;
-    Flash::new(flash, 0x0000..0x1000, NoCache::new())
-}
+// fn get_mock_flash() -> Flash<MockFlashBase<10, 16, 256>, NoCache> {
+//     let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true);
+//     // TODO: Figure out why miri tests with unaligned buffers and whether
+//     // this needs any fixing. For now just disable the alignment check in MockFlash
+//     flash.alignment_check = false;
+//     Flash::new(flash, 0x0000..0x1000, NoCache::new())
+// }
 
-static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+// static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
 
-//
-// TASK 1: Has config, but an old version
-//
-#[derive(Debug, Default, Encode, Decode, Clone, CborLen)]
-struct EncabulatorConfigV1 {
-    #[n(0)]
-    polarity: bool,
-}
+// //
+// // TASK 1: Has config, but an old version
+// //
+// #[derive(Debug, Default, Encode, Decode, Clone, CborLen)]
+// struct EncabulatorConfigV1 {
+//     #[n(0)]
+//     polarity: bool,
+// }
 
-#[derive(Debug, Default, Encode, Decode, Clone, CborLen)]
-struct EncabulatorConfigV2 {
-    #[n(0)]
-    polarity: bool,
-    #[n(1)]
-    spinrate: Option<u32>,
-}
+// #[derive(Debug, Default, Encode, Decode, Clone, CborLen)]
+// struct EncabulatorConfigV2 {
+//     #[n(0)]
+//     polarity: bool,
+//     #[n(1)]
+//     spinrate: Option<u32>,
+// }
 
-static ENCAB_CONFIG: StorageListNode<EncabulatorConfigV2> =
-    StorageListNode::new("encabulator/config");
-async fn task_1(list: &'static StorageList<CriticalSectionRawMutex>) {
-    let config_handle = match ENCAB_CONFIG.attach(list).await {
-        Ok(ch) => ch,
-        Err(_) => panic!("Could not attach config to list"),
-    };
-    let data: EncabulatorConfigV2 = config_handle.load().await.unwrap();
-    println!("T1 Got {data:?}");
-    sleep(Duration::from_secs(1)).await;
-    config_handle
-        .write(&EncabulatorConfigV2 {
-            polarity: true,
-            spinrate: Some(100),
-        })
-        .await
-        .unwrap();
-}
+// static ENCAB_CONFIG: StorageListNode<EncabulatorConfigV2> =
+//     StorageListNode::new("encabulator/config");
+// async fn task_1(list: &'static StorageList<CriticalSectionRawMutex>) {
+//     let config_handle = match ENCAB_CONFIG.attach(list).await {
+//         Ok(ch) => ch,
+//         Err(_) => panic!("Could not attach config to list"),
+//     };
+//     let data: EncabulatorConfigV2 = config_handle.load().await.unwrap();
+//     println!("T1 Got {data:?}");
+//     sleep(Duration::from_secs(1)).await;
+//     config_handle
+//         .write(&EncabulatorConfigV2 {
+//             polarity: true,
+//             spinrate: Some(100),
+//         })
+//         .await
+//         .unwrap();
+// }
 
-//
-// TASK 2: Has config, current version
-//
-#[derive(Debug, Default, Encode, Decode, Clone, CborLen)]
-struct GrammeterConfig {
-    #[n(0)]
-    radiation: f32,
-}
+// //
+// // TASK 2: Has config, current version
+// //
+// #[derive(Debug, Default, Encode, Decode, Clone, CborLen)]
+// struct GrammeterConfig {
+//     #[n(0)]
+//     radiation: f32,
+// }
 
-static GRAMM_CONFIG: StorageListNode<GrammeterConfig> = StorageListNode::new("grammeter/config");
-async fn task_2(list: &'static StorageList<CriticalSectionRawMutex>) {
-    let config_handle = match GRAMM_CONFIG.attach(list).await {
-        Ok(ch) => ch,
-        Err(_) => panic!("Could not attach config to list"),
-    };
-    let data: GrammeterConfig = config_handle.load().await.unwrap();
-    println!("T2 Got {data:?}");
-    sleep(Duration::from_secs(3)).await;
-    config_handle
-        .write(&GrammeterConfig { radiation: 200.0 })
-        .await
-        .unwrap();
-}
+// static GRAMM_CONFIG: StorageListNode<GrammeterConfig> = StorageListNode::new("grammeter/config");
+// async fn task_2(list: &'static StorageList<CriticalSectionRawMutex>) {
+//     let config_handle = match GRAMM_CONFIG.attach(list).await {
+//         Ok(ch) => ch,
+//         Err(_) => panic!("Could not attach config to list"),
+//     };
+//     let data: GrammeterConfig = config_handle.load().await.unwrap();
+//     println!("T2 Got {data:?}");
+//     sleep(Duration::from_secs(3)).await;
+//     config_handle
+//         .write(&GrammeterConfig { radiation: 200.0 })
+//         .await
+//         .unwrap();
+// }
 
-//
-// TASK 3: No config
-//
-#[derive(Debug, Encode, Decode, Clone, CborLen)]
-struct PositronConfig {
-    #[n(0)]
-    up: u8,
-    #[n(1)]
-    down: u16,
-    #[n(2)]
-    strange: u32,
-}
+// //
+// // TASK 3: No config
+// //
+// #[derive(Debug, Encode, Decode, Clone, CborLen)]
+// struct PositronConfig {
+//     #[n(0)]
+//     up: u8,
+//     #[n(1)]
+//     down: u16,
+//     #[n(2)]
+//     strange: u32,
+// }
 
-impl Default for PositronConfig {
-    fn default() -> Self {
-        Self {
-            up: 10,
-            down: 20,
-            strange: 103,
-        }
-    }
-}
+// impl Default for PositronConfig {
+//     fn default() -> Self {
+//         Self {
+//             up: 10,
+//             down: 20,
+//             strange: 103,
+//         }
+//     }
+// }
 
-static POSITRON_CONFIG: StorageListNode<PositronConfig> = StorageListNode::new("positron/config");
+// static POSITRON_CONFIG: StorageListNode<PositronConfig> = StorageListNode::new("positron/config");
 
-async fn task_3(list: &'static StorageList<CriticalSectionRawMutex>) {
-    let config_handle = match POSITRON_CONFIG.attach(list).await {
-        Ok(ch) => ch,
-        Err(_) => panic!("Could not attach config to list"),
-    };
-    let data: PositronConfig = config_handle.load().await.unwrap();
-    println!("T3 Got {data:?}");
-    sleep(Duration::from_secs(5)).await;
-    config_handle
-        .write(&PositronConfig {
-            up: 15,
-            down: 25,
-            strange: 108,
-        })
-        .await
-        .unwrap();
-}
+// async fn task_3(list: &'static StorageList<CriticalSectionRawMutex>) {
+//     let config_handle = match POSITRON_CONFIG.attach(list).await {
+//         Ok(ch) => ch,
+//         Err(_) => panic!("Could not attach config to list"),
+//     };
+//     let data: PositronConfig = config_handle.load().await.unwrap();
+//     println!("T3 Got {data:?}");
+//     sleep(Duration::from_secs(5)).await;
+//     config_handle
+//         .write(&PositronConfig {
+//             up: 15,
+//             down: 25,
+//             strange: 108,
+//         })
+//         .await
+//         .unwrap();
+// }
