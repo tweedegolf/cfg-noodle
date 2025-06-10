@@ -11,9 +11,13 @@ use cordyceps::{
     list::{self, IterRaw},
 };
 use core::{
-    cell::UnsafeCell, fmt::Debug, marker::PhantomPinned, mem::MaybeUninit, pin::Pin, ptr::{self, NonNull}
+    cell::UnsafeCell,
+    fmt::Debug,
+    marker::PhantomPinned,
+    mem::MaybeUninit,
+    pin::Pin,
+    ptr::{self, NonNull},
 };
-use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use maitake_sync::{Mutex, WaitQueue};
 use minicbor::{
     CborLen, Decode, Encode,
@@ -21,12 +25,26 @@ use minicbor::{
     len_with,
 };
 use mutex::{ConstInit, ScopedRawMutex};
-use sequential_storage::cache::CacheImpl;
 
-enum HydrationState {
-    HydratedLatest(u32),
-    HydratedNone,
-    NotHydrated,
+/// This is fake until I pull in the CRC crate
+struct FakeCrc32 {
+    state: u32,
+}
+
+impl FakeCrc32 {
+    fn new() -> Self {
+        Self { state: 0 }
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        for b in data {
+            self.state = self.state.wrapping_add((*b) as u32);
+        }
+    }
+
+    fn finalize(self) -> u32 {
+        self.state
+    }
 }
 
 #[derive(Default)]
@@ -57,9 +75,11 @@ struct StorageListInner {
     seq_state: SeqState,
 }
 
-
 impl StorageListInner {
-    async fn get_or_populate_latest<S: NdlDataStorage>(&mut self, s: &mut S) -> Result<Option<u32>, LoadStoreError> {
+    async fn get_or_populate_latest<S: NdlDataStorage>(
+        &mut self,
+        s: &mut S,
+    ) -> Result<Option<u32>, LoadStoreError> {
         if self.seq_state.has_hydrated {
             let max = self.seq_state.last_three.iter().copied().max().unwrap_or(0);
             if max == 0 {
@@ -76,7 +96,7 @@ impl StorageListInner {
 
         let mut current: Option<u32> = None;
         // todo: real crc
-        let mut crc = 0u32;
+        let mut crc = FakeCrc32::new();
 
         loop {
             let res = iter.next().await;
@@ -93,19 +113,21 @@ impl StorageListInner {
                 Elem::Start { seq_no } => {
                     current = Some(seq_no);
                     // todo: real crc
-                    crc = 0;
-                },
+                    // todo: We should make sure next_seq is ALWAYS larger than any seen start,
+                    // to ensure we don't accidentally re-use a bad one.
+                    crc = FakeCrc32::new();
+                }
                 Elem::Data { data } => {
                     if current.is_none() {
                         continue;
                     } else {
                         // todo: real crc
-                        for b in data {
-                            crc = crc.wrapping_add((*b) as u32);
-                        }
+                        crc.update(data);
                     }
-                },
+                }
                 Elem::End { seq_no, calc_crc } => {
+                    let check_crc = crc.finalize();
+                    crc = FakeCrc32::new();
                     let Some(seq) = current.take() else {
                         continue;
                     };
@@ -113,17 +135,18 @@ impl StorageListInner {
                         continue;
                     }
                     // todo: real crc
-                    if calc_crc != crc {
+                    if calc_crc != check_crc {
                         continue;
                     }
                     self.seq_state.insert_good(seq_no);
-                },
+                }
             }
         }
 
         self.seq_state.has_hydrated = true;
         let max = self.seq_state.last_three.iter().copied().max().unwrap_or(0);
         if max == 0 {
+            self.seq_state.next_seq = 1;
             Ok(None)
         } else {
             Ok(Some(max))
@@ -134,7 +157,6 @@ impl StorageListInner {
         &mut self,
         latest: u32,
         storage: &mut S,
-        buf: &mut [u8],
     ) -> Result<(), LoadStoreError> {
         let Ok(mut queue_iter) = storage.iter_elems().await else {
             todo!()
@@ -237,6 +259,47 @@ impl StorageListInner {
                 }
             }
         }
+    }
+
+    fn needs_writing(&mut self) -> Result<bool, LoadStoreError> {
+        // Set to true if any node in the list needs writing
+        let mut needs_writing = false;
+
+        // Iterate over all list nodes and
+        // 1. Store the counter (if present).
+        //    We technically only need the counter from one list item that has been
+        //    read from flash and has counter != None.
+        // 2. Check if any node needs writing or is in an invalid state.
+        for hdrptr in self.list.iter_raw() {
+            let header = unsafe { hdrptr.as_ref() };
+
+            match header.state {
+                // If no write is needed, we obviously won't write.
+                State::ValidNoWriteNeeded => (),
+                // If the node hasn't been written to flash yet and we initialized it
+                // with a Default, we now write it to flash.
+                State::DefaultUnwritten | State::NeedsWrite => needs_writing = true,
+                // TODO: A node may be in `Initial` state, if it has been attached but
+                // `process_reads` hasn't run, yet. Should we return early here and trigger
+                // another process_reads?
+                State::Initial => {
+                    return Err(LoadStoreError::NeedsRead);
+                }
+                // This should never appear on a list that has been processed properly.
+                // TODO @James: Not sure how we should recover from this. If it cannot happen
+                // due to invalid input, we might just as well panic.
+                State::NonResident => {
+                    debug!("process_writes() on invalid state: {:?}", header.state);
+
+                    return Err(LoadStoreError::AppError(Error::InvalidState(
+                        header.key,
+                        header.state,
+                    )));
+                }
+            }
+        }
+
+        Ok(needs_writing)
     }
 }
 
@@ -533,7 +596,6 @@ impl<R: ScopedRawMutex + ConstInit> Default for StorageList<R> {
 /// used by the "storage worker task", that decides when we actually want to
 /// interact with the flash.
 impl<R: ScopedRawMutex> StorageList<R> {
-
     /// Process any nodes that are requesting flash data
     ///
     /// ## Params:
@@ -546,9 +608,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
     pub async fn process_reads<S: NdlDataStorage>(
         &'static self,
         storage: &mut S,
-        buf: &mut [u8],
     ) -> Result<(), LoadStoreError> {
-        info!("Start process_reads, buffer has len {}", buf.len());
+        info!("Start process_reads");
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
         let mut inner = self.inner.lock().await;
@@ -564,12 +625,11 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
         // If we have something: populate all present items
         if let Some(latest) = res {
-            inner.extract_all(latest, storage, buf).await?;
+            inner.extract_all(latest, storage).await?;
         }
 
         // Now, we either have NOTHING, or we have populated all items that DO exist.
         inner.mark_pending_nonpop();
-
 
         // // TODO: Clarify if we should set the counter here and whether we should already
         // // "bump" it at this point or only just before writing.
@@ -607,109 +667,40 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// 3. Serializes each node and writes it to flash
     /// 4. Verifies the written data matches what was intended to be written
     /// 5. On success, marks all nodes as no longer having pending changes
-    pub async fn process_writes<F: MultiwriteNorFlash>(
+    pub async fn process_writes<S: NdlDataStorage>(
         &'static self,
-        flash: &mut Flash<F, impl CacheImpl>,
-        read_buf: &mut [u8],
+        storage: &mut S,
         serde_buf: &mut [u8],
     ) -> Result<(), LoadStoreError> {
-        // debug!("Start process_writes");
+        debug!("Start process_writes");
 
-        // // Lock the list, remember, if we're touching nodes, we need to have the list
-        // // locked the entire time!
-        // let mut inner = self.inner.lock().await;
-        // debug!("process_writes locked list");
+        // Lock the list, remember, if we're touching nodes, we need to have the list
+        // locked the entire time!
+        let mut inner = self.inner.lock().await;
+        debug!("process_writes locked list");
 
-        // // Set to true if any node in the list needs writing
-        // let mut needs_writing = false;
+        let needs_writing = inner.needs_writing()?;
 
-        // // Track the newest counter in the list. This will be the new counter value
-        // // when the list is written.
-        // // If no counter is present yet, continue with the default value.
-        // //
-        // // TODO: Once we figure out how to handle the counter, we might want to not
-        // // store the counter with every node but only once for the entire list. So
-        // // we no longer have to search for the max counter value.
-        // let mut max_counter: Counter = Default::default();
+        // If the list is unchanged, there is no need to write it to flash!
+        if !needs_writing {
+            debug!("List does not need writing. Returning.");
+            return Ok(());
+        }
 
-        // // Iterate over all list nodes and
-        // // 1. Store the counter (if present).
-        // //    We technically only need the counter from one list item that has been
-        // //    read from flash and has counter != None.
-        // // 2. Check if any node needs writing or is in an invalid state.
-        // for hdrptr in inner.list.iter_raw() {
-        //     let header = unsafe { hdrptr.as_ref() };
+        debug!("Attempt write_to_flash");
 
-        //     // If the node has a counter, it must have been read from flash.
-        //     // If the counter is `None`, it can be ignored.
-        //     if let Some(counter) = header.counter {
-        //         max_counter = counter;
-        //     }
+        // TODO: Retries have to be handled in the OUTER context, so we can
+        // start over from the beginning.
+        let next_seq = inner.seq_state.next_seq;
+        let rpt = write_to_flash(&mut inner.list, serde_buf, storage, next_seq).await?;
 
-        //     match header.state {
-        //         // If no write is needed, we obviously won't write.
-        //         State::ValidNoWriteNeeded => (),
-        //         // If the node hasn't been written to flash yet and we initialized it
-        //         // with a Default, we now write it to flash.
-        //         State::DefaultUnwritten | State::NeedsWrite | State::OldData => {
-        //             needs_writing = true
-        //         }
-        //         // TODO: A node may be in `Initial` state, if it has been attached but
-        //         // `process_reads` hasn't run, yet. Should we return early here and trigger
-        //         // another process_reads?
-        //         State::Initial => {
-        //             return Err(LoadStoreError::NeedsRead);
-        //         }
-        //         // This should never appear on a list that has been processed properly.
-        //         // TODO @James: Not sure how we should recover from this. If it cannot happen
-        //         // due to invalid input, we might just as well panic.
-        //         State::NonResident => {
-        //             debug!("process_writes() on invalid state: {:?}", header.state);
+        // Read back all items in the list any verify the data on the flash
+        // actually is what we wanted to write.
+        verify_list_in_flash(storage, rpt).await?;
+        inner.seq_state.insert_good(next_seq);
+        inner.seq_state.next_seq += 1;
 
-        //             return Err(LoadStoreError::AppError(Error::InvalidState(
-        //                 header.key,
-        //                 header.state.clone(),
-        //             )));
-        //         }
-        //     }
-        // }
-
-        // // If the list is unchanged, there is no need to write it to flash!
-        // if !needs_writing {
-        //     debug!("List does not need writing. Returning.");
-        //     return Ok(());
-        // }
-
-        // // TODO @James: Dion suggested we should have one retry if writing fails
-        // // and then return an error. I feel like the current implementation is okay-ish,
-        // // but again the counter thing feels wrong. I can't really think of something that would
-        // // need to be done here at the moment, so this note is mostly for context.
-
-        // // Increase the counter for this list by one...
-        // max_counter += Wrapping(1);
-        // set_counter(&mut inner.list, max_counter);
-
-        // debug!("Attempt write_to_flash");
-        // // ... and try writing the list to flash one time.
-        // // If this fails, try again. If it fails again, return the error.
-        // if write_to_flash(&mut inner.list, serde_buf, flash).await.is_err() {
-        //     error!("First writing attempt failed!");
-
-        //     // Increase the counter for this list by two
-        //     max_counter += Wrapping(1);
-        //     set_counter(&mut inner.list, max_counter + Wrapping(2));
-        //     // Try one more time, but return any error
-        //     write_to_flash(&mut inner.list, serde_buf, flash).await?;
-        // }
-
-        // // Read back all items in the list any verify the data on the flash
-        // // actually is what we wanted to write.
-        // verify_list_in_flash(&mut inner.list, read_buf, serde_buf, flash).await?;
-
-        // // If verification succeeded, add a write_confirm block with the counter value.
-        // confirm_write(flash, max_counter).await?;
-
-        // // Writing the list is done. Delete all the old stuff.
+        // // TODO(AJM): Do we want to defer pops to later?
         // //
         // // TODO @James: Even though there is no harm in passing the `serde_buf`
         // // (we have it either way), it is unnecessary. This function will only call
@@ -719,86 +710,24 @@ impl<R: ScopedRawMutex> StorageList<R> {
         // // requires `pop`. Should we attempt to optimize it or just leave it as is?
         // delete_old_items(flash, max_counter, serde_buf).await?;
 
-        // // The write must have succeeded. So mark all nodes accordingly.
-        // for mut hdrptr in inner.list.iter_raw() {
-        //     // Mark the store as complete, wake the node if it cares about state
-        //     // changes.
-        //     //
-        //     // SAFETY: We hold the lock to the list, so no other thread can modify
-        //     // the node while we are modifying it.
-        //     //
-        //     // TODO @James: I think this is fine because we hold the lock to the list.
-        //     // But still, please double-check that this is really okay.
-        //     let hdrmut = unsafe { hdrptr.as_mut() };
-        //     hdrmut.state = State::ValidNoWriteNeeded;
-        //     self.writing_done.wake_all();
-        // }
+        // The write must have succeeded. So mark all nodes accordingly.
+        for mut hdrptr in inner.list.iter_raw() {
+            // Mark the store as complete, wake the node if it cares about state
+            // changes.
+            //
+            // SAFETY: We hold the lock to the list, so no other thread can modify
+            // the node while we are modifying it.
+            //
+            // TODO @James: I think this is fine because we hold the lock to the list.
+            // But still, please double-check that this is really okay.
+            let hdrmut = unsafe { hdrptr.as_mut() };
+            hdrmut.state = State::ValidNoWriteNeeded;
+        }
+        self.writing_done.wake_all();
 
-        // Ok(())
-        todo!()
+        Ok(())
     }
 }
-
-// /// Sets the counter value for all nodes in the storage list.
-// ///
-// /// This function iterates through all nodes in the linked list and updates their
-// /// counter field to the specified value. The counter is used to track write operations
-// /// and determine which entries are newest when multiple entries exist for the same key.
-// ///
-// /// # Arguments
-// /// * `ls` - A mutable guard to the locked storage list
-// /// * `new_counter` - The counter value to assign to all nodes
-// ///
-// /// # Safety
-// /// This function uses unsafe code to mutate node headers through raw pointers.
-// /// It is safe because the caller must hold the storage list mutex (enforced by
-// /// the `MutexGuard` parameter), ensuring exclusive access to the list contents.
-// ///
-// /// TODO: Re-evaluate whether this function is really necessary or whether we can
-// /// store the counter one for the entire list when the counter handling is in better shape.
-// fn set_counter(ls: &mut List<NodeHeader>, new_counter: Counter) {
-//     debug!("Setting counter for list to: {}", new_counter);
-//     // Update counters before writing the list to flash
-//     // We do this before serialization because that may fail and
-//     // we want to avoid diverging counter values...
-//     for mut hdrptr in ls.iter_raw() {
-//         let header = unsafe { hdrptr.as_mut() };
-//         header.counter.replace(new_counter);
-//     }
-// }
-
-// /// Writes a write confirmation block to flash memory to mark a successful write operation for
-// /// the specified counter.
-// ///
-// /// This function creates and writes a special "write_confirm" block to flash that serves as
-// /// a marker indicating that a write operation with the given counter value has been successful.
-// /// The write_confirm block consists of an all-zeros key followed by the counter value.
-// ///
-// /// This confirmation mechanism helps distinguish between complete and incomplete write operations
-// /// during recovery, allowing the system to determine which data entries are valid and which may
-// /// have been interrupted mid-write.
-// ///
-// /// # Arguments
-// /// * `flash` - A mutable reference to the Flash storage device and address range to write to
-// /// * `counter` - The counter value associated with the write operation being confirmed.
-// ///
-// /// # Returns
-// /// * `Ok(())` - If the write confirmation block was successfully written to flash
-// /// * `Err(LoadStoreError::FlashWrite)` - If the flash write operation failed
-// async fn confirm_write<F: MultiwriteNorFlash>(
-//     flash: &mut Flash<F, impl CacheImpl>,
-//     counter: Counter,
-// ) -> Result<(), LoadStoreError> {
-//     // Assemble a write_confirm block consisting of an all-zeros key and the counter
-//     let write_confirm = &mut [0u8; KEY_LEN + 1];
-//     write_confirm[KEY_LEN] = counter.0;
-//     // Try writing to flash
-//     flash
-//         .push(write_confirm)
-//         .await
-//         // .map_err(LoadStoreError::FlashWrite)
-//         .map_err(|_| LoadStoreError::FlashWrite)
-// }
 
 // /// Removes old flash entries until reaching the newly written list with the specified counter.
 // ///
@@ -843,6 +772,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
 //         }
 //     }
 // }
+
 /// Verifies that the storage list was correctly written to flash memory.
 ///
 /// This function compares each node in the storage list against the corresponding
@@ -865,66 +795,67 @@ impl<R: ScopedRawMutex> StorageList<R> {
 /// # Safety
 /// The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
 /// to ensure exclusive access during verification.
-async fn verify_list_in_flash<F: MultiwriteNorFlash>(
-    ls: &mut List<NodeHeader>,
-    read_buf: &mut [u8],
-    serde_buf: &mut [u8],
-    flash: &mut Flash<F, impl CacheImpl>,
+async fn verify_list_in_flash<S: NdlDataStorage>(
+    storage: &mut S,
+    rpt: WriteReport,
 ) -> Result<(), LoadStoreError> {
-    // // Create a `QueueIterator`
-    // let mut queue_iter = flash.iter().await.map_err(|_| LoadStoreError::FlashRead)?;
+    // Create a `QueueIterator`
+    let mut queue_iter = storage
+        .iter_elems()
+        .await
+        .map_err(|_| LoadStoreError::FlashRead)?;
 
-    // // Make it Send
-    // let iter = StaticRawIter {
-    //     iter: ls.iter_raw(),
-    // };
+    let Ok(()) = queue_iter.skip_to_seq(rpt.seq).await else {
+        todo!()
+    };
+    let Ok(Some(item)) = queue_iter.next().await else {
+        todo!()
+    };
+    if !matches!(item.data(), Elem::Start { seq_no } if seq_no == rpt.seq) {
+        todo!()
+    }
 
-    // // Set true on the first occurence of the correct counter.
-    // // That means, we have hit the first element of the newly-written list.
-    // let mut counter_found = false;
+    let mut crc = FakeCrc32::new();
+    let mut ctr = 0;
+    loop {
+        let item = match queue_iter.next().await {
+            Ok(Some(item)) => item,
+            Ok(None) => return Err(LoadStoreError::WriteVerificationFailed),
+            Err(_e) => return Err(LoadStoreError::FlashRead),
+        };
 
-    // // Iterate over the nodes in the list
-    // for hdrptr in iter {
-    //     let header = unsafe { hdrptr.ptr.as_ref() };
-
-    //     // TODO @James: Can you think of an easier way of doing things here?
-    //     // Especially the `!counter.is_ok_and()...` part bothers me.
-
-    //     // Get the next item from the queue.
-    //     // This loop will continue until we hit the first correct counter
-    //     // in the flash. That must be the beginning of the newly-written list.
-    //     // Then serialize the node and compare to the item in flash.
-    //     while let Some(item) = queue_iter
-    //         .next(read_buf)
-    //         .await
-    //         .map_err(|_| LoadStoreError::FlashRead)?
-    //     {
-    //         // Skip items until we find one with the expected counter value.
-    //         // This identifies the start of the newly-written list in flash.
-    //         // Once found, we verify each subsequent item matches our serialized nodes.
-    //         if !counter_found
-    //             && !extract_counter(&item).is_ok_and(|counter| {
-    //                 counter == header.counter.expect("Counter should have been set!")
-    //             })
-    //         {
-    //             continue;
-    //         }
-    //         counter_found = true;
-
-    //         // Serialize into the second buffer so we know what it *should* look like.
-    //         let res = serialize_node(hdrptr.ptr, serde_buf);
-
-    //         // Check if value in flash matches the serialized node
-    //         if !res.is_ok_and(|len| item.into_buf() == &serde_buf[..len]) {
-    //             return Err(LoadStoreError::WriteVerificationFailed);
-    //         }
-    //         // Value matched, so we can continue with the next list node
-    //         break;
-    //     }
-    // }
-    // Ok(())
-    todo!()
+        let data = item.data();
+        match data {
+            Elem::Start { .. } => {
+                return Err(LoadStoreError::WriteVerificationFailed);
+            }
+            Elem::Data { data } => {
+                crc.update(data);
+                ctr += 1;
+            }
+            Elem::End { seq_no, calc_crc } => {
+                let check_crc = crc.finalize();
+                let mut good = true;
+                good &= seq_no == rpt.seq;
+                good &= check_crc == rpt.crc;
+                good &= calc_crc == rpt.crc;
+                good &= ctr == rpt.ct;
+                if good {
+                    return Ok(());
+                } else {
+                    return Err(LoadStoreError::WriteVerificationFailed);
+                }
+            }
+        }
+    }
 }
+
+struct WriteReport {
+    seq: u32,
+    crc: u32,
+    ct: usize,
+}
+
 /// Writes all nodes in the storage list to flash memory.
 ///
 /// This function iterates through all nodes in the storage list, serializes each node's
@@ -946,31 +877,27 @@ async fn verify_list_in_flash<F: MultiwriteNorFlash>(
 /// - The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
 ///   to ensure exclusive access during the write operation.
 /// - The list nodes must be in a valid state for writing (e.g., counter must be set)
-async fn write_to_flash<F: MultiwriteNorFlash>(
+async fn write_to_flash<S: NdlDataStorage>(
     ls: &mut List<NodeHeader>,
     buf: &mut [u8],
-    flash: &mut Flash<F, impl CacheImpl>,
-) -> Result<(), LoadStoreError> {
+    storage: &mut S,
+    seq_no: u32,
+) -> Result<WriteReport, LoadStoreError> {
     let iter = StaticRawIter {
         iter: ls.iter_raw(),
     };
+    let check_crc = FakeCrc32::new();
+    storage
+        .push(&Elem::Start { seq_no })
+        .await
+        .map_err(|_| LoadStoreError::FlashWrite)?;
+    let mut ctr = 0;
 
     for hdrptr in iter {
         // Attempt to serialize
         let res = serialize_node(hdrptr.ptr, buf);
 
-        if let Ok(used) = res {
-            debug!(
-                "Pushing to flash: {:?}, addr {:x}",
-                &buf[..used],
-                buf.as_ptr() as usize
-            );
-            // Try writing to flash
-            flash
-                .push(&buf[..used])
-                .await
-                .map_err(|_| LoadStoreError::FlashWrite)?;
-        } else {
+        let Ok(used) = res else {
             // TODO @James: This comment is still from your first version. I am
             // unsure how up to date this is and whether or not this becomes a
             // problem with sequential storage.
@@ -983,9 +910,37 @@ async fn write_to_flash<F: MultiwriteNorFlash>(
             // done, other than log.
             // For now, we just return an error and let the caller decide what to do.
             return Err(LoadStoreError::AppError(Error::Serialization));
-        }
+        };
+
+        let used = &buf[..used];
+
+        debug!(
+            "Pushing to flash: {:?}, addr {:x}",
+            used,
+            used.as_ptr() as usize
+        );
+        // Try writing to flash
+        storage
+            .push(&Elem::Data { data: used })
+            .await
+            .map_err(|_| LoadStoreError::FlashWrite)?;
+        ctr += 1;
     }
-    Ok(())
+    let crc = check_crc.finalize();
+
+    storage
+        .push(&Elem::End {
+            seq_no,
+            calc_crc: crc,
+        })
+        .await
+        .map_err(|_| LoadStoreError::FlashWrite)?;
+
+    Ok(WriteReport {
+        seq: seq_no,
+        crc,
+        ct: ctr,
+    })
 }
 
 // --------------------------------------------------------------------------
@@ -1081,7 +1036,7 @@ where
                 .expect("waitcell should never close");
 
             // We need the lock to look at ourself!
-            let inner = list.inner.lock().await;
+            let _inner = list.inner.lock().await;
 
             // We have the lock, we can gaze into the UnsafeCell
             let nodeptr: *mut Node<T> = self.inner.get();
@@ -1421,10 +1376,7 @@ pub struct KvPair<'a> {
 /// # Safety
 /// This function is safe to call as long as the caller holds the storage list mutex
 /// (which is enforced by taking a `MutexGuard` parameter).
-fn find_node(
-    list: &mut List<NodeHeader>,
-    key: &str,
-) -> Option<NonNull<NodeHeader>> {
+fn find_node(list: &mut List<NodeHeader>, key: &str) -> Option<NonNull<NodeHeader>> {
     // TODO @James: Same as before, please check if the safety requirements in the docstring
     // are enough (together with explicity requiring a MutexGuard)
     // Also I think we should use `raw_iter` instead of `iter` for the same reason as we do everywhere else.
@@ -1481,32 +1433,32 @@ fn extract(item: &[u8]) -> Result<KvPair<'_>, Error> {
 /// - The storage list mutex is held during the entire operation
 /// - The buffer is large enough to hold the serialized data
 pub fn serialize_node(
-    _headerptr: NonNull<NodeHeader>,
-    _serde_buf: &mut [u8],
+    headerptr: NonNull<NodeHeader>,
+    serde_buf: &mut [u8],
 ) -> Result<usize, Error> {
-    todo!()
-    // let (vtable, key, counter) = {
-    //     let node = unsafe { headerptr.as_ref() };
-    //     (node.vtable, node.key, node.counter)
-    // };
+    let (vtable, key) = {
+        let node = unsafe { headerptr.as_ref() };
+        (node.vtable, node.key)
+    };
 
-    // debug!(
-    //     "serializing node with key <{:?}>, counter <{:?}>",
-    //     key, counter
-    // );
-    // debug_assert!(
-    //     counter.is_some(),
-    //     "Counter value expected to be set before writing the list"
-    // );
+    debug!("serializing node with key <{:?}>", key,);
 
-    // let nodeptr: NonNull<Node<()>> = headerptr.cast();
+    let mut cursor = Cursor::new(&mut *serde_buf);
+    let res: Result<(), minicbor::encode::Error<EndOfSlice>> = minicbor::encode(key, &mut cursor);
+    let Ok(()) = res else {
+        return Err(Error::Serialization);
+    };
+    let used = cursor.position();
+    let Some(remain) = serde_buf.get_mut(used..) else {
+        return Err(Error::Serialization);
+    };
 
-    // // Serialize metadata + payload into buffer
-    // serde_buf[0..KEY_LEN].copy_from_slice(&key);
-    // serde_buf[KEY_LEN] = counter.map(|c| c.0).unwrap_or(0);
-    // (vtable.serialize)(nodeptr, &mut serde_buf[KEY_LEN + 1..])
-    //     .map(|len| len + KEY_LEN + 1)
-    //     .map_err(|_| Error::Serialization)
+    let nodeptr: NonNull<Node<()>> = headerptr.cast();
+
+    // Serialize payload into buffer
+    (vtable.serialize)(nodeptr, remain)
+        .map(|len| len + used)
+        .map_err(|_| Error::Serialization)
 }
 
 #[cfg(test)]
