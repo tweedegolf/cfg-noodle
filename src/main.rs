@@ -15,37 +15,38 @@ use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() {
-    simple_logger::SimpleLogger::new()
-        .without_timestamps()
-        .init()
-        .unwrap();
-    tokio::task::spawn(task_1(&GLOBAL_LIST));
-    tokio::task::spawn(task_2(&GLOBAL_LIST));
-    tokio::task::spawn(task_3(&GLOBAL_LIST));
+    // simple_logger::SimpleLogger::new()
+    //     .without_timestamps()
+    //     .init()
+    //     .unwrap();
+    // tokio::task::spawn(task_1(&GLOBAL_LIST));
+    // tokio::task::spawn(task_2(&GLOBAL_LIST));
+    // tokio::task::spawn(task_3(&GLOBAL_LIST));
 
-    let mut flash = get_mock_flash();
+    // let mut flash = get_mock_flash();
 
-    // give time for tasks to attach
-    sleep(Duration::from_millis(100)).await;
-    // process reads
-    let read_buf = &mut [0u8; 4096];
-    let serde_buf = &mut [0u8; 4096];
-    GLOBAL_LIST
-        .process_reads(&mut flash, read_buf)
-        .await
-        .expect("process_reads failed");
+    // // give time for tasks to attach
+    // sleep(Duration::from_millis(100)).await;
+    // // process reads
+    // let read_buf = &mut [0u8; 4096];
+    // let serde_buf = &mut [0u8; 4096];
+    // GLOBAL_LIST
+    //     .process_reads(&mut flash, read_buf)
+    //     .await
+    //     .expect("process_reads failed");
 
-    for _ in 0..10 {
-        sleep(Duration::from_secs(1)).await;
-        let mut flash2 = get_mock_flash();
-        if let Err(e) = GLOBAL_LIST
-            .process_writes(&mut flash2, read_buf, serde_buf)
-            .await
-        {
-            error!("Error in process_writes: {:?}", e);
-        }
-        info!("NEW WRITES: {}", flash2.flash().print_items().await);
-    }
+    // for _ in 0..10 {
+    //     sleep(Duration::from_secs(1)).await;
+    //     let mut flash2 = get_mock_flash();
+    //     if let Err(e) = GLOBAL_LIST
+    //         .process_writes(&mut flash2, read_buf, serde_buf)
+    //         .await
+    //     {
+    //         error!("Error in process_writes: {:?}", e);
+    //     }
+    //     info!("NEW WRITES: {}", flash2.flash().print_items().await);
+    // }
+    todo!()
 }
 
 fn get_mock_flash() -> Flash<MockFlashBase<10, 16, 256>, NoCache> {
