@@ -99,15 +99,19 @@ impl StorageListInner {
         // todo: real crc
         let mut crc = FakeCrc32::new();
 
-        loop {
-            let res = iter.next(buf).await;
-            let item = match res {
-                // Got at item
-                Ok(Some(item)) => item,
-                // end of list
-                Ok(None) => break,
-                // flash error
-                Err(_e) => todo!(),
+        'outer: loop {
+            let item = loop {
+                let res = iter.next(buf).await;
+                match res {
+                    // Got at item
+                    Ok(Some(Some(item))) => break item,
+                    // Got a bad item, continue
+                    Ok(Some(None)) => {}
+                    // end of list
+                    Ok(None) => break 'outer,
+                    // flash error
+                    Err(_e) => todo!(),
+                };
             };
 
             match item.data() {
@@ -168,21 +172,40 @@ impl StorageListInner {
             todo!()
         };
 
-        let Ok(Some(n)) = queue_iter.next(buf).await else {
-            todo!();
-        };
-        if !matches!(n.data(), Elem::Start { seq_no } if seq_no == latest) {
-            todo!();
-        }
-        drop(n);
-
-        loop {
+        let item = loop {
             let res = queue_iter.next(buf).await;
-            let item = match res {
-                Ok(Some(i)) => i,
-                Ok(None) => break,
+            match res {
+                // Got at item
+                Ok(Some(Some(item))) => break item,
+                // Got a bad item, continue
+                Ok(Some(None)) => {}
+                // end of list
+                Ok(None) => todo!(),
+                // flash error
                 Err(_e) => todo!(),
             };
+        };
+
+        if !matches!(item.data(), Elem::Start { seq_no } if seq_no == latest) {
+            todo!();
+        }
+        drop(item);
+
+        'outer: loop {
+            let item = loop {
+                let res = queue_iter.next(buf).await;
+                match res {
+                    // Got at item
+                    Ok(Some(Some(item))) => break item,
+                    // Got a bad item, continue
+                    Ok(Some(None)) => {}
+                    // end of list
+                    Ok(None) => break 'outer,
+                    // flash error
+                    Err(_e) => todo!(),
+                };
+            };
+
             let data = match item.data() {
                 Elem::Start { .. } | Elem::End { .. } => break,
                 Elem::Data { data } => data,
@@ -813,9 +836,21 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
     let Ok(()) = queue_iter.skip_to_seq(rpt.seq).await else {
         todo!()
     };
-    let Ok(Some(item)) = queue_iter.next(buf).await else {
-        todo!()
+
+    let item = loop {
+        let res = queue_iter.next(buf).await;
+        match res {
+            // Got at item
+            Ok(Some(Some(item))) => break item,
+            // Got a bad item, continue
+            Ok(Some(None)) => {}
+            // end of list
+            Ok(None) => todo!(),
+            // flash error
+            Err(_e) => todo!(),
+        };
     };
+
     if !matches!(item.data(), Elem::Start { seq_no } if seq_no == rpt.seq) {
         todo!()
     }
@@ -824,10 +859,18 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
     let mut crc = FakeCrc32::new();
     let mut ctr = 0;
     loop {
-        let item = match queue_iter.next(buf).await {
-            Ok(Some(item)) => item,
-            Ok(None) => return Err(LoadStoreError::WriteVerificationFailed),
-            Err(_e) => return Err(LoadStoreError::FlashRead),
+        let item = loop {
+            let res = queue_iter.next(buf).await;
+            match res {
+                // Got at item
+                Ok(Some(Some(item))) => break item,
+                // Got a bad item, continue
+                Ok(Some(None)) => {}
+                // end of list
+                Ok(None) => return Err(LoadStoreError::WriteVerificationFailed),
+                // flash error
+                Err(_e) => return Err(LoadStoreError::FlashRead),
+            };
         };
 
         let data = item.data();

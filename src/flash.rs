@@ -55,25 +55,23 @@ impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIte
 
     type Error = SeqStorError<T::Error>;
 
-    async fn next<'oiter, 'obuf, 'iter: 'oiter, 'buf: 'obuf>(
+    async fn next<'iter, 'buf>(
         &'iter mut self,
         buf: &'buf mut [u8],
-    ) -> Result<Option<Self::Item<'oiter, 'obuf>>, Self::Error>
+    ) -> Result<Option<Option<Self::Item<'iter, 'buf>>>, Self::Error>
     where
-        Self: 'obuf,
-        Self: 'oiter,
+        Self: 'buf,
+        Self: 'iter,
     {
-        loop {
-            let nxt: Option<QueueIteratorEntry<'_, '_, '_, T, C>> = self.iter.next(buf).await?;
-            let Some(nxt) = nxt else { return Ok(None) };
-            if let Some(elem) = HalfElem::from_bytes(&nxt) {
-                return Ok(Some(FlashNode {
-                    half: elem,
-                    qit: nxt,
-                }));
-            } else {
-                todo!()
-            }
+        let nxt: Option<QueueIteratorEntry<'flash, 'buf, 'iter, T, C>> = self.iter.next(buf).await?;
+        let Some(nxt) = nxt else { return Ok(None) };
+        if let Some(elem) = HalfElem::from_bytes(&nxt) {
+            Ok(Some(Some(FlashNode {
+                half: elem,
+                qit: nxt,
+            })))
+        } else {
+            Ok(Some(None))
         }
     }
 
@@ -284,13 +282,13 @@ pub trait NdlElemIter {
     /// may require re-creation of the iterator (e.g. the iterator may return a
     /// latched Error of some kind after cancellation). Cancellation MUST NOT lead
     /// to data loss.
-    async fn next<'oiter, 'obuf, 'iter: 'oiter, 'buf: 'obuf>(
+    async fn next<'iter, 'buf>(
         &'iter mut self,
         buf: &'buf mut [u8],
-    ) -> Result<Option<Self::Item<'oiter, 'obuf>>, Self::Error>
+    ) -> Result<Option<Option<Self::Item<'iter, 'buf>>>, Self::Error>
     where
-        Self: 'obuf,
-        Self: 'oiter;
+        Self: 'buf,
+        Self: 'iter;
 
     /// Fast-forwards the iterator to the Elem::Start item with the given seq_no.
     /// Returns an error if not found. If Err is returned, the iterator
