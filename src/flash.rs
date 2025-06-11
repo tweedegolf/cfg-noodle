@@ -210,6 +210,7 @@ impl HalfElem {
     }
 }
 
+/// A single position in the flash queue iterator
 pub struct FlashNode<'flash, 'iter, 'buf, T: MultiwriteNorFlash, C: CacheImpl> {
     half: HalfElem,
     qit: QueueIteratorEntry<'flash, 'buf, 'iter, T, C>,
@@ -296,12 +297,19 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> Flash<T, C> {
     }
 }
 
+/// Serialized Data Element
+///
+/// Includes header, key, and value
 #[derive(Debug, PartialEq)]
 pub struct SerData<'a> {
     hdr_key_val: &'a [u8],
 }
 
 impl<'a> SerData<'a> {
+    /// Create a new Serialized Data Element.
+    ///
+    /// `data[0]` MUST be the header position, with key+val starting
+    /// at `data[1]`. The header will be overwritten with the data discriminant
     pub fn new(data: &'a mut [u8]) -> Self {
         if let Some(f) = data.first_mut() {
             *f = ELEM_DATA;
@@ -311,23 +319,27 @@ impl<'a> SerData<'a> {
         }
     }
 
+    /// Create a Serialized Data Element from an existing slice. The
+    /// discriminant will NOT be written.
     pub fn from_existing(data: &'a [u8]) -> Self {
         Self {
             hdr_key_val: data,
         }
     }
 
+    /// Obtain the header
+    ///
+    /// If this was created with an empty slice, an invalid header will be returned
     pub fn hdr(&self) -> u8 {
         // todo: panic?
-        self.hdr_key_val.get(0).copied().unwrap_or(255)
+        self.hdr_key_val.first().copied().unwrap_or(255)
     }
 
+    /// Get the key+val portion of the SerData
+    ///
+    /// Will return an empty slice if the slice was originally empty
     pub fn key_val(&self) -> &[u8] {
-        if let Some(sli) = self.hdr_key_val.get(1..) {
-            sli
-        } else {
-            &[]
-        }
+        self.hdr_key_val.get(1..).unwrap_or(&[])
     }
 }
 

@@ -3,7 +3,7 @@
 
 use crate::{
     error::{Error, LoadStoreError},
-    flash::{Elem, Flash, NdlDataStorage, NdlElemIter as _, NdlElemIterNode, SerData, StepResult},
+    flash::{Elem, NdlDataStorage, NdlElemIter as _, NdlElemIterNode, SerData, StepResult},
     logging::{debug, error, info},
     skip_to_seq, step,
 };
@@ -1382,7 +1382,7 @@ struct SendPtr {
 }
 unsafe impl Send for SendPtr {}
 
-pub struct KvPair<'a> {
+struct KvPair<'a> {
     key: &'a str,
     body: &'a [u8],
 }
