@@ -266,7 +266,7 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> Flash<T, C> {
     }
 
     /// Creates an iterator over the sequential storage queue.
-    pub async fn iter(&mut self) -> Result<QueueIterator<T, C>, SeqStorError<T::Error>> {
+    pub async fn iter(&mut self) -> Result<QueueIterator<'_, T, C>, SeqStorError<T::Error>> {
         queue::iter(&mut self.flash, self.range.clone(), &mut self.cache).await
     }
 

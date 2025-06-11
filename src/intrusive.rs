@@ -1503,6 +1503,7 @@ mod test {
     #![allow(clippy::unwrap_used)]
 
     extern crate std;
+    use crate::flash::Flash;
     use crate::flash::NdlElemIter;
 
     use super::*;
