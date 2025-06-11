@@ -2,7 +2,10 @@
 //! This implements the [`StorageList`] and its [`StorageListNode`]s
 
 use crate::{
-    error::{Error, LoadStoreError}, flash::{Elem, Flash, NdlDataStorage, NdlElemIter as _, NdlElemIterNode, SerData, StepResult}, logging::{debug, error, info}, skip_to_seq, step
+    error::{Error, LoadStoreError},
+    flash::{Elem, Flash, NdlDataStorage, NdlElemIter as _, NdlElemIterNode, SerData, StepResult},
+    logging::{debug, error, info},
+    skip_to_seq, step,
 };
 use cordyceps::{
     Linked, List,
@@ -168,7 +171,7 @@ impl StorageListInner {
 
         let skipres: StepResult<()> = skip_to_seq!(queue_iter, buf, latest);
         match skipres {
-            StepResult::Item(_) => {},
+            StepResult::Item(_) => {}
             StepResult::EndOfList => todo!(),
             StepResult::FlashError => todo!(),
         };
@@ -255,7 +258,7 @@ impl StorageListInner {
                 }
             }
         }
-        todo!()
+        Ok(())
     }
 
     fn mark_pending_nonpop(&mut self) {
@@ -818,7 +821,7 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
     let seq = rpt.seq;
     let skipres: StepResult<()> = skip_to_seq!(queue_iter, buf, seq);
     match skipres {
-        StepResult::Item(_) => {},
+        StepResult::Item(_) => {}
         StepResult::EndOfList => todo!(),
         StepResult::FlashError => todo!(),
     };
@@ -828,11 +831,14 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
     loop {
         let res: StepResult<_> = step!(queue_iter, buf);
         let item = match res {
-            StepResult::Item(i) => i,
+            StepResult::Item(i) => {
+                debug!("visiting {:?} in verify", i.data());
+                i
+            }
             StepResult::EndOfList => {
                 debug!("Surprising end of list");
-                return Err(LoadStoreError::WriteVerificationFailed)
-            },
+                return Err(LoadStoreError::WriteVerificationFailed);
+            }
             StepResult::FlashError => return Err(LoadStoreError::FlashRead),
         };
 
@@ -853,11 +859,13 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
                 let crc_chk2 = calc_crc == rpt.crc;
                 let ctr_chk = ctr == rpt.ct;
                 let good = seq_chk && crc_chk1 && crc_chk2 && ctr_chk;
-                debug!("check: {}, {}, {}, {} => {}", seq_chk, crc_chk1, crc_chk2, ctr_chk, good);
+                debug!(
+                    "check: {}, {}, {}, {} => {}",
+                    seq_chk, crc_chk1, crc_chk2, ctr_chk, good
+                );
                 if good {
                     return Ok(());
                 } else {
-                    debug!("Consistency check failed");
                     return Err(LoadStoreError::WriteVerificationFailed);
                 }
             }
@@ -1481,9 +1489,258 @@ pub fn serialize_node(
         .map_err(|_| Error::Serialization)
 }
 
+// TODO @James: I've already created some of the test cases from
+// https://github.com/tweedegolf/cfg-noodle/issues/16 in tests/integration_tests.rs
+// and the tests in this module are mostly obsolete. What is still missing, though, are
+// unit tests that could be (re)used for fuzzing.
+// I think we should first decide on entire counter handling before writing these since
+// the function signatures and output might change. But once that is done, we can gather
+// a list of tests that should be implemented and we both write some of them.
+// And we might want to keep in mind that the fuzzer probably wants to reuse some of that code.
+// In general, we probably must decide on what the interface to the outside looks, first.
 #[cfg(test)]
 mod test {
-    use super::SeqState;
+    #![allow(clippy::unwrap_used)]
+
+    extern crate std;
+    use crate::flash::NdlElemIter;
+
+    use super::*;
+
+    use core::time::Duration;
+    use minicbor::CborLen;
+    use mutex::raw_impls::cs::CriticalSectionRawMutex;
+    use sequential_storage::cache::NoCache;
+    use sequential_storage::mock_flash::MockFlashBase;
+    use sequential_storage::mock_flash::WriteCountCheck;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use test_log::test;
+    use tokio::select;
+    use tokio::task::LocalSet;
+    use tokio::time::sleep;
+
+    #[derive(Clone, PartialEq, Debug)]
+    enum TestElem {
+        Start { seq_no: u32 },
+        Data { data: Vec<u8> },
+        End { seq_no: u32, calc_crc: u32 },
+    }
+
+    impl From<&Elem<'_>> for TestElem {
+        fn from(value: &Elem<'_>) -> Self {
+            match value {
+                Elem::Start { seq_no } => TestElem::Start { seq_no: *seq_no },
+                Elem::Data { data } => TestElem::Data {
+                    data: {
+                        let mut item = Vec::with_capacity(1 + data.key_val().len());
+                        item.push(data.hdr());
+                        item.extend_from_slice(data.key_val());
+                        item
+                    },
+                },
+                Elem::End { seq_no, calc_crc } => TestElem::End {
+                    seq_no: *seq_no,
+                    calc_crc: *calc_crc,
+                },
+            }
+        }
+    }
+
+    #[derive(Clone, PartialEq, Debug)]
+    struct TestItem {
+        ctr: u64,
+        elem: TestElem,
+    }
+
+    #[derive(Default)]
+    struct TestStorage {
+        ctr: u64,
+        items: Vec<TestItem>,
+    }
+
+    struct RecordWriter<'a> {
+        sto: &'a mut TestStorage,
+        seq: u32,
+        crc: FakeCrc32,
+    }
+
+    impl RecordWriter<'_> {
+        fn add_data_elem<E>(&mut self, key: &str, data: &E)
+        where
+            E: minicbor::Encode<()>,
+            E: minicbor::CborLen<()>,
+        {
+            let Self { sto, seq: _, crc } = self;
+            sto.add_data_elem(key, data, Some(crc));
+        }
+
+        fn end_write_record(self) {
+            let Self { sto, seq, crc } = self;
+            let calc_crc = crc.finalize();
+            sto.end_write_record(seq, calc_crc);
+        }
+    }
+
+    impl TestStorage {
+        fn next_ctr(&mut self) -> u64 {
+            let ctr = self.ctr;
+            self.ctr = self.ctr.checked_add(1).unwrap();
+            ctr
+        }
+
+        fn print_items(&self) -> String {
+            String::new()
+        }
+
+        fn start_write_record(&mut self, seq_no: u32) -> RecordWriter<'_> {
+            let ctr = self.next_ctr();
+            self.items.push(TestItem {
+                ctr,
+                elem: TestElem::Start { seq_no },
+            });
+            RecordWriter {
+                seq: seq_no,
+                crc: FakeCrc32::new(),
+                sto: self,
+            }
+        }
+
+        fn add_data_elem<E>(&mut self, key: &str, data: &E, mut crc: Option<&mut FakeCrc32>)
+        where
+            E: minicbor::Encode<()>,
+            E: minicbor::CborLen<()>,
+        {
+            let ctr = self.next_ctr();
+            let mut buffer = vec![1];
+            let mut scratch = [0u8; 4096];
+            {
+                let mut cursor = Cursor::new(scratch.as_mut_slice());
+                let res: Result<(), minicbor::encode::Error<EndOfSlice>> =
+                    minicbor::encode(key, &mut cursor);
+                res.unwrap();
+                let pos = cursor.position();
+                if let Some(crc) = crc.as_mut() {
+                    crc.update(&scratch[..pos]);
+                }
+                buffer.extend_from_slice(&scratch[..pos]);
+            }
+            {
+                let mut cursor = Cursor::new(scratch.as_mut_slice());
+                let res: Result<(), minicbor::encode::Error<EndOfSlice>> =
+                    minicbor::encode(data, &mut cursor);
+                res.unwrap();
+                let pos = cursor.position();
+                if let Some(crc) = crc.as_mut() {
+                    crc.update(&scratch[..pos]);
+                }
+                buffer.extend_from_slice(&scratch[..pos]);
+            }
+            self.items.push(TestItem {
+                ctr,
+                elem: TestElem::Data { data: buffer },
+            });
+        }
+
+        fn end_write_record(&mut self, seq_no: u32, calc_crc: u32) {
+            let ctr = self.next_ctr();
+            self.items.push(TestItem {
+                ctr,
+                elem: TestElem::End { seq_no, calc_crc },
+            });
+        }
+    }
+
+    struct TestStorageIter<'a> {
+        sto: &'a mut TestStorage,
+        remain_items: VecDeque<TestItem>,
+    }
+
+    struct TestStorageItemNode<'a> {
+        sto: &'a mut TestStorage,
+        item: TestItem,
+    }
+
+    impl NdlDataStorage for TestStorage {
+        type Iter<'this>
+            = TestStorageIter<'this>
+        where
+            Self: 'this;
+
+        type PushError = ();
+
+        async fn iter_elems<'this>(
+            &'this mut self,
+        ) -> Result<Self::Iter<'this>, <Self::Iter<'this> as crate::flash::NdlElemIter>::Error>
+        {
+            let remain_items = self.items.iter().cloned().collect();
+            Ok(TestStorageIter {
+                sto: self,
+                remain_items,
+            })
+        }
+
+        async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::PushError> {
+            info!("Pushing {data:?}");
+            let ctr = self.next_ctr();
+            let item: TestElem = data.into();
+            self.items.push(TestItem { ctr, elem: item });
+            Ok(())
+        }
+    }
+
+    impl<'a> NdlElemIter for TestStorageIter<'a> {
+        type Item<'this, 'buf>
+            = TestStorageItemNode<'this>
+        where
+            Self: 'this,
+            Self: 'buf;
+
+        type Error = ();
+
+        async fn next<'iter, 'buf>(
+            &'iter mut self,
+            _buf: &'buf mut [u8],
+        ) -> Result<Option<Option<Self::Item<'iter, 'buf>>>, Self::Error>
+        where
+            Self: 'buf,
+            Self: 'iter,
+        {
+            if let Some(item) = self.remain_items.pop_front() {
+                debug!("Popping {item:?}");
+                Ok(Some(Some(TestStorageItemNode {
+                    item,
+                    sto: self.sto,
+                })))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    impl<'a> NdlElemIterNode for TestStorageItemNode<'a> {
+        type InvalidateError = ();
+
+        fn data(&self) -> Elem<'_> {
+            match &self.item.elem {
+                TestElem::Start { seq_no } => Elem::Start { seq_no: *seq_no },
+                TestElem::Data { data } => Elem::Data {
+                    data: SerData::from_existing(data),
+                },
+                TestElem::End { seq_no, calc_crc } => Elem::End {
+                    seq_no: *seq_no,
+                    calc_crc: *calc_crc,
+                },
+            }
+        }
+
+        async fn invalidate(self) -> Result<(), Self::InvalidateError> {
+            let item_ctr = self.item.ctr;
+            // todo: find + remove might be faster, but whatever, test code
+            self.sto.items.retain(|i| i.ctr != item_ctr);
+            Ok(())
+        }
+    }
 
     #[test]
     fn seq_sort() {
@@ -1500,305 +1757,340 @@ mod test {
         s.insert_good(1);
         assert_eq!(s.last_three, [2, 3, 4]);
     }
+
+    #[derive(Debug, Encode, Decode, Clone, PartialEq, CborLen)]
+    struct PositronConfig {
+        #[n(0)]
+        up: u8,
+        #[n(1)]
+        down: u16,
+        #[n(2)]
+        strange: u32,
+    }
+
+    impl Default for PositronConfig {
+        fn default() -> Self {
+            Self {
+                up: 10,
+                down: 20,
+                strange: 103,
+            }
+        }
+    }
+
+    // TODO: This type, the get_mock_flash() and worker_task() are not only specific to sequential storage's
+    // mock flash, but also copy&pasted in the integration tests. If we go with the flash-trait approach,
+    // these could be generic.
+    type MockFlash = Flash<MockFlashBase<10, 16, 256>, NoCache>;
+
+    fn get_mock_flash() -> MockFlash {
+        let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true);
+        // TODO: Figure out why miri tests with unaligned buffers and whether
+        // this needs any fixing. For now just disable the alignment check in MockFlash
+        flash.alignment_check = false;
+        Flash::new(flash, 0x0000..0x1000, NoCache::new())
+    }
+
+    async fn worker_task_seq_sto<R: ScopedRawMutex + Sync>(
+        list: &'static StorageList<R>,
+        mut flash: MockFlash,
+    ) {
+        let mut buf = [0u8; 4096];
+        loop {
+            info!("worker_task waiting for needs_* signal");
+            match embassy_futures::select::select(list.needs_read.wait(), list.needs_write.wait())
+                .await
+            {
+                embassy_futures::select::Either::First(_) => {
+                    info!("worker task got needs_read signal");
+                    if let Err(e) = list.process_reads(&mut flash, &mut buf).await {
+                        error!("Error in process_reads: {:?}", e);
+                    }
+                }
+                embassy_futures::select::Either::Second(_) => {
+                    info!("worker task got needs_write signal");
+                    if let Err(e) = list.process_writes(&mut flash, &mut buf).await {
+                        error!("Error in process_writes: {:?}", e);
+                    }
+
+                    info!("Wrote to flash: {}", flash.flash().print_items().await);
+                }
+            }
+        }
+    }
+
+    async fn worker_task_tst_sto<R: ScopedRawMutex + Sync>(
+        list: &'static StorageList<R>,
+        stopper: Arc<WaitQueue>,
+    ) -> (usize, usize) {
+        worker_task_tst_sto_custom(list, stopper, TestStorage::default()).await
+    }
+
+    async fn worker_task_tst_sto_custom<R: ScopedRawMutex + Sync>(
+        list: &'static StorageList<R>,
+        stopper: Arc<WaitQueue>,
+        mut flash: TestStorage,
+    ) -> (usize, usize) {
+        let mut read_errs = 0;
+        let mut write_errs = 0;
+
+        let fut = async {
+            let mut buf = [0u8; 4096];
+            loop {
+                info!("worker_task waiting for needs_* signal");
+                match embassy_futures::select::select(
+                    list.needs_read.wait(),
+                    list.needs_write.wait(),
+                )
+                .await
+                {
+                    embassy_futures::select::Either::First(_) => {
+                        info!("worker task got needs_read signal");
+                        if let Err(e) = list.process_reads(&mut flash, &mut buf).await {
+                            read_errs += 1;
+                            error!("Error in process_reads: {:?}", e);
+                        }
+                    }
+                    embassy_futures::select::Either::Second(_) => {
+                        info!("worker task got needs_write signal");
+                        if let Err(e) = list.process_writes(&mut flash, &mut buf).await {
+                            write_errs += 1;
+                            error!("Error in process_writes: {:?}", e);
+                        }
+
+                        info!("Wrote to flash: {}", flash.print_items());
+                    }
+                }
+            }
+        };
+        select! {
+            _ = stopper.wait() => {},
+            _ = fut => {},
+        };
+        (read_errs, write_errs)
+    }
+
+    #[test(tokio::test)]
+    async fn test_two_configs_seq_sto() {
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config1");
+        static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config2");
+
+        let flash = get_mock_flash();
+
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                info!("Spawn worker_task");
+                let worker_task =
+                    tokio::task::spawn_local(worker_task_seq_sto(&GLOBAL_LIST, flash));
+
+                // Obtain a handle for the first config
+                let config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+                    Ok(ch) => ch,
+                    Err(_) => panic!("Could not attach config 1 to list"),
+                };
+
+                // Obtain a handle for the second config. This should _not_ error!
+                if POSITRON_CONFIG2.attach(&GLOBAL_LIST).await.is_err() {
+                    panic!("Could not attach config 2 to list");
+                }
+
+                // Load data for the first handle
+                let data: PositronConfig = config_handle
+                    .load()
+                    .await
+                    .expect("Loading config should not fail");
+                info!("T3 Got {data:?}");
+
+                // Write a new config to first handle
+                let new_config = PositronConfig {
+                    up: 15,
+                    down: 25,
+                    strange: 108,
+                };
+                config_handle
+                    .write(&new_config)
+                    .await
+                    .expect("Writing config to node should not fail");
+
+                // Give the worker_task some time to process the write
+                sleep(Duration::from_millis(100)).await;
+
+                // Assert that the loaded value equals the written value
+                assert_eq!(
+                    config_handle
+                        .load()
+                        .await
+                        .expect("Loading config should not fail"),
+                    new_config
+                );
+
+                // Wait for the worker task to finish
+                let _ = tokio::time::timeout(Duration::from_millis(100), worker_task).await;
+            })
+            .await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_two_configs_tst_sto() {
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config1");
+        static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config2");
+
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let stopper = Arc::new(WaitQueue::new());
+                info!("Spawn worker_task");
+                let worker_task =
+                    tokio::task::spawn_local(worker_task_tst_sto(&GLOBAL_LIST, stopper.clone()));
+
+                // Obtain a handle for the first config
+                let config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+                    Ok(ch) => ch,
+                    Err(_) => panic!("Could not attach config 1 to list"),
+                };
+
+                // Obtain a handle for the second config. This should _not_ error!
+                let Ok(_ch2) = POSITRON_CONFIG2.attach(&GLOBAL_LIST).await else {
+                    panic!("Could not attach config 2 to list");
+                };
+
+                // Load data for the first handle
+                let data: PositronConfig = config_handle
+                    .load()
+                    .await
+                    .expect("Loading config should not fail");
+                info!("T3 Got {data:?}");
+
+                // Write a new config to first handle
+                let new_config = PositronConfig {
+                    up: 15,
+                    down: 25,
+                    strange: 108,
+                };
+                config_handle
+                    .write(&new_config)
+                    .await
+                    .expect("Writing config to node should not fail");
+
+                // Give the worker_task some time to process the write
+                sleep(Duration::from_millis(100)).await;
+
+                // Assert that the loaded value equals the written value
+                assert_eq!(
+                    config_handle
+                        .load()
+                        .await
+                        .expect("Loading config should not fail"),
+                    new_config
+                );
+
+                // Wait for the worker task to finish
+                stopper.close();
+                let (rd_errs, wr_errs) =
+                    tokio::time::timeout(Duration::from_millis(100), worker_task)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(rd_errs, 0, "no read errors expected");
+                assert_eq!(wr_errs, 0, "no write errors expected");
+            })
+            .await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_load_existing() {
+        // This test will write a config to the flash first and then read it back to check
+        // whether reading an item from flash works.
+
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static POSITRON_CONFIG: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config");
+
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                // First, write our custom config
+                let mut flash = TestStorage::default();
+                let mut wr = flash.start_write_record(1);
+
+                // Serialize the custom_config config so we can write it to our flash
+                let custom_config = PositronConfig {
+                    up: 1,
+                    down: 22,
+                    strange: 333,
+                };
+                assert_ne!(custom_config, PositronConfig::default());
+                wr.add_data_elem("positron/config", &custom_config);
+                wr.end_write_record();
+
+                let stopper = Arc::new(WaitQueue::new());
+                info!("Spawn worker_task");
+                let worker_task = tokio::task::spawn_local(worker_task_tst_sto_custom(
+                    &GLOBAL_LIST,
+                    stopper.clone(),
+                    flash,
+                ));
+
+                // Obtain a handle for the config. It should match the custom_config.
+                // This should _not_ error!
+                let expecting_already_present = match POSITRON_CONFIG.attach(&GLOBAL_LIST).await {
+                    Ok(ch) => ch,
+                    Err(_) => panic!("Could not attach config to list"),
+                };
+
+                assert_eq!(
+                    custom_config,
+                    expecting_already_present
+                        .load()
+                        .await
+                        .expect("Loading config should not fail"),
+                    "Key should already be present"
+                );
+
+                // Wait for the worker task to finish
+                stopper.close();
+                let (rd_errs, wr_errs) = tokio::time::timeout(Duration::from_secs(2), worker_task).await.unwrap().unwrap();
+                assert_eq!(rd_errs, 0);
+                assert_eq!(wr_errs, 0);
+            })
+            .await;
+    }
+
+    #[test(tokio::test)]
+    #[should_panic]
+    async fn test_duplicate_key() {
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config");
+        static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config");
+
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let stopper = Arc::new(WaitQueue::new());
+                info!("Spawn worker_task");
+                // We still need the worker task so we can fulfill reads
+                let _worker_task =
+                    tokio::task::spawn_local(worker_task_tst_sto(&GLOBAL_LIST, stopper.clone()));
+
+                // Obtain a handle for the first config
+                let _config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+                    Ok(ch) => ch,
+                    Err(_) => panic!("Could not attach config 1 to list"),
+                };
+
+                // Obtain a handle for the second config. It has the same key as the first.
+                // This must panic!
+                let _expecting_panic = POSITRON_CONFIG2.attach(&GLOBAL_LIST).await;
+            })
+            .await;
+    }
 }
-
-// // TODO @James: I've already created some of the test cases from
-// // https://github.com/tweedegolf/cfg-noodle/issues/16 in tests/integration_tests.rs
-// // and the tests in this module are mostly obsolete. What is still missing, though, are
-// // unit tests that could be (re)used for fuzzing.
-// // I think we should first decide on entire counter handling before writing these since
-// // the function signatures and output might change. But once that is done, we can gather
-// // a list of tests that should be implemented and we both write some of them.
-// // And we might want to keep in mind that the fuzzer probably wants to reuse some of that code.
-// // In general, we probably must decide on what the interface to the outside looks, first.
-// #[cfg(test)]
-// mod test {
-//     extern crate std;
-//     use super::*;
-
-//     use core::time::Duration;
-//     use minicbor::CborLen;
-//     use mutex::raw_impls::cs::CriticalSectionRawMutex;
-//     use sequential_storage::cache::NoCache;
-//     use sequential_storage::mock_flash::MockFlashBase;
-//     use sequential_storage::mock_flash::WriteCountCheck;
-//     use test_log::test;
-//     use tokio::task::JoinHandle;
-//     use tokio::time::sleep;
-
-//     #[derive(Debug, Encode, Decode, Clone, PartialEq, CborLen)]
-//     struct PositronConfig {
-//         #[n(0)]
-//         up: u8,
-//         #[n(1)]
-//         down: u16,
-//         #[n(2)]
-//         strange: u32,
-//     }
-
-//     impl Default for PositronConfig {
-//         fn default() -> Self {
-//             Self {
-//                 up: 10,
-//                 down: 20,
-//                 strange: 103,
-//             }
-//         }
-//     }
-
-//     // TODO: This type, the get_mock_flash() and worker_task() are not only specific to sequential storage's
-//     // mock flash, but also copy&pasted in the integration tests. If we go with the flash-trait approach,
-//     // these could be generic.
-//     type MockFlash = Flash<MockFlashBase<10, 16, 256>, NoCache>;
-
-//     fn get_mock_flash() -> MockFlash {
-//         let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true);
-//         // TODO: Figure out why miri tests with unaligned buffers and whether
-//         // this needs any fixing. For now just disable the alignment check in MockFlash
-//         flash.alignment_check = false;
-//         Flash::new(flash, 0x0000..0x1000, NoCache::new())
-//     }
-
-//     fn worker_task<R: ScopedRawMutex + Sync>(
-//         list: &'static StorageList<R>,
-//         mut flash: MockFlash,
-//         mut read_buf: [u8; 4096],
-//         mut serde_buf: [u8; 4096],
-//     ) -> JoinHandle<()> {
-//         tokio::task::spawn(async move {
-//             loop {
-//                 info!("worker_task waiting for needs_* signal");
-//                 match embassy_futures::select::select(
-//                     list.needs_read.wait(),
-//                     list.needs_write.wait(),
-//                 )
-//                 .await
-//                 {
-//                     embassy_futures::select::Either::First(_) => {
-//                         info!("worker task got needs_read signal");
-//                         if let Err(e) = list.process_reads(&mut flash, &mut read_buf).await {
-//                             error!("Error in process_reads: {:?}", e);
-//                         }
-//                     }
-//                     embassy_futures::select::Either::Second(_) => {
-//                         info!("worker task got needs_write signal");
-//                         if let Err(e) = list
-//                             .process_writes(&mut flash, &mut read_buf, &mut serde_buf)
-//                             .await
-//                         {
-//                             error!("Error in process_writes: {:?}", e);
-//                         }
-
-//                         info!("Wrote to flash: {}", flash.flash().print_items().await);
-//                     }
-//                 }
-//             }
-//         })
-//     }
-
-//     #[test(tokio::test)]
-//     async fn test_two_configs() {
-//         static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-//         static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
-//             StorageListNode::new("positron/config1");
-//         static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
-//             StorageListNode::new("positron/config2");
-
-//         let flash = get_mock_flash();
-
-//         let read_buf = [0u8; 4096];
-//         let serde_buf = [0u8; 4096];
-
-//         info!("Spawn worker_task");
-//         let worker_task = worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
-
-//         // Obtain a handle for the first config
-//         let config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
-//             Ok(ch) => ch,
-//             Err(_) => panic!("Could not attach config 1 to list"),
-//         };
-
-//         // Obtain a handle for the second config. This should _not_ error!
-//         if POSITRON_CONFIG2.attach(&GLOBAL_LIST).await.is_err() {
-//             panic!("Could not attach config 2 to list");
-//         }
-
-//         // Load data for the first handle
-//         let data: PositronConfig = config_handle
-//             .load()
-//             .await
-//             .expect("Loading config should not fail");
-//         info!("T3 Got {data:?}");
-
-//         // Assert that the counter is at default value because we
-//         // haven't read this from flash
-//         assert_eq!(
-//             unsafe { config_handle.inner.inner.get().as_ref() }
-//                 .expect("Getting inner at this point should not fail")
-//                 .header
-//                 .counter,
-//             Some(Counter::default())
-//         );
-
-//         // Write a new config to first handle
-//         let new_config = PositronConfig {
-//             up: 15,
-//             down: 25,
-//             strange: 108,
-//         };
-//         config_handle
-//             .write(&new_config)
-//             .await
-//             .expect("Writing config to node should not fail");
-
-//         // Give the worker_task some time to process the write
-//         sleep(Duration::from_millis(100)).await;
-
-//         // Assert that the loaded value equals the written value
-//         assert_eq!(
-//             config_handle
-//                 .load()
-//                 .await
-//                 .expect("Loading config should not fail"),
-//             new_config
-//         );
-
-//         // Assert that the counter is now 1
-//         assert_eq!(
-//             unsafe { config_handle.inner.inner.get().as_ref() }
-//                 .expect("Getting inner at this point should not fail")
-//                 .header
-//                 .counter
-//                 .expect("Counter should have a value at this point"),
-//             Wrapping(1)
-//         );
-
-//         // Wait for the worker task to finish
-//         let _ = tokio::time::timeout(Duration::from_secs(2), worker_task).await;
-//     }
-
-//     #[test(tokio::test)]
-//     async fn test_load_existing() {
-//         // This test will write a config to the flash first and then read it back to check
-//         // whether reading an item from flash works.
-
-//         static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-//         static POSITRON_CONFIG: StorageListNode<PositronConfig> =
-//             StorageListNode::new("positron/config");
-
-//         let mut serde_buf = [0u8; 4096];
-//         let read_buf = [0u8; 4096];
-
-//         // Serialize the custom_config config so we can write it to our flash
-//         let custom_config = PositronConfig {
-//             up: 1,
-//             down: 22,
-//             strange: 333,
-//         };
-
-//         // TODO: The following pointer operations are a very cumbersome way
-//         // of serializing the node just so we can push it to the flash and read back...
-//         unsafe {
-//             POSITRON_CONFIG
-//                 .inner
-//                 .get()
-//                 .as_mut()
-//                 .expect("Pointer should not be null")
-//                 .t = MaybeUninit::new(custom_config.clone());
-//             POSITRON_CONFIG
-//                 .inner
-//                 .get()
-//                 .as_mut()
-//                 .expect("Pointer should not be null")
-//                 .header
-//                 .counter = Some(Wrapping(0));
-//         }
-//         let nodeptr: *mut Node<PositronConfig> = POSITRON_CONFIG.inner.get();
-//         let nodenn: NonNull<Node<PositronConfig>> = unsafe { NonNull::new_unchecked(nodeptr) };
-//         let hdrnn: NonNull<NodeHeader> = nodenn.cast();
-
-//         let used = serialize_node(hdrnn, &mut serde_buf).expect("Serializing node should not fail");
-
-//         // Now serialize again by calling encode() directly and verify both match
-//         let mut serialize_control = std::vec![];
-//         let len = len_with(&custom_config, &mut ());
-//         minicbor::encode(&custom_config, &mut serialize_control).expect("Encoding should not fail");
-//         // The serialized node will contain some metadata, but the last `len` bytes must match
-//         assert_eq!(serialize_control[..len], serde_buf[used - len..used]);
-
-//         let mut flash = get_mock_flash();
-//         info!("Pushing to flash: {:?}", &serde_buf[..used]);
-//         flash
-//             .push(&serde_buf[..used])
-//             .await
-//             .expect("pushing to flash should not fail here");
-
-//         let worker_task = worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
-
-//         // Obtain a handle for the config. It should match the custom_config.
-//         // This should _not_ error!
-//         let expecting_already_present = match POSITRON_CONFIG.attach(&GLOBAL_LIST).await {
-//             Ok(ch) => ch,
-//             Err(_) => panic!("Could not attach config to list"),
-//         };
-
-//         assert_eq!(
-//             custom_config,
-//             expecting_already_present
-//                 .load()
-//                 .await
-//                 .expect("Loading config should not fail"),
-//             "Key should already be present"
-//         );
-
-//         expecting_already_present
-//             .write(&custom_config)
-//             .await
-//             .expect("Writing config to node should not fail");
-
-//         sleep(Duration::from_millis(50)).await;
-
-//         // Assert that the counter is now 1
-//         assert_eq!(
-//             unsafe { expecting_already_present.inner.inner.get().as_ref() }
-//                 .expect("Node should exist")
-//                 .header
-//                 .counter
-//                 .expect("Counter should have a value"),
-//             Wrapping(1)
-//         );
-
-//         // Wait for the worker task to finish
-//         let _ = tokio::time::timeout(Duration::from_secs(2), worker_task).await;
-//     }
-
-//     #[test(tokio::test)]
-//     #[should_panic]
-//     async fn test_duplicate_key() {
-//         static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-//         static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
-//             StorageListNode::new("positron/config");
-//         static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
-//             StorageListNode::new("positron/config");
-
-//         let flash = get_mock_flash();
-
-//         info!("Spawn worker_task");
-//         let serde_buf = [0u8; 4096];
-//         let read_buf = [0u8; 4096];
-//         let worker_task = worker_task(&GLOBAL_LIST, flash, read_buf, serde_buf);
-
-//         // Obtain a handle for the first config
-//         let _config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
-//             Ok(ch) => ch,
-//             Err(_) => panic!("Could not attach config 1 to list"),
-//         };
-
-//         // Obtain a handle for the second config. It has the same key as the first.
-//         // This must panic!
-//         let _expecting_panic = POSITRON_CONFIG2.attach(&GLOBAL_LIST).await;
-
-//         // Wait for the worker task to finish
-//         let _ = tokio::time::timeout(Duration::from_secs(2), worker_task).await;
-//     }
-// }

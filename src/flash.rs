@@ -2,6 +2,7 @@
 //!
 //! This module provides a `Flash` struct that wraps a MultiwriteNorFlash device
 //! and exposes async methods for queue-like operations on persistent storage.
+#![allow(async_fn_in_trait)]
 
 use core::ops::Deref;
 
