@@ -76,9 +76,10 @@ struct StorageListInner {
 }
 
 impl StorageListInner {
-    async fn get_or_populate_latest<'a, S: NdlDataStorage<'a>>(
+    async fn get_or_populate_latest<S: NdlDataStorage>(
         &mut self,
-        s: &'a mut S,
+        s: &mut S,
+        buf: &mut [u8],
     ) -> Result<Option<u32>, LoadStoreError> {
         if self.seq_state.has_hydrated {
             let max = self.seq_state.last_three.iter().copied().max().unwrap_or(0);
@@ -99,7 +100,7 @@ impl StorageListInner {
         let mut crc = FakeCrc32::new();
 
         loop {
-            let res = iter.next().await;
+            let res = iter.next(buf).await;
             let item = match res {
                 // Got at item
                 Ok(Some(item)) => item,
@@ -153,10 +154,11 @@ impl StorageListInner {
         }
     }
 
-    async fn extract_all<'a, S: NdlDataStorage<'a>>(
+    async fn extract_all<S: NdlDataStorage>(
         &mut self,
         latest: u32,
-        storage: &'a mut S,
+        storage: &mut S,
+        buf: &mut [u8],
     ) -> Result<(), LoadStoreError> {
         let Ok(mut queue_iter) = storage.iter_elems().await else {
             todo!()
@@ -166,15 +168,16 @@ impl StorageListInner {
             todo!()
         };
 
-        let Ok(Some(n)) = queue_iter.next().await else {
+        let Ok(Some(n)) = queue_iter.next(buf).await else {
             todo!();
         };
         if !matches!(n.data(), Elem::Start { seq_no } if seq_no == latest) {
             todo!();
         }
+        drop(n);
 
         loop {
-            let res = queue_iter.next().await;
+            let res = queue_iter.next(buf).await;
             let item = match res {
                 Ok(Some(i)) => i,
                 Ok(None) => break,
@@ -605,9 +608,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
     ///   storage can not store larger items.
     ///
     /// TODO: Document what this function does and when it must be called
-    pub async fn process_reads<S: for<'a> NdlDataStorage<'a>>(
+    pub async fn process_reads<S: NdlDataStorage>(
         &'static self,
         storage: &mut S,
+        buf: &mut [u8],
     ) -> Result<(), LoadStoreError> {
         info!("Start process_reads");
         // Lock the list, remember, if we're touching nodes, we need to have the list
@@ -621,11 +625,11 @@ impl<R: ScopedRawMutex> StorageList<R> {
         // let mut latest_counter: Option<Counter> = None;
 
         // Have we already determined the latest valid write record?
-        let res = inner.get_or_populate_latest(storage).await?;
+        let res = inner.get_or_populate_latest(storage, buf).await?;
 
         // If we have something: populate all present items
         if let Some(latest) = res {
-            inner.extract_all(latest, storage).await?;
+            inner.extract_all(latest, storage, buf).await?;
         }
 
         // Now, we either have NOTHING, or we have populated all items that DO exist.
@@ -667,9 +671,9 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// 3. Serializes each node and writes it to flash
     /// 4. Verifies the written data matches what was intended to be written
     /// 5. On success, marks all nodes as no longer having pending changes
-    pub async fn process_writes<'a, S: NdlDataStorage<'a>>(
+    pub async fn process_writes<S: NdlDataStorage>(
         &'static self,
-        storage: &'a mut S,
+        storage: &mut S,
         serde_buf: &mut [u8],
     ) -> Result<(), LoadStoreError> {
         debug!("Start process_writes");
@@ -696,7 +700,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
         // Read back all items in the list any verify the data on the flash
         // actually is what we wanted to write.
-        verify_list_in_flash(storage, rpt).await?;
+        verify_list_in_flash(storage, rpt, serde_buf).await?;
         inner.seq_state.insert_good(next_seq);
         inner.seq_state.next_seq += 1;
 
@@ -795,9 +799,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
 /// # Safety
 /// The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
 /// to ensure exclusive access during verification.
-async fn verify_list_in_flash<'a, S: NdlDataStorage<'a>>(
-    storage: &'a mut S,
+async fn verify_list_in_flash<S: NdlDataStorage>(
+    storage: &mut S,
     rpt: WriteReport,
+    buf: &mut [u8],
 ) -> Result<(), LoadStoreError> {
     // Create a `QueueIterator`
     let mut queue_iter = storage
@@ -808,17 +813,18 @@ async fn verify_list_in_flash<'a, S: NdlDataStorage<'a>>(
     let Ok(()) = queue_iter.skip_to_seq(rpt.seq).await else {
         todo!()
     };
-    let Ok(Some(item)) = queue_iter.next().await else {
+    let Ok(Some(item)) = queue_iter.next(buf).await else {
         todo!()
     };
     if !matches!(item.data(), Elem::Start { seq_no } if seq_no == rpt.seq) {
         todo!()
     }
+    drop(item);
 
     let mut crc = FakeCrc32::new();
     let mut ctr = 0;
     loop {
-        let item = match queue_iter.next().await {
+        let item = match queue_iter.next(buf).await {
             Ok(Some(item)) => item,
             Ok(None) => return Err(LoadStoreError::WriteVerificationFailed),
             Err(_e) => return Err(LoadStoreError::FlashRead),
@@ -877,7 +883,7 @@ struct WriteReport {
 /// - The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
 ///   to ensure exclusive access during the write operation.
 /// - The list nodes must be in a valid state for writing (e.g., counter must be set)
-async fn write_to_flash<'a, S: NdlDataStorage<'a>>(
+async fn write_to_flash<S: NdlDataStorage>(
     ls: &mut List<NodeHeader>,
     buf: &mut [u8],
     storage: &mut S,

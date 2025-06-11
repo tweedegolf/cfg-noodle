@@ -1,8 +1,7 @@
 //! Error types used for the list
 use sequential_storage::Error as SecStorError;
 
-// use crate::intrusive::{State};
-type State = ();
+use crate::intrusive::{State};
 
 /// General error that is not specific to the flash implementation
 #[derive(Debug)]
