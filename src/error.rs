@@ -1,5 +1,5 @@
 //! Error types used for the list
-use crate::intrusive::{State};
+use crate::intrusive::State;
 
 /// General error that is not specific to the flash implementation
 #[derive(Debug)]

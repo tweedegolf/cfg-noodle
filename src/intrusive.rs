@@ -2056,7 +2056,10 @@ mod test {
 
                 // Wait for the worker task to finish
                 stopper.close();
-                let (rd_errs, wr_errs) = tokio::time::timeout(Duration::from_secs(2), worker_task).await.unwrap().unwrap();
+                let (rd_errs, wr_errs) = tokio::time::timeout(Duration::from_secs(2), worker_task)
+                    .await
+                    .unwrap()
+                    .unwrap();
                 assert_eq!(rd_errs, 0);
                 assert_eq!(wr_errs, 0);
             })

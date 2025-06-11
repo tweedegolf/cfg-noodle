@@ -37,10 +37,7 @@ async fn main() {
     for _ in 0..10 {
         sleep(Duration::from_secs(1)).await;
         let mut flash2 = get_mock_flash();
-        if let Err(e) = GLOBAL_LIST
-            .process_writes(&mut flash2, buf)
-            .await
-        {
+        if let Err(e) = GLOBAL_LIST.process_writes(&mut flash2, buf).await {
             error!("Error in process_writes: {:?}", e);
         }
         info!("NEW WRITES: {}", flash2.flash().print_items().await);

@@ -46,7 +46,7 @@ macro_rules! step {
                 Err(_e) => break StepResult::FlashError,
             }
         }
-    }
+    };
 }
 
 /// Fast-forwards the iterator to the Elem::Start item with the given seq_no.
@@ -112,16 +112,14 @@ impl<T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlDataStorage for
                 buf[0] = ELEM_START;
                 buf[1..5].copy_from_slice(&seq_no.to_le_bytes());
                 buf
-            },
-            Elem::Data { data } => {
-                data.hdr_key_val
-            },
+            }
+            Elem::Data { data } => data.hdr_key_val,
             Elem::End { seq_no, calc_crc } => {
                 buf[0] = ELEM_END;
                 buf[1..5].copy_from_slice(&seq_no.to_le_bytes());
                 buf[5..9].copy_from_slice(&calc_crc.to_le_bytes());
                 buf.as_slice()
-            },
+            }
         };
         self.push(used).await.map_err(drop)
     }
@@ -151,7 +149,8 @@ impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIte
         Self: 'buf,
         Self: 'iter,
     {
-        let nxt: Option<QueueIteratorEntry<'flash, 'buf, 'iter, T, C>> = self.iter.next(buf).await?;
+        let nxt: Option<QueueIteratorEntry<'flash, 'buf, 'iter, T, C>> =
+            self.iter.next(buf).await?;
         let Some(nxt) = nxt else { return Ok(None) };
         if let Some(elem) = HalfElem::from_bytes(&nxt) {
             Ok(Some(Some(FlashNode {
@@ -314,17 +313,13 @@ impl<'a> SerData<'a> {
         if let Some(f) = data.first_mut() {
             *f = ELEM_DATA;
         }
-        Self {
-            hdr_key_val: data,
-        }
+        Self { hdr_key_val: data }
     }
 
     /// Create a Serialized Data Element from an existing slice. The
     /// discriminant will NOT be written.
     pub fn from_existing(data: &'a [u8]) -> Self {
-        Self {
-            hdr_key_val: data,
-        }
+        Self { hdr_key_val: data }
     }
 
     /// Obtain the header
