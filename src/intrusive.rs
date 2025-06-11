@@ -2,9 +2,7 @@
 //! This implements the [`StorageList`] and its [`StorageListNode`]s
 
 use crate::{
-    error::{Error, LoadStoreError},
-    flash::{Elem, Flash, NdlDataStorage, NdlElemIter as _, NdlElemIterNode},
-    logging::{debug, error, info},
+    error::{Error, LoadStoreError}, flash::{Elem, Flash, NdlDataStorage, NdlElemIter as _, NdlElemIterNode, SerData, StepResult}, logging::{debug, error, info}, skip_to_seq, step
 };
 use cordyceps::{
     Linked, List,
@@ -127,7 +125,7 @@ impl StorageListInner {
                         continue;
                     } else {
                         // todo: real crc
-                        crc.update(data);
+                        crc.update(data.key_val());
                     }
                 }
                 Elem::End { seq_no, calc_crc } => {
@@ -168,28 +166,12 @@ impl StorageListInner {
             todo!()
         };
 
-        let Ok(()) = queue_iter.skip_to_seq(latest).await else {
-            todo!()
+        let skipres: StepResult<()> = skip_to_seq!(queue_iter, buf, latest);
+        match skipres {
+            StepResult::Item(_) => {},
+            StepResult::EndOfList => todo!(),
+            StepResult::FlashError => todo!(),
         };
-
-        let item = loop {
-            let res = queue_iter.next(buf).await;
-            match res {
-                // Got at item
-                Ok(Some(Some(item))) => break item,
-                // Got a bad item, continue
-                Ok(Some(None)) => {}
-                // end of list
-                Ok(None) => todo!(),
-                // flash error
-                Err(_e) => todo!(),
-            };
-        };
-
-        if !matches!(item.data(), Elem::Start { seq_no } if seq_no == latest) {
-            todo!();
-        }
-        drop(item);
 
         'outer: loop {
             let item = loop {
@@ -211,7 +193,7 @@ impl StorageListInner {
                 Elem::Data { data } => data,
             };
 
-            let Ok(kvpair) = extract(data) else {
+            let Ok(kvpair) = extract(data.key_val()) else {
                 continue;
             };
 
@@ -833,65 +815,49 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
         .await
         .map_err(|_| LoadStoreError::FlashRead)?;
 
-    let Ok(()) = queue_iter.skip_to_seq(rpt.seq).await else {
-        todo!()
+    let seq = rpt.seq;
+    let skipres: StepResult<()> = skip_to_seq!(queue_iter, buf, seq);
+    match skipres {
+        StepResult::Item(_) => {},
+        StepResult::EndOfList => todo!(),
+        StepResult::FlashError => todo!(),
     };
-
-    let item = loop {
-        let res = queue_iter.next(buf).await;
-        match res {
-            // Got at item
-            Ok(Some(Some(item))) => break item,
-            // Got a bad item, continue
-            Ok(Some(None)) => {}
-            // end of list
-            Ok(None) => todo!(),
-            // flash error
-            Err(_e) => todo!(),
-        };
-    };
-
-    if !matches!(item.data(), Elem::Start { seq_no } if seq_no == rpt.seq) {
-        todo!()
-    }
-    drop(item);
 
     let mut crc = FakeCrc32::new();
     let mut ctr = 0;
     loop {
-        let item = loop {
-            let res = queue_iter.next(buf).await;
-            match res {
-                // Got at item
-                Ok(Some(Some(item))) => break item,
-                // Got a bad item, continue
-                Ok(Some(None)) => {}
-                // end of list
-                Ok(None) => return Err(LoadStoreError::WriteVerificationFailed),
-                // flash error
-                Err(_e) => return Err(LoadStoreError::FlashRead),
-            };
+        let res: StepResult<_> = step!(queue_iter, buf);
+        let item = match res {
+            StepResult::Item(i) => i,
+            StepResult::EndOfList => {
+                debug!("Surprising end of list");
+                return Err(LoadStoreError::WriteVerificationFailed)
+            },
+            StepResult::FlashError => return Err(LoadStoreError::FlashRead),
         };
 
         let data = item.data();
         match data {
             Elem::Start { .. } => {
+                debug!("Surprising start of list");
                 return Err(LoadStoreError::WriteVerificationFailed);
             }
             Elem::Data { data } => {
-                crc.update(data);
+                crc.update(data.key_val());
                 ctr += 1;
             }
             Elem::End { seq_no, calc_crc } => {
                 let check_crc = crc.finalize();
-                let mut good = true;
-                good &= seq_no == rpt.seq;
-                good &= check_crc == rpt.crc;
-                good &= calc_crc == rpt.crc;
-                good &= ctr == rpt.ct;
+                let seq_chk = seq_no == rpt.seq;
+                let crc_chk1 = check_crc == rpt.crc;
+                let crc_chk2 = calc_crc == rpt.crc;
+                let ctr_chk = ctr == rpt.ct;
+                let good = seq_chk && crc_chk1 && crc_chk2 && ctr_chk;
+                debug!("check: {}, {}, {}, {} => {}", seq_chk, crc_chk1, crc_chk2, ctr_chk, good);
                 if good {
                     return Ok(());
                 } else {
+                    debug!("Consistency check failed");
                     return Err(LoadStoreError::WriteVerificationFailed);
                 }
             }
@@ -935,7 +901,7 @@ async fn write_to_flash<S: NdlDataStorage>(
     let iter = StaticRawIter {
         iter: ls.iter_raw(),
     };
-    let check_crc = FakeCrc32::new();
+    let mut check_crc = FakeCrc32::new();
     storage
         .push(&Elem::Start { seq_no })
         .await
@@ -943,8 +909,11 @@ async fn write_to_flash<S: NdlDataStorage>(
     let mut ctr = 0;
 
     for hdrptr in iter {
-        // Attempt to serialize
-        let res = serialize_node(hdrptr.ptr, buf);
+        // Attempt to serialize: split off first item to reserve space for element
+        // discriminant
+        let (_first, rest) = buf.split_first_mut().ok_or(LoadStoreError::FlashWrite)?;
+
+        let res = serialize_node(hdrptr.ptr, rest);
 
         let Ok(used) = res else {
             // TODO @James: This comment is still from your first version. I am
@@ -961,16 +930,18 @@ async fn write_to_flash<S: NdlDataStorage>(
             return Err(LoadStoreError::AppError(Error::Serialization));
         };
 
-        let used = &buf[..used];
+        let used = &mut buf[..(used + 1)];
 
         debug!(
             "Pushing to flash: {:?}, addr {:x}",
             used,
             used.as_ptr() as usize
         );
+        let serdat = SerData::new(used);
+        check_crc.update(serdat.key_val());
         // Try writing to flash
         storage
-            .push(&Elem::Data { data: used })
+            .push(&Elem::Data { data: serdat })
             .await
             .map_err(|_| LoadStoreError::FlashWrite)?;
         ctr += 1;

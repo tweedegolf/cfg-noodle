@@ -3,7 +3,7 @@
 //! This module provides a `Flash` struct that wraps a MultiwriteNorFlash device
 //! and exposes async methods for queue-like operations on persistent storage.
 
-use core::{marker::PhantomData, ops::Deref};
+use core::ops::Deref;
 
 use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use sequential_storage::{
@@ -11,6 +11,73 @@ use sequential_storage::{
     cache::CacheImpl,
     queue::{self, QueueIterator, QueueIteratorEntry},
 };
+
+const ELEM_START: u8 = 0;
+const ELEM_DATA: u8 = 1;
+const ELEM_END: u8 = 2;
+
+/// Result used by [`step`] and [`skip_to_seq`] macros
+pub enum StepResult<T> {
+    /// Item attained successfully
+    Item(T),
+    /// End of list reached
+    EndOfList,
+    /// A flash error occurred
+    FlashError,
+}
+
+/// Advance the iterator one step
+///
+/// Skips nodes that do not properly decode as an Elem.
+#[macro_export]
+macro_rules! step {
+    ($iter:ident, $buf:ident) => {
+        loop {
+            let res = $iter.next($buf).await;
+            match res {
+                // Got at item
+                Ok(Some(Some(item))) => break StepResult::Item(item),
+                // Got a bad item, continue
+                Ok(Some(None)) => {}
+                // end of list
+                Ok(None) => break StepResult::EndOfList,
+                // flash error
+                Err(_e) => break StepResult::FlashError,
+            }
+        }
+    }
+}
+
+/// Fast-forwards the iterator to the Elem::Start item with the given seq_no.
+/// Returns an error if not found. If Err is returned, the iterator
+/// is exhausted. If Ok is returned, `Elem::Start { seq_no }` has been consumed.
+///
+/// This method MUST be cancellation safe, however cancellation of this function
+/// may require re-creation of the iterator (e.g. the iterator may return a
+/// latched Error of some kind after cancellation). Cancellation MUST NOT lead
+/// to data loss.
+#[macro_export]
+macro_rules! skip_to_seq {
+    ($iter:ident, $buf:ident, $seq:ident) => {
+        loop {
+            let res = $iter.next($buf).await;
+            let item = match res {
+                // Got at item
+                Ok(Some(Some(item))) => item,
+                // Got a bad item, continue
+                Ok(Some(None)) => continue,
+                // end of list
+                Ok(None) => break StepResult::EndOfList,
+                // flash error
+                Err(_e) => break StepResult::FlashError,
+            };
+            if !matches!(item.data(), Elem::Start { seq_no } if seq_no == $seq) {
+                continue;
+            }
+            break StepResult::Item(());
+        }
+    };
+}
 
 /// Owns a flash and the range reserved for the `StorageList`
 pub struct Flash<T: MultiwriteNorFlash, C: CacheImpl> {
@@ -36,10 +103,30 @@ impl<T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlDataStorage for
     }
 
     async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::PushError> {
-        self.push(todo!()).await.map_err(drop)
+        // scratch buffer used if this is start/end
+        let mut buf = [0u8; 9];
+        let used = match data {
+            Elem::Start { seq_no } => {
+                let buf = &mut buf[..5];
+                buf[0] = ELEM_START;
+                buf[1..5].copy_from_slice(&seq_no.to_le_bytes());
+                buf
+            },
+            Elem::Data { data } => {
+                data.hdr_key_val
+            },
+            Elem::End { seq_no, calc_crc } => {
+                buf[0] = ELEM_END;
+                buf[1..5].copy_from_slice(&seq_no.to_le_bytes());
+                buf[5..9].copy_from_slice(&calc_crc.to_le_bytes());
+                buf.as_slice()
+            },
+        };
+        self.push(used).await.map_err(drop)
     }
 }
 
+/// .
 pub struct FlashIter<'flash, T: MultiwriteNorFlash, C: CacheImpl> {
     iter: QueueIterator<'flash, T, C>,
 }
@@ -74,10 +161,6 @@ impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIte
             Ok(Some(None))
         }
     }
-
-    async fn skip_to_seq(&mut self, seq_no: u32) -> Result<(), Self::Error> {
-        todo!()
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -91,7 +174,7 @@ impl HalfElem {
     fn from_bytes(data: &[u8]) -> Option<Self> {
         let (first, rest) = data.split_first()?;
         match *first {
-            0 => {
+            ELEM_START => {
                 if rest.len() != 4 {
                     return None;
                 }
@@ -101,14 +184,14 @@ impl HalfElem {
                     seq_no: u32::from_le_bytes(bytes),
                 })
             }
-            1 => {
+            ELEM_DATA => {
                 if rest.is_empty() {
                     None
                 } else {
                     Some(HalfElem::Data)
                 }
             }
-            2 => {
+            ELEM_END => {
                 if rest.len() != 8 {
                     return None;
                 }
@@ -138,7 +221,7 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> NdlElemIterNode for FlashNode<'_, '_, 
         match self.half {
             HalfElem::Start { seq_no } => Elem::Start { seq_no },
             HalfElem::Data => Elem::Data {
-                data: &self.qit.deref()[1..],
+                data: SerData::from_existing(self.qit.deref()),
             },
             HalfElem::End { seq_no, calc_crc } => Elem::End { seq_no, calc_crc },
         }
@@ -212,6 +295,41 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> Flash<T, C> {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub struct SerData<'a> {
+    hdr_key_val: &'a [u8],
+}
+
+impl<'a> SerData<'a> {
+    pub fn new(data: &'a mut [u8]) -> Self {
+        if let Some(f) = data.first_mut() {
+            *f = ELEM_DATA;
+        }
+        Self {
+            hdr_key_val: data,
+        }
+    }
+
+    pub fn from_existing(data: &'a [u8]) -> Self {
+        Self {
+            hdr_key_val: data,
+        }
+    }
+
+    pub fn hdr(&self) -> u8 {
+        // todo: panic?
+        self.hdr_key_val.get(0).copied().unwrap_or(255)
+    }
+
+    pub fn key_val(&self) -> &[u8] {
+        if let Some(sli) = self.hdr_key_val.get(1..) {
+            sli
+        } else {
+            &[]
+        }
+    }
+}
+
 /// A single element stored in flash
 #[derive(Debug, PartialEq)]
 pub enum Elem<'a> {
@@ -223,7 +341,7 @@ pub enum Elem<'a> {
     /// Data element
     Data {
         /// Contains the serialized key and value for the current data element
-        data: &'a [u8],
+        data: SerData<'a>,
     },
     /// End element
     End {
@@ -289,17 +407,6 @@ pub trait NdlElemIter {
     where
         Self: 'buf,
         Self: 'iter;
-
-    /// Fast-forwards the iterator to the Elem::Start item with the given seq_no.
-    /// Returns an error if not found. If Err is returned, the iterator
-    /// is exhausted. If Ok is returned, the next call to `next` will succeed
-    /// and return an NdlElemIterNode that produces `Elem::Start { seq_no }`.
-    ///
-    /// This method MUST be cancellation safe, however cancellation of this function
-    /// may require re-creation of the iterator (e.g. the iterator may return a
-    /// latched Error of some kind after cancellation). Cancellation MUST NOT lead
-    /// to data loss.
-    async fn skip_to_seq(&mut self, seq_no: u32) -> Result<(), Self::Error>;
 }
 
 /// A storage backend representing a FIFO queue of elements
