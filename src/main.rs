@@ -42,7 +42,6 @@ async fn main() {
         }
         info!("NEW WRITES: {}", flash2.flash().print_items().await);
     }
-    todo!()
 }
 
 fn get_mock_flash() -> Flash<MockFlashBase<10, 16, 256>, NoCache> {
