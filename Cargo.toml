@@ -3,11 +3,6 @@ edition = "2024"
 name = "cfg-noodle"
 version = "0.1.0"
 
-[[bin]]
-name = "main"
-path = "src/main.rs"
-required-features = ["std"]
-
 [[test]]
 name = "integration_tests"
 required-features = ["std"]

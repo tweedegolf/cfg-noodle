@@ -2,7 +2,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use core::fmt::Write as _;
+use core::{fmt::Write as _, num::NonZeroU32};
 use std::{collections::VecDeque, sync::Arc};
 
 use log::{debug, error, info};
@@ -17,7 +17,7 @@ use tokio::select;
 
 use crate::{
     Crc32, Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData, flash::Flash,
-    intrusive::StorageList,
+    storage_list::StorageList,
 };
 
 /// A high level fake storage impl.
@@ -58,15 +58,15 @@ pub struct TestItem {
 /// The test owned/heapful version of [`Elem`].
 #[derive(Clone, PartialEq, Debug)]
 pub enum TestElem {
-    Start { seq_no: u32 },
+    Start { seq_no: NonZeroU32 },
     Data { data: Vec<u8> },
-    End { seq_no: u32, calc_crc: u32 },
+    End { seq_no: NonZeroU32, calc_crc: u32 },
 }
 
 /// A builder type for writing a "Write Record" into a [`TestStorage`].
 pub struct RecordWriter<'a> {
     sto: &'a mut TestStorage,
-    seq: u32,
+    seq: NonZeroU32,
     crc: Crc32,
 }
 
@@ -91,7 +91,7 @@ pub struct WorkerReport {
 // TODO: This type, the get_mock_flash() and worker_task() are not only specific to sequential storage's
 // mock flash, but also copy&pasted in the integration tests. If we go with the flash-trait approach,
 // these could be generic.
-type MockFlash = Flash<MockFlashBase<10, 16, 256>, NoCache>;
+pub type MockFlash = Flash<MockFlashBase<10, 16, 256>, NoCache>;
 
 // ---- impl TestStorage ----
 
@@ -125,7 +125,7 @@ impl TestStorage {
     ///
     /// The Start element is still written if the RecordWriter is dropped without
     /// finalizing.
-    pub fn start_write_record(&mut self, seq_no: u32) -> RecordWriter<'_> {
+    pub fn start_write_record(&mut self, seq_no: NonZeroU32) -> RecordWriter<'_> {
         let ctr = self.next_ctr();
         self.items.push(TestItem {
             ctr,
@@ -188,7 +188,7 @@ impl TestStorage {
     ///
     /// Use [`Self::start_write_record()`] and [`RecordWriter::end_write_record()`] if you want
     /// to create a good record.
-    pub fn end_write_record(&mut self, seq_no: u32, calc_crc: u32) {
+    pub fn end_write_record(&mut self, seq_no: NonZeroU32, calc_crc: u32) {
         let ctr = self.next_ctr();
         self.items.push(TestItem {
             ctr,

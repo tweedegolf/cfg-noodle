@@ -1,9 +1,6 @@
-use std::sync::Arc;
+use std::{num::NonZeroU32, sync::Arc};
 
-use cfg_noodle::{
-    intrusive::{StorageList, StorageListNode},
-    test_utils,
-};
+use cfg_noodle::{StorageList, StorageListNode, test_utils};
 use log::{info, warn};
 use maitake_sync::WaitQueue;
 use minicbor::{CborLen, Decode, Encode};
@@ -298,7 +295,7 @@ async fn test_read_interrupted_write() {
             let mut iter = flash.items.iter_mut();
             loop {
                 let item = iter.next().unwrap();
-                if matches!(item.elem, TestElem::Start { seq_no } if seq_no == 2) {
+                if matches!(item.elem, TestElem::Start { seq_no } if seq_no == NonZeroU32::new(2).unwrap()) {
                     break;
                 }
             }

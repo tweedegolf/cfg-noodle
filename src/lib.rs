@@ -3,13 +3,24 @@
 #![warn(missing_docs)]
 #![deny(clippy::unwrap_used)]
 #![allow(async_fn_in_trait)]
+
 pub mod error;
 pub mod flash;
-pub mod intrusive;
 
 #[cfg(any(test, feature = "std"))]
 #[doc(hidden)]
 pub mod test_utils;
+
+mod storage_list;
+mod storage_node;
+
+use core::num::NonZeroU32;
+
+#[doc(inline)]
+pub use storage_list::StorageList;
+
+#[doc(inline)]
+pub use storage_node::{State, StorageListNode, StorageListNodeHandle};
 
 #[allow(unused)]
 pub(crate) mod logging {
@@ -108,7 +119,7 @@ pub enum Elem<'a> {
     /// Start element
     Start {
         /// The "write record" sequence number
-        seq_no: u32,
+        seq_no: NonZeroU32,
     },
     /// Data element
     Data {
@@ -119,7 +130,7 @@ pub enum Elem<'a> {
     End {
         /// The "write record" sequence number. Must match `Elem::Start { seq_no }`
         /// to properly end a "write record".
-        seq_no: u32,
+        seq_no: NonZeroU32,
         /// The CRC32 of ALL `Elem::Data { data }` fields, in the other they appear
         /// in the FIFO queue.
         calc_crc: u32,
@@ -188,7 +199,6 @@ pub trait NdlElemIter {
         Self: 'iter;
 }
 
-
 /// A single element yielded from a NdlElemIter implementation
 pub trait NdlElemIterNode {
     /// Error encountered while invalidating an element
@@ -214,8 +224,6 @@ pub trait NdlElemIterNode {
     /// may not be invalidated, however other currently-valid data MUST NOT be lost.
     async fn invalidate(self) -> Result<(), Self::Error>;
 }
-
-
 
 /// Result used by [`step`] and [`skip_to_seq`] macros
 pub type StepResult<T, E> = Result<T, StepErr<E>>;
@@ -277,7 +285,7 @@ macro_rules! skip_to_seq {
     };
 }
 
-use crc::{Crc, Digest, NoTable, CRC_32_CKSUM};
+use crc::{CRC_32_CKSUM, Crc, Digest, NoTable};
 
 /// CRC32 implementation
 ///

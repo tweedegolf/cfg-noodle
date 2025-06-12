@@ -1,5 +1,5 @@
 //! Error types used for the list
-use crate::intrusive::State;
+use crate::storage_node::State;
 
 /// General error that is not specific to the flash implementation
 #[derive(Debug)]
@@ -27,6 +27,8 @@ pub enum Error {
 ///
 /// Sometimes specific to the flash implementation.
 pub enum LoadStoreError<T> {
+    /// Needs Initial read processed
+    NeedsFirstRead,
     /// Writing to flash has failed. Contains the error returned by the storage impl.
     FlashWrite(T),
     /// Reading from flash has failed. Contains the error returned by the storage impl.

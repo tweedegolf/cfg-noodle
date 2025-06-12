@@ -2,7 +2,7 @@
 //!
 //! This module provides a `Flash` struct that wraps a MultiwriteNorFlash device
 //! and exposes async methods for queue-like operations on persistent storage.
-use core::ops::Deref;
+use core::{num::NonZeroU32, ops::Deref};
 
 use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash};
 use sequential_storage::{
@@ -39,9 +39,9 @@ pub struct FlashNode<'flash, 'iter, 'buf, T: MultiwriteNorFlash, C: CacheImpl> {
 /// on every access.
 #[derive(Clone, Copy)]
 enum HalfElem {
-    Start { seq_no: u32 },
+    Start { seq_no: NonZeroU32 },
     Data,
-    End { seq_no: u32, calc_crc: u32 },
+    End { seq_no: NonZeroU32, calc_crc: u32 },
 }
 
 // ---- impl Flash ----
@@ -90,13 +90,13 @@ impl<T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlDataStorage for
             Elem::Start { seq_no } => {
                 let buf = &mut buf[..5];
                 buf[0] = consts::ELEM_START;
-                buf[1..5].copy_from_slice(&seq_no.to_le_bytes());
+                buf[1..5].copy_from_slice(&seq_no.get().to_le_bytes());
                 buf
             }
             Elem::Data { data } => data.hdr_key_val,
             Elem::End { seq_no, calc_crc } => {
                 buf[0] = consts::ELEM_END;
-                buf[1..5].copy_from_slice(&seq_no.to_le_bytes());
+                buf[1..5].copy_from_slice(&seq_no.get().to_le_bytes());
                 buf[5..9].copy_from_slice(&calc_crc.to_le_bytes());
                 buf.as_slice()
             }
@@ -188,7 +188,7 @@ impl HalfElem {
                 let mut bytes = [0u8; 4];
                 bytes.copy_from_slice(rest);
                 Some(HalfElem::Start {
-                    seq_no: u32::from_le_bytes(bytes),
+                    seq_no: NonZeroU32::new(u32::from_le_bytes(bytes))?,
                 })
             }
             consts::ELEM_DATA => {
@@ -207,7 +207,7 @@ impl HalfElem {
                 let mut crc_bytes = [0u8; 4];
                 crc_bytes.copy_from_slice(&rest[4..8]);
                 Some(HalfElem::End {
-                    seq_no: u32::from_le_bytes(seq_bytes),
+                    seq_no: NonZeroU32::new(u32::from_le_bytes(seq_bytes))?,
                     calc_crc: u32::from_le_bytes(crc_bytes),
                 })
             }
@@ -215,7 +215,3 @@ impl HalfElem {
         }
     }
 }
-
-
-
-
