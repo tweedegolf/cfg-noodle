@@ -2,8 +2,8 @@
 //! This implements the [`StorageList`] and its [`StorageListNode`]s
 
 use crate::{
+    Elem, NdlDataStorage, NdlElemIter as _, NdlElemIterNode, SerData, StepResult,
     error::{Error, LoadStoreError},
-    flash::{Elem, NdlDataStorage, NdlElemIter as _, NdlElemIterNode, SerData, StepResult},
     logging::{debug, error, info},
     skip_to_seq, step,
 };

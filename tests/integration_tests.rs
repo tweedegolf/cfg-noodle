@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use cfg_noodle::{
-    flash::Elem,
     intrusive::{StorageList, StorageListNode},
     test_utils,
 };
-use log::{debug, info, warn};
+use log::{info, warn};
 use maitake_sync::WaitQueue;
 use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
@@ -15,9 +14,6 @@ use tokio::{
     task::LocalSet,
     time::{Duration, sleep},
 };
-
-// Scratch buffer size
-const BUF_LEN: usize = 1024;
 
 #[derive(Debug, Default, Encode, Decode, Clone, CborLen, PartialEq)]
 struct TestConfig {

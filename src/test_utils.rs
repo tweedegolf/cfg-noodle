@@ -13,7 +13,8 @@ use sequential_storage::{
 use tokio::select;
 
 use crate::{
-    flash::{Elem, Flash, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData},
+    Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData,
+    flash::Flash,
     intrusive::{FakeCrc32, StorageList},
 };
 
@@ -181,7 +182,7 @@ impl NdlDataStorage for TestStorage {
 
     async fn iter_elems<'this>(
         &'this mut self,
-    ) -> Result<Self::Iter<'this>, <Self::Iter<'this> as crate::flash::NdlElemIter>::Error> {
+    ) -> Result<Self::Iter<'this>, <Self::Iter<'this> as NdlElemIter>::Error> {
         let remain_items = self.items.iter().cloned().collect();
         Ok(TestStorageIter {
             sto: self,
