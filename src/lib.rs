@@ -52,8 +52,11 @@ pub(crate) mod logging {
 }
 
 mod consts {
+    /// Discriminant used to mark Start elements on disk
     pub(crate) const ELEM_START: u8 = 0;
+    /// Discriminant used to mark Data elements on disk
     pub(crate) const ELEM_DATA: u8 = 1;
+    /// Discriminant used to mark End elements on disk
     pub(crate) const ELEM_END: u8 = 2;
 }
 
@@ -123,12 +126,73 @@ pub enum Elem<'a> {
     },
 }
 
+/// A storage backend representing a FIFO queue of elements
+pub trait NdlDataStorage {
+    /// The type of iterator returned by this implementation
+    type Iter<'this>: NdlElemIter<Error = Self::Error>
+    where
+        Self: 'this;
+    /// The error returned when pushing fails
+    type Error;
+
+    /// Returns an iterator over all elements, back to front.
+    ///
+    /// This method MUST be cancellation safe, and cancellation MUST NOT lead to
+    /// data loss.
+    async fn iter_elems<'this>(
+        &'this mut self,
+    ) -> Result<Self::Iter<'this>, <Self::Iter<'this> as NdlElemIter>::Error>;
+
+    /// Insert an element at the FRONT of the list.
+    ///
+    /// This method MUST be cancellation safe, however if cancelled, it is not
+    /// specified whether the item has been successfully written or not.
+    /// Cancellation MUST NOT lead to data loss, other than the element currently
+    /// being written.
+    async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::Error>;
+}
+
+/// An iterator over `Elem`s stored in the queue.
+pub trait NdlElemIter {
+    /// Items yielded by this iterator
+    type Item<'this, 'buf>: NdlElemIterNode<Error = Self::Error>
+    where
+        Self: 'this,
+        Self: 'buf;
+    /// The error returned when next/skip_to_seq or NdlDataStorage::iter_elems fails
+    type Error;
+
+    /// Obtain the next item, in oldest-to-newest order.
+    ///
+    /// For lifetime reason, this returns an awkward `Option<Option<Item>>`. Return
+    /// values mean:
+    ///
+    /// - `Ok(Some(Some(item)))` - An item exists and was properly decoded as an `Elem`
+    /// - `Ok(Some(None))` - An item exists, BUT it cannot be properly decoded as an `Elem`
+    /// - `Ok(None)` - No item exists, but no flash error occurred
+    /// - `Err(e)` - An error occurred when decoding
+    ///
+    /// This method should normally be used with the [`step!()`] and [`skip_to_seq!()`]
+    /// macros for convenience.
+    ///
+    /// This method MUST be cancellation safe, however cancellation of this function
+    /// may require re-creation of the iterator (e.g. the iterator may return a
+    /// latched Error of some kind after cancellation). Cancellation MUST NOT lead
+    /// to data loss.
+    async fn next<'iter, 'buf>(
+        &'iter mut self,
+        buf: &'buf mut [u8],
+    ) -> Result<Option<Option<Self::Item<'iter, 'buf>>>, Self::Error>
+    where
+        Self: 'buf,
+        Self: 'iter;
+}
+
+
 /// A single element yielded from a NdlElemIter implementation
 pub trait NdlElemIterNode {
     /// Error encountered while invalidating an element
-    ///
-    /// TODO: make this a concrete type? some kind of InvalidateErrorKind bound?
-    type InvalidateError;
+    type Error;
 
     /// Returns the present element.
     ///
@@ -148,72 +212,21 @@ pub trait NdlElemIterNode {
     /// require time-expensive recovery, so cancellation of this method should be
     /// avoided in the normal case. If this method is cancelled, the element may or
     /// may not be invalidated, however other currently-valid data MUST NOT be lost.
-    async fn invalidate(self) -> Result<(), Self::InvalidateError>;
+    async fn invalidate(self) -> Result<(), Self::Error>;
 }
 
-/// An iterator over `Elem`s stored in the queue.
-pub trait NdlElemIter {
-    /// Items yielded by this iterator
-    type Item<'this, 'buf>: NdlElemIterNode
-    where
-        Self: 'this,
-        Self: 'buf;
-    /// The error returned when next/skip_to_seq or NdlDataStorage::iter_elems fails
-    ///
-    /// TODO: make this a concrete type? some kind of ErrorKind bound?
-    type Error;
 
-    /// Obtain the next item, in oldest-to-newest order.
-    ///
-    /// This method MUST be cancellation safe, however cancellation of this function
-    /// may require re-creation of the iterator (e.g. the iterator may return a
-    /// latched Error of some kind after cancellation). Cancellation MUST NOT lead
-    /// to data loss.
-    async fn next<'iter, 'buf>(
-        &'iter mut self,
-        buf: &'buf mut [u8],
-    ) -> Result<Option<Option<Self::Item<'iter, 'buf>>>, Self::Error>
-    where
-        Self: 'buf,
-        Self: 'iter;
-}
-
-/// A storage backend representing a FIFO queue of elements
-pub trait NdlDataStorage {
-    /// The type of iterator returned by this implementation
-    type Iter<'this>: NdlElemIter
-    where
-        Self: 'this;
-    /// The error returned when pushing fails
-    ///
-    /// TODO: make this a concrete type? some kind of PushErrorKind bound?
-    type PushError;
-
-    /// Returns an iterator over all elements, back to front.
-    ///
-    /// This method MUST be cancellation safe, and cancellation MUST NOT lead to
-    /// data loss.
-    async fn iter_elems<'this>(
-        &'this mut self,
-    ) -> Result<Self::Iter<'this>, <Self::Iter<'this> as NdlElemIter>::Error>;
-
-    /// Insert an element at the FRONT of the list.
-    ///
-    /// This method MUST be cancellation safe, however if cancelled, it is not
-    /// specified whether the item has been successfully written or not.
-    /// Cancellation MUST NOT lead to data loss, other than the element currently
-    /// being written.
-    async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::PushError>;
-}
 
 /// Result used by [`step`] and [`skip_to_seq`] macros
-pub enum StepResult<T> {
-    /// Item attained successfully
-    Item(T),
+pub type StepResult<T, E> = Result<T, StepErr<E>>;
+
+/// An error occurred while calling [`step`] or [`skip_to_seq`] macros
+#[derive(Debug, PartialEq)]
+pub enum StepErr<E> {
     /// End of list reached
     EndOfList,
     /// A flash error occurred
-    FlashError,
+    FlashError(E),
 }
 
 /// Advance the iterator one step
@@ -226,13 +239,13 @@ macro_rules! step {
             let res = $iter.next($buf).await;
             match res {
                 // Got at item
-                Ok(Some(Some(item))) => break StepResult::Item(item),
+                Ok(Some(Some(item))) => break StepResult::Ok(item),
                 // Got a bad item, continue
                 Ok(Some(None)) => {}
                 // end of list
-                Ok(None) => break StepResult::EndOfList,
+                Ok(None) => break Err($crate::StepErr::EndOfList),
                 // flash error
-                Err(_e) => break StepResult::FlashError,
+                Err(e) => break Err($crate::StepErr::FlashError(e)),
             }
         }
     };
@@ -241,11 +254,6 @@ macro_rules! step {
 /// Fast-forwards the iterator to the Elem::Start item with the given seq_no.
 /// Returns an error if not found. If Err is returned, the iterator
 /// is exhausted. If Ok is returned, `Elem::Start { seq_no }` has been consumed.
-///
-/// This method MUST be cancellation safe, however cancellation of this function
-/// may require re-creation of the iterator (e.g. the iterator may return a
-/// latched Error of some kind after cancellation). Cancellation MUST NOT lead
-/// to data loss.
 #[macro_export]
 macro_rules! skip_to_seq {
     ($iter:ident, $buf:ident, $seq:ident) => {
@@ -257,14 +265,48 @@ macro_rules! skip_to_seq {
                 // Got a bad item, continue
                 Ok(Some(None)) => continue,
                 // end of list
-                Ok(None) => break StepResult::EndOfList,
+                Ok(None) => break Err($crate::StepErr::EndOfList),
                 // flash error
-                Err(_e) => break StepResult::FlashError,
+                Err(e) => break Err($crate::StepErr::FlashError(e)),
             };
             if !matches!(item.data(), Elem::Start { seq_no } if seq_no == $seq) {
                 continue;
             }
-            break StepResult::Item(());
+            break StepResult::Ok(());
         }
     };
+}
+
+use crc::{Crc, Digest, NoTable, CRC_32_CKSUM};
+
+/// CRC32 implementation
+///
+/// Currently uses [`CRC_32_CKSUM`] from the [`crc`] crate with no table.
+///
+/// Wrapped for semver reasons
+pub struct Crc32(Digest<'static, u32, NoTable>);
+
+impl Crc32 {
+    const CRC: Crc<u32, NoTable> = Crc::<u32, NoTable>::new(&CRC_32_CKSUM);
+
+    /// Create new initial CRC digest
+    pub const fn new() -> Self {
+        Self(Self::CRC.digest())
+    }
+
+    /// Update the CRC with data
+    pub fn update(&mut self, data: &[u8]) {
+        self.0.update(data)
+    }
+
+    /// Finalize the CRC, producing the output
+    pub fn finalize(self) -> u32 {
+        self.0.finalize()
+    }
+}
+
+impl Default for Crc32 {
+    fn default() -> Self {
+        Self::new()
+    }
 }

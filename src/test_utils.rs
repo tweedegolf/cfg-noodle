@@ -16,9 +16,8 @@ use sequential_storage::{
 use tokio::select;
 
 use crate::{
-    Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData,
-    flash::Flash,
-    intrusive::{FakeCrc32, StorageList},
+    Crc32, Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData, flash::Flash,
+    intrusive::StorageList,
 };
 
 /// A high level fake storage impl.
@@ -68,7 +67,7 @@ pub enum TestElem {
 pub struct RecordWriter<'a> {
     sto: &'a mut TestStorage,
     seq: u32,
-    crc: FakeCrc32,
+    crc: Crc32,
 }
 
 /// The outcome of a flash worker
@@ -134,7 +133,7 @@ impl TestStorage {
         });
         RecordWriter {
             seq: seq_no,
-            crc: FakeCrc32::new(),
+            crc: Crc32::new(),
             sto: self,
         }
     }
@@ -146,7 +145,7 @@ impl TestStorage {
     ///
     /// Use [`Self::start_write_record()`] and [`RecordWriter::add_data_elem()`] if you want
     /// to create a good record.
-    pub fn add_data_elem<E>(&mut self, key: &str, data: &E, mut crc: Option<&mut FakeCrc32>)
+    pub fn add_data_elem<E>(&mut self, key: &str, data: &E, mut crc: Option<&mut Crc32>)
     where
         E: minicbor::Encode<()>,
         E: minicbor::CborLen<()>,
@@ -204,7 +203,7 @@ impl NdlDataStorage for TestStorage {
     where
         Self: 'this;
 
-    type PushError = ();
+    type Error = ();
 
     async fn iter_elems<'this>(
         &'this mut self,
@@ -217,7 +216,7 @@ impl NdlDataStorage for TestStorage {
         })
     }
 
-    async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::PushError> {
+    async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::Error> {
         info!("Pushing {data:?}");
         let ctr = self.next_ctr();
         let item: TestElem = data.into();
@@ -260,7 +259,7 @@ impl<'a> NdlElemIter for TestStorageIter<'a> {
 // ---- impl TestStorageItemNode ----
 
 impl<'a> NdlElemIterNode for TestStorageItemNode<'a> {
-    type InvalidateError = ();
+    type Error = ();
 
     fn data(&self) -> Elem<'_> {
         match &self.item.elem {
@@ -275,7 +274,7 @@ impl<'a> NdlElemIterNode for TestStorageItemNode<'a> {
         }
     }
 
-    async fn invalidate(self) -> Result<(), Self::InvalidateError> {
+    async fn invalidate(self) -> Result<(), Self::Error> {
         let item_ctr = self.item.ctr;
         // todo: find + remove might be faster, but whatever, test code
         self.sto.items.retain(|i| i.ctr != item_ctr);

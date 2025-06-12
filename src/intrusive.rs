@@ -2,7 +2,7 @@
 //! This implements the [`StorageList`] and its [`StorageListNode`]s
 
 use crate::{
-    Elem, NdlDataStorage, NdlElemIter as _, NdlElemIterNode, SerData, StepResult,
+    Crc32, Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData, StepErr, StepResult,
     error::{Error, LoadStoreError},
     logging::{debug, error, info},
     skip_to_seq, step,
@@ -27,35 +27,192 @@ use minicbor::{
 };
 use mutex::{ConstInit, ScopedRawMutex};
 
-/// This is fake until I pull in the CRC crate
-#[doc(hidden)]
-pub struct FakeCrc32 {
-    state: u32,
+/// "Global anchor" of all storage items.
+///
+/// It serves as the meeting point between two conceptual pieces:
+///
+/// 1. The [`StorageListNode`]s, which each store one configuration item
+/// 2. The worker task that owns the external flash, and serves the
+///    role of loading data FROM flash (and putting it in the Nodes),
+///    as well as the role of deciding when to write data TO flash
+///    (retrieving it from each node).
+pub struct StorageList<R: ScopedRawMutex> {
+    /// The type parameter `R` allows us to be generic over kinds of mutex
+    /// impls, allowing for use of a `std` mutex on `std`, and for things
+    /// like `CriticalSectionRawMutex` or `ThreadModeRawMutex` on no-std
+    /// targets.
+    ///
+    /// This mutex MUST be locked whenever you:
+    ///
+    /// 1. Want to append an item to the linked list, e.g. with `StorageListNode`.
+    ///    You'd also need to lock it to REMOVE something from the list, but
+    ///    we'll probably not support that in this library, at least for now.
+    /// 2. You want to interact with ANY node that is in the list, REGARDLESS
+    ///    of whether you get to a node "directly" or by iterating through
+    ///    the linked list. To repeat: you MUST hold the mutex the ENTIRE time
+    ///    there is a live reference to a `Node<T>`, mutable or immutable!
+    ///    THIS IS EXTREMELY LOAD BEARING TO SOUNDNESS.
+    ///
+    /// Note that this is the first level of trickery, EVERY node can actually
+    /// hold a different type T, so at a top level, we ONLY store a list of the
+    /// Header, which is the first field in `Node<T>`, which is repr-C, so we
+    /// can cast this back to a `Node<T>` as needed
+    inner: Mutex<StorageListInner, R>,
+    /// Notifies the worker task that nodes need to be read from flash.
+    /// Woken when a new node is attached and requires data to be loaded.
+    needs_read: WaitQueue,
+    /// Notifies the worker task that nodes have pending writes to flash.
+    /// Woken when a node's data is modified and needs to be persisted.
+    needs_write: WaitQueue,
+    /// Notifies waiting nodes that the read process has completed.
+    /// Woken after `process_reads` finishes loading data from flash.
+    reading_done: WaitQueue,
+    /// Notifies waiting nodes that the write process has completed.
+    /// Woken after `process_writes` finishes persisting data to flash.
+    writing_done: WaitQueue,
 }
 
-impl FakeCrc32 {
-    /// .
-    pub fn new() -> Self {
-        Self { state: 0 }
-    }
-
-    /// .
-    pub fn update(&mut self, data: &[u8]) {
-        for b in data {
-            self.state = self.state.wrapping_add((*b) as u32);
-        }
-    }
-
-    /// .
-    pub fn finalize(self) -> u32 {
-        self.state
-    }
+/// Represents the storage of a single `T`, linkable to a `StorageList`
+///
+/// Users will [`attach`](Self::attach) it to the [`StorageList`] to make it part of
+/// the "connected configuration system".
+pub struct StorageListNode<T: 'static> {
+    /// The `inner` data is "observable" in the linked list. We put it inside
+    /// an [`UnsafeCell`], because it might be mutated "spookily" either through the
+    /// `StorageListNode`, or via the linked list.
+    inner: UnsafeCell<Node<T>>,
 }
 
-impl Default for FakeCrc32 {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Handle for a `StorageListNode` that has been loaded and thus contains valid data
+///
+/// "end users" will interact with the `StorageListNodeHandle` to retrieve and store changes
+/// to the configuration they care about.
+pub struct StorageListNodeHandle<T, R>
+where
+    T: 'static,
+    R: ScopedRawMutex + 'static,
+{
+    /// `StorageList` to which this node has been attached
+    list: &'static StorageList<R>,
+
+    /// Store the StorageListNode for this handle
+    inner: &'static StorageListNode<T>,
+}
+
+/// This is the actual "linked list node" that is chained to the list
+///
+/// There is trickery afoot! The linked list is actually a linked list
+/// of `NodeHeader`, and we are using `repr(c)` here to GUARANTEE that
+/// a pointer to a ``Node<T>`` is the SAME VALUE as a pointer to that
+/// node's `NodeHeader`. We will use this for type punning!
+#[repr(C)]
+pub struct Node<T> {
+    // LOAD BEARING: MUST BE THE FIRST ELEMENT IN A REPR-C STRUCT
+    header: NodeHeader,
+    // This type is !Unpin due to the heuristic from:
+    // <https://github.com/rust-lang/rust/pull/82834>
+    // It might not be absolutely necessary anymore (?) to have this, but
+    // it is still used in the `pin` examples, so we keep it:
+    // https://doc.rust-lang.org/std/pin/index.html#a-self-referential-struct
+    _pin: PhantomPinned,
+
+    // We generally want this to be in the tail position, because the size of T varies
+    // and the pointer to the `NodeHeader` must not change as described above.
+    //
+    // TODO @James: This is very difficult to access from tests but maybe we would
+    // want to have an (test-)interface that lets us create a node with a specific payload
+    // such that we can directly de-/serialize nodes and compare the results in a
+    // unit test. Do you think that makes sense? Or is there a better way to
+    // have unit tests for this?
+    t: MaybeUninit<T>,
+}
+
+/// The non-typed parts of a [`Node<T>`].
+///
+/// The `NodeHeader` serves as the actual type that is linked together in
+/// the linked list, and is the primary interface the storage worker will
+/// use. It MUST be the first field of a `Node<T>`, so it is safe to
+/// type-pun a `NodeHeader` ptr into a `Node<T>` ptr and back.
+pub struct NodeHeader {
+    /// The doubly linked list pointers
+    links: list::Links<NodeHeader>,
+    /// The "key" of our "key:value" store. Must be unique across the list.
+    key: &'static str,
+    /// The current state of the node. THIS IS SAFETY LOAD BEARING whether
+    /// we can access the `T` in the `Node<T>`
+    state: State,
+    /// This is the type-erased serialize/deserialize `VTable` that is
+    /// unique to each `T`, and will be used by the storage worker
+    /// to access the `t` indirectly for loading and storing.
+    vtable: VTable,
+}
+
+/// State of the [`Node<T>`].
+///
+/// This is used to determine how to unsafely interact with other pieces
+/// of the `Node<T>`!
+///
+/// ## State transition diagram
+///
+/// ```text
+/// ┌─────────┐    ┌─────────────┐   ┌────────────────────┐
+/// │ Initial │─┬─▶│ NonResident │──▶│  DefaultUnwritten  │─┐
+/// └─────────┘ │  └─────────────┘   └────────────────────┘ │
+///             │                                           ▼
+///             │         ┌────────────────────┐     ┌────────────┐
+///             └────────▶│ ValidNoWriteNeeded │────▶│ NeedsWrite │
+///                       └────────────────────┘     └────────────┘
+///                                  ▲                      │
+///                                  └──────────────────────┘
+/// ```
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum State {
+    /// The node has been created, but never "hydrated" with data from the
+    /// flash. In this state, we are waiting to be notified whether we can
+    /// be filled with data from flash, or whether we will need to initialize
+    /// using a default value or something.
+    ///
+    /// In this state, `t` is NOT valid, and is uninitialized. it MUST NOT be
+    /// read.
+    Initial,
+    /// We attempted to load from flash, but as far as we know, the data does
+    /// not exist in flash. The owner of the Node will need to initialize
+    /// this data, usually in the wait loop of `attach`.
+    ///
+    /// In this state, `t` is NOT valid, and is uninitialized. it MUST NOT be
+    /// read.
+    NonResident,
+    /// The value has been initialized using a default value (NOT from flash)
+    /// and needs to be written to flash.
+    ///
+    /// In this state, `t` IS valid, and may be read at any time (by the holder
+    /// of the lock).
+    DefaultUnwritten,
+    /// The value has been initialized using a value from flash. No writes are
+    /// pending.
+    ///
+    /// In this state, `t` IS valid, and may be read at any time (by the holder
+    /// of the lock).
+    ValidNoWriteNeeded,
+    /// The value has been written, but these changes have NOT been flushed back
+    /// to the flash.
+    ///
+    /// In this state, `t` IS valid, and may be read at any time (by the holder
+    /// of the lock).
+    NeedsWrite,
+}
+
+struct WriteReport {
+    seq: u32,
+    crc: u32,
+    ct: usize,
+}
+
+struct StorageListInner {
+    list: List<NodeHeader>,
+    seq_state: SeqState,
 }
 
 #[derive(Default)]
@@ -81,17 +238,12 @@ impl SeqState {
     }
 }
 
-struct StorageListInner {
-    list: List<NodeHeader>,
-    seq_state: SeqState,
-}
-
 impl StorageListInner {
     async fn get_or_populate_latest<S: NdlDataStorage>(
         &mut self,
         s: &mut S,
         buf: &mut [u8],
-    ) -> Result<Option<u32>, LoadStoreError> {
+    ) -> Result<Option<u32>, LoadStoreError<S::Error>> {
         if self.seq_state.has_hydrated {
             let max = self.seq_state.last_three.iter().copied().max().unwrap_or(0);
             if max == 0 {
@@ -102,13 +254,11 @@ impl StorageListInner {
         }
 
         // We have NOT hydrated, do so now
-        let Ok(mut iter) = s.iter_elems().await else {
-            todo!()
-        };
+        let mut iter = s.iter_elems().await.map_err(LoadStoreError::FlashRead)?;
 
         let mut current: Option<u32> = None;
         // todo: real crc
-        let mut crc = FakeCrc32::new();
+        let mut crc = Crc32::new();
 
         'outer: loop {
             let item = loop {
@@ -121,7 +271,7 @@ impl StorageListInner {
                     // end of list
                     Ok(None) => break 'outer,
                     // flash error
-                    Err(_e) => todo!(),
+                    Err(e) => return Err(LoadStoreError::FlashRead(e)),
                 };
             };
 
@@ -131,7 +281,7 @@ impl StorageListInner {
                     // todo: real crc
                     // todo: We should make sure next_seq is ALWAYS larger than any seen start,
                     // to ensure we don't accidentally re-use a bad one.
-                    crc = FakeCrc32::new();
+                    crc = Crc32::new();
                 }
                 Elem::Data { data } => {
                     if current.is_none() {
@@ -143,7 +293,7 @@ impl StorageListInner {
                 }
                 Elem::End { seq_no, calc_crc } => {
                     let check_crc = crc.finalize();
-                    crc = FakeCrc32::new();
+                    crc = Crc32::new();
                     let Some(seq) = current.take() else {
                         continue;
                     };
@@ -174,16 +324,18 @@ impl StorageListInner {
         latest: u32,
         storage: &mut S,
         buf: &mut [u8],
-    ) -> Result<(), LoadStoreError> {
-        let Ok(mut queue_iter) = storage.iter_elems().await else {
-            todo!()
-        };
+    ) -> Result<(), LoadStoreError<S::Error>> {
+        let mut queue_iter = storage
+            .iter_elems()
+            .await
+            .map_err(LoadStoreError::FlashRead)?;
 
-        let skipres: StepResult<()> = skip_to_seq!(queue_iter, buf, latest);
+        let skipres = skip_to_seq!(queue_iter, buf, latest);
         match skipres {
-            StepResult::Item(_) => {}
-            StepResult::EndOfList => todo!(),
-            StepResult::FlashError => todo!(),
+            Ok(()) => {}
+            // This state should be impossible: we already determined which seq_no to skip to
+            Err(StepErr::EndOfList) => unreachable!("external flash inconsistent"),
+            Err(StepErr::FlashError(e)) => return Err(LoadStoreError::FlashRead(e)),
         };
 
         'outer: loop {
@@ -197,7 +349,7 @@ impl StorageListInner {
                     // end of list
                     Ok(None) => break 'outer,
                     // flash error
-                    Err(_e) => todo!(),
+                    Err(e) => return Err(LoadStoreError::FlashRead(e)),
                 };
             };
 
@@ -282,7 +434,7 @@ impl StorageListInner {
         }
     }
 
-    fn needs_writing(&mut self) -> Result<bool, LoadStoreError> {
+    fn needs_writing(&mut self) -> Result<bool, Error> {
         // Set to true if any node in the list needs writing
         let mut needs_writing = false;
 
@@ -304,7 +456,7 @@ impl StorageListInner {
                 // `process_reads` hasn't run, yet. Should we return early here and trigger
                 // another process_reads?
                 State::Initial => {
-                    return Err(LoadStoreError::NeedsRead);
+                    return Err(Error::NeedsRead);
                 }
                 // This should never appear on a list that has been processed properly.
                 // TODO @James: Not sure how we should recover from this. If it cannot happen
@@ -312,61 +464,13 @@ impl StorageListInner {
                 State::NonResident => {
                     debug!("process_writes() on invalid state: {:?}", header.state);
 
-                    return Err(LoadStoreError::AppError(Error::InvalidState(
-                        header.key,
-                        header.state,
-                    )));
+                    return Err(Error::InvalidState(header.key, header.state));
                 }
             }
         }
 
         Ok(needs_writing)
     }
-}
-
-/// "Global anchor" of all storage items.
-///
-/// It serves as the meeting point between two conceptual pieces:
-///
-/// 1. The [`StorageListNode`]s, which each store one configuration item
-/// 2. The worker task that owns the external flash, and serves the
-///    role of loading data FROM flash (and putting it in the Nodes),
-///    as well as the role of deciding when to write data TO flash
-///    (retrieving it from each node).
-pub struct StorageList<R: ScopedRawMutex> {
-    /// The type parameter `R` allows us to be generic over kinds of mutex
-    /// impls, allowing for use of a `std` mutex on `std`, and for things
-    /// like `CriticalSectionRawMutex` or `ThreadModeRawMutex` on no-std
-    /// targets.
-    ///
-    /// This mutex MUST be locked whenever you:
-    ///
-    /// 1. Want to append an item to the linked list, e.g. with `StorageListNode`.
-    ///    You'd also need to lock it to REMOVE something from the list, but
-    ///    we'll probably not support that in this library, at least for now.
-    /// 2. You want to interact with ANY node that is in the list, REGARDLESS
-    ///    of whether you get to a node "directly" or by iterating through
-    ///    the linked list. To repeat: you MUST hold the mutex the ENTIRE time
-    ///    there is a live reference to a `Node<T>`, mutable or immutable!
-    ///    THIS IS EXTREMELY LOAD BEARING TO SOUNDNESS.
-    ///
-    /// Note that this is the first level of trickery, EVERY node can actually
-    /// hold a different type T, so at a top level, we ONLY store a list of the
-    /// Header, which is the first field in `Node<T>`, which is repr-C, so we
-    /// can cast this back to a `Node<T>` as needed
-    inner: Mutex<StorageListInner, R>,
-    /// Notifies the worker task that nodes need to be read from flash.
-    /// Woken when a new node is attached and requires data to be loaded.
-    needs_read: WaitQueue,
-    /// Notifies the worker task that nodes have pending writes to flash.
-    /// Woken when a node's data is modified and needs to be persisted.
-    needs_write: WaitQueue,
-    /// Notifies waiting nodes that the read process has completed.
-    /// Woken after `process_reads` finishes loading data from flash.
-    reading_done: WaitQueue,
-    /// Notifies waiting nodes that the write process has completed.
-    /// Woken after `process_writes` finishes persisting data to flash.
-    writing_done: WaitQueue,
 }
 
 impl<R: ScopedRawMutex> StorageList<R> {
@@ -383,33 +487,6 @@ impl<R: ScopedRawMutex> StorageList<R> {
     }
 }
 
-/// Represents the storage of a single `T`, linkable to a `StorageList`
-///
-/// Users will [`attach`](Self::attach) it to the [`StorageList`] to make it part of
-/// the "connected configuration system".
-pub struct StorageListNode<T: 'static> {
-    /// The `inner` data is "observable" in the linked list. We put it inside
-    /// an [`UnsafeCell`], because it might be mutated "spookily" either through the
-    /// `StorageListNode`, or via the linked list.
-    inner: UnsafeCell<Node<T>>,
-}
-
-/// Handle for a `StorageListNode` that has been loaded and thus contains valid data
-///
-/// "end users" will interact with the `StorageListNodeHandle` to retrieve and store changes
-/// to the configuration they care about.
-pub struct StorageListNodeHandle<T, R>
-where
-    T: 'static,
-    R: ScopedRawMutex + 'static,
-{
-    /// `StorageList` to which this node has been attached
-    list: &'static StorageList<R>,
-
-    /// Store the StorageListNode for this handle
-    inner: &'static StorageListNode<T>,
-}
-
 /// Impl Debug to allow for using unwrap in tests.
 impl<T, R> Debug for StorageListNodeHandle<T, R>
 where
@@ -424,120 +501,12 @@ where
     }
 }
 
-/// This is the actual "linked list node" that is chained to the list
-///
-/// There is trickery afoot! The linked list is actually a linked list
-/// of `NodeHeader`, and we are using `repr(c)` here to GUARANTEE that
-/// a pointer to a ``Node<T>`` is the SAME VALUE as a pointer to that
-/// node's `NodeHeader`. We will use this for type punning!
-#[repr(C)]
-pub struct Node<T> {
-    // LOAD BEARING: MUST BE THE FIRST ELEMENT IN A REPR-C STRUCT
-    header: NodeHeader,
-    // This type is !Unpin due to the heuristic from:
-    // <https://github.com/rust-lang/rust/pull/82834>
-    // It might not be absolutely necessary anymore (?) to have this, but
-    // it is still used in the `pin` examples, so we keep it:
-    // https://doc.rust-lang.org/std/pin/index.html#a-self-referential-struct
-    _pin: PhantomPinned,
-
-    // We generally want this to be in the tail position, because the size of T varies
-    // and the pointer to the `NodeHeader` must not change as described above.
-    //
-    // TODO @James: This is very difficult to access from tests but maybe we would
-    // want to have an (test-)interface that lets us create a node with a specific payload
-    // such that we can directly de-/serialize nodes and compare the results in a
-    // unit test. Do you think that makes sense? Or is there a better way to
-    // have unit tests for this?
-    t: MaybeUninit<T>,
-}
-
-/// The non-typed parts of a [`Node<T>`].
-///
-/// The `NodeHeader` serves as the actual type that is linked together in
-/// the linked list, and is the primary interface the storage worker will
-/// use. It MUST be the first field of a `Node<T>`, so it is safe to
-/// type-pun a `NodeHeader` ptr into a `Node<T>` ptr and back.
-pub struct NodeHeader {
-    /// The doubly linked list pointers
-    links: list::Links<NodeHeader>,
-    /// The "key" of our "key:value" store. Must be unique across the list.
-    key: &'static str,
-    /// The current state of the node. THIS IS SAFETY LOAD BEARING whether
-    /// we can access the `T` in the `Node<T>`
-    state: State,
-    /// This is the type-erased serialize/deserialize `VTable` that is
-    /// unique to each `T`, and will be used by the storage worker
-    /// to access the `t` indirectly for loading and storing.
-    vtable: VTable,
-}
-
 impl NodeHeader {
     unsafe fn set_state(self: Pin<&mut Self>, state: State) {
         unsafe {
             self.get_unchecked_mut().state = state;
         }
     }
-}
-
-/// State of the [`Node<T>`].
-///
-/// This is used to determine how to unsafely interact with other pieces
-/// of the `Node<T>`!
-///
-/// ## State transition diagram
-/// TODO: Update this when the statemachine is finalized
-/// ```text
-/// ┌─────────┐    ┌─────────────┐   ┌────────────────────┐
-/// │ Initial │─┬─▶│ NonResident │──▶│  DefaultUnwritten  │─┐
-/// └─────────┘ │  └─────────────┘   └────────────────────┘ │
-///             │                                           ▼
-///             │         ┌────────────────────┐     ┌────────────┐
-///             └────────▶│ ValidNoWriteNeeded │────▶│ NeedsWrite │◀─┐
-///                       └────────────────────┘     └────────────┘  │
-///                                  ▲                      │        │
-///                                  │                      ▼        │
-///                                  │              ┌──────────────┐ │
-///                                  └──────────────│ WriteStarted │─┘
-///                                                 └──────────────┘
-/// ```
-#[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum State {
-    /// The node has been created, but never "hydrated" with data from the
-    /// flash. In this state, we are waiting to be notified whether we can
-    /// be filled with data from flash, or whether we will need to initialize
-    /// using a default value or something.
-    ///
-    /// In this state, `t` is NOT valid, and is uninitialized. it MUST NOT be
-    /// read.
-    Initial,
-    /// We attempted to load from flash, but as far as we know, the data does
-    /// not exist in flash. The owner of the Node will need to initialize
-    /// this data, usually in the wait loop of `attach`.
-    ///
-    /// In this state, `t` is NOT valid, and is uninitialized. it MUST NOT be
-    /// read.
-    NonResident,
-    /// The value has been initialized using a default value (NOT from flash)
-    /// and needs to be written to flash.
-    ///
-    /// In this state, `t` IS valid, and may be read at any time (by the holder
-    /// of the lock).
-    DefaultUnwritten,
-    /// The value has been initialized using a value from flash. No writes are
-    /// pending.
-    ///
-    /// In this state, `t` IS valid, and may be read at any time (by the holder
-    /// of the lock).
-    ValidNoWriteNeeded,
-    /// The value has been written, but these changes have NOT been flushed back
-    /// to the flash.
-    ///
-    /// In this state, `t` IS valid, and may be read at any time (by the holder
-    /// of the lock).
-    NeedsWrite,
 }
 
 /// A function where a type-erased (`void*`) node pointer goes in, and the
@@ -630,7 +599,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
         &'static self,
         storage: &mut S,
         buf: &mut [u8],
-    ) -> Result<(), LoadStoreError> {
+    ) -> Result<(), LoadStoreError<S::Error>> {
         info!("Start process_reads");
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
@@ -693,7 +662,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
         &'static self,
         storage: &mut S,
         serde_buf: &mut [u8],
-    ) -> Result<(), LoadStoreError> {
+    ) -> Result<(), LoadStoreError<S::Error>> {
         debug!("Start process_writes");
 
         // Lock the list, remember, if we're touching nodes, we need to have the list
@@ -820,35 +789,36 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
     storage: &mut S,
     rpt: WriteReport,
     buf: &mut [u8],
-) -> Result<(), LoadStoreError> {
+) -> Result<(), LoadStoreError<S::Error>> {
     // Create a `QueueIterator`
     let mut queue_iter = storage
         .iter_elems()
         .await
-        .map_err(|_| LoadStoreError::FlashRead)?;
+        .map_err(LoadStoreError::FlashRead)?;
 
     let seq = rpt.seq;
-    let skipres: StepResult<()> = skip_to_seq!(queue_iter, buf, seq);
+    let skipres = skip_to_seq!(queue_iter, buf, seq);
     match skipres {
-        StepResult::Item(_) => {}
-        StepResult::EndOfList => todo!(),
-        StepResult::FlashError => todo!(),
+        Ok(()) => {}
+        // This state should be impossible: we already determined which seq_no to skip to
+        Err(StepErr::EndOfList) => unreachable!("external flash inconsistent"),
+        Err(StepErr::FlashError(e)) => return Err(LoadStoreError::FlashRead(e)),
     };
 
-    let mut crc = FakeCrc32::new();
+    let mut crc = Crc32::new();
     let mut ctr = 0;
     loop {
-        let res: StepResult<_> = step!(queue_iter, buf);
+        let res = step!(queue_iter, buf);
         let item = match res {
-            StepResult::Item(i) => {
+            Ok(i) => {
                 debug!("visiting {:?} in verify", i.data());
                 i
             }
-            StepResult::EndOfList => {
+            Err(StepErr::EndOfList) => {
                 debug!("Surprising end of list");
                 return Err(LoadStoreError::WriteVerificationFailed);
             }
-            StepResult::FlashError => return Err(LoadStoreError::FlashRead),
+            Err(StepErr::FlashError(e)) => return Err(LoadStoreError::FlashRead(e)),
         };
 
         let data = item.data();
@@ -882,12 +852,6 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
     }
 }
 
-struct WriteReport {
-    seq: u32,
-    crc: u32,
-    ct: usize,
-}
-
 /// Writes all nodes in the storage list to flash memory.
 ///
 /// This function iterates through all nodes in the storage list, serializes each node's
@@ -914,21 +878,21 @@ async fn write_to_flash<S: NdlDataStorage>(
     buf: &mut [u8],
     storage: &mut S,
     seq_no: u32,
-) -> Result<WriteReport, LoadStoreError> {
+) -> Result<WriteReport, LoadStoreError<S::Error>> {
     let iter = StaticRawIter {
         iter: ls.iter_raw(),
     };
-    let mut check_crc = FakeCrc32::new();
+    let mut check_crc = Crc32::new();
     storage
         .push(&Elem::Start { seq_no })
         .await
-        .map_err(|_| LoadStoreError::FlashWrite)?;
+        .map_err(LoadStoreError::FlashWrite)?;
     let mut ctr = 0;
 
     for hdrptr in iter {
         // Attempt to serialize: split off first item to reserve space for element
         // discriminant
-        let (_first, rest) = buf.split_first_mut().ok_or(LoadStoreError::FlashWrite)?;
+        let (_first, rest) = buf.split_first_mut().ok_or(Error::Serialization)?;
 
         let res = serialize_node(hdrptr.ptr, rest);
 
@@ -960,7 +924,7 @@ async fn write_to_flash<S: NdlDataStorage>(
         storage
             .push(&Elem::Data { data: serdat })
             .await
-            .map_err(|_| LoadStoreError::FlashWrite)?;
+            .map_err(LoadStoreError::FlashWrite)?;
         ctr += 1;
     }
     let crc = check_crc.finalize();
@@ -971,7 +935,7 @@ async fn write_to_flash<S: NdlDataStorage>(
             calc_crc: crc,
         })
         .await
-        .map_err(|_| LoadStoreError::FlashWrite)?;
+        .map_err(LoadStoreError::FlashWrite)?;
 
     Ok(WriteReport {
         seq: seq_no,

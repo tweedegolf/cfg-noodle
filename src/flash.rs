@@ -4,9 +4,8 @@
 //! and exposes async methods for queue-like operations on persistent storage.
 use core::ops::Deref;
 
-use embedded_storage_async::nor_flash::MultiwriteNorFlash;
+use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash};
 use sequential_storage::{
-    Error as SeqStorError,
     cache::CacheImpl,
     queue::{self, QueueIterator, QueueIteratorEntry},
 };
@@ -20,13 +19,61 @@ pub struct Flash<T: MultiwriteNorFlash, C: CacheImpl> {
     cache: C,
 }
 
+/// An iterator over a [`Flash`]
+pub struct FlashIter<'flash, T: MultiwriteNorFlash, C: CacheImpl> {
+    iter: QueueIterator<'flash, T, C>,
+}
+
+/// A single position in the flash queue iterator
+///
+/// This represents a well-decoded element, where `half` contains the decoded
+/// contents that correspond with `qit`.
+pub struct FlashNode<'flash, 'iter, 'buf, T: MultiwriteNorFlash, C: CacheImpl> {
+    half: HalfElem,
+    qit: QueueIteratorEntry<'flash, 'buf, 'iter, T, C>,
+}
+
+/// A partially decoded element
+///
+/// This is a helper type that mimics [`Elem`], so we don't need to re-decode it
+/// on every access.
+#[derive(Clone, Copy)]
+enum HalfElem {
+    Start { seq_no: u32 },
+    Data,
+    End { seq_no: u32, calc_crc: u32 },
+}
+
+// ---- impl Flash ----
+
+impl<T: MultiwriteNorFlash, C: CacheImpl> Flash<T, C> {
+    /// Creates a new Flash instance with the given flash device and address range.
+    ///
+    /// # Arguments
+    /// * `flash` - The MultiwriteNorFlash device to use for storage operations
+    /// * `range` - The address range within the flash device reserved for this storage
+    /// * `cache` - the cache to use with this flash access
+    pub fn new(flash: T, range: core::ops::Range<u32>, cache: C) -> Self {
+        Self {
+            flash,
+            range,
+            cache,
+        }
+    }
+
+    /// Returns a mutable reference to the underlying flash device.
+    pub fn flash(&mut self) -> &mut T {
+        &mut self.flash
+    }
+}
+
 impl<T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlDataStorage for Flash<T, C> {
     type Iter<'this>
         = FlashIter<'this, T, C>
     where
         Self: 'this;
 
-    type PushError = ();
+    type Error = sequential_storage::Error<<T as ErrorType>::Error>;
 
     async fn iter_elems<'this>(
         &'this mut self,
@@ -36,7 +83,7 @@ impl<T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlDataStorage for
         })
     }
 
-    async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::PushError> {
+    async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::Error> {
         // scratch buffer used if this is start/end
         let mut buf = [0u8; 9];
         let used = match data {
@@ -54,14 +101,20 @@ impl<T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlDataStorage for
                 buf.as_slice()
             }
         };
-        self.push(used).await.map_err(drop)
+
+        // Push data to the underlying queue
+        queue::push(
+            &mut self.flash,
+            self.range.clone(),
+            &mut self.cache,
+            used,
+            false,
+        )
+        .await
     }
 }
 
-/// .
-pub struct FlashIter<'flash, T: MultiwriteNorFlash, C: CacheImpl> {
-    iter: QueueIterator<'flash, T, C>,
-}
+// ---- impl FlashIter ----
 
 impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIter
     for FlashIter<'flash, T, C>
@@ -72,7 +125,7 @@ impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIte
         Self: 'this,
         Self: 'buf;
 
-    type Error = SeqStorError<T::Error>;
+    type Error = sequential_storage::Error<<T as ErrorType>::Error>;
 
     async fn next<'iter, 'buf>(
         &'iter mut self,
@@ -82,9 +135,14 @@ impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIte
         Self: 'buf,
         Self: 'iter,
     {
+        // Attempt to get the next item
         let nxt: Option<QueueIteratorEntry<'flash, 'buf, 'iter, T, C>> =
             self.iter.next(buf).await?;
+
+        // No data? all done.
         let Some(nxt) = nxt else { return Ok(None) };
+
+        // Can we decode this as an element?
         if let Some(elem) = HalfElem::from_bytes(&nxt) {
             Ok(Some(Some(FlashNode {
                 half: elem,
@@ -96,12 +154,28 @@ impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIte
     }
 }
 
-#[derive(Clone, Copy)]
-enum HalfElem {
-    Start { seq_no: u32 },
-    Data,
-    End { seq_no: u32, calc_crc: u32 },
+// ---- impl FlashIterNode ----
+
+impl<T: MultiwriteNorFlash, C: CacheImpl> NdlElemIterNode for FlashNode<'_, '_, '_, T, C> {
+    type Error = sequential_storage::Error<<T as ErrorType>::Error>;
+
+    fn data(&self) -> Elem<'_> {
+        match self.half {
+            HalfElem::Start { seq_no } => Elem::Start { seq_no },
+            HalfElem::Data => Elem::Data {
+                data: SerData::from_existing(self.qit.deref()),
+            },
+            HalfElem::End { seq_no, calc_crc } => Elem::End { seq_no, calc_crc },
+        }
+    }
+
+    async fn invalidate(self) -> Result<(), Self::Error> {
+        self.qit.pop().await?;
+        Ok(())
+    }
 }
+
+// ---- impl HalfElem ----
 
 impl HalfElem {
     fn from_bytes(data: &[u8]) -> Option<Self> {
@@ -142,89 +216,6 @@ impl HalfElem {
     }
 }
 
-/// A single position in the flash queue iterator
-pub struct FlashNode<'flash, 'iter, 'buf, T: MultiwriteNorFlash, C: CacheImpl> {
-    half: HalfElem,
-    qit: QueueIteratorEntry<'flash, 'buf, 'iter, T, C>,
-}
 
-impl<T: MultiwriteNorFlash, C: CacheImpl> NdlElemIterNode for FlashNode<'_, '_, '_, T, C> {
-    type InvalidateError = SeqStorError<T::Error>;
 
-    fn data(&self) -> Elem<'_> {
-        match self.half {
-            HalfElem::Start { seq_no } => Elem::Start { seq_no },
-            HalfElem::Data => Elem::Data {
-                data: SerData::from_existing(self.qit.deref()),
-            },
-            HalfElem::End { seq_no, calc_crc } => Elem::End { seq_no, calc_crc },
-        }
-    }
 
-    async fn invalidate(self) -> Result<(), Self::InvalidateError> {
-        self.qit.pop().await?;
-        Ok(())
-    }
-}
-
-impl<T: MultiwriteNorFlash, C: CacheImpl> Flash<T, C> {
-    /// Creates a new Flash instance with the given flash device and address range.
-    ///
-    /// # Arguments
-    /// * `flash` - The MultiwriteNorFlash device to use for storage operations
-    /// * `range` - The address range within the flash device reserved for this storage
-    pub fn new(flash: T, range: core::ops::Range<u32>, cache: C) -> Self {
-        Self {
-            flash,
-            range,
-            cache,
-        }
-    }
-
-    /// Returns a mutable reference to the underlying flash device.
-    pub fn flash(&mut self) -> &mut T {
-        &mut self.flash
-    }
-
-    /// Pushes data to the sequential storage queue.
-    pub async fn push(&mut self, data: &[u8]) -> Result<(), SeqStorError<T::Error>> {
-        queue::push(
-            &mut self.flash,
-            self.range.clone(),
-            &mut self.cache,
-            data,
-            false,
-        )
-        .await
-    }
-
-    /// Creates an iterator over the sequential storage queue.
-    pub async fn iter(&mut self) -> Result<QueueIterator<'_, T, C>, SeqStorError<T::Error>> {
-        queue::iter(&mut self.flash, self.range.clone(), &mut self.cache).await
-    }
-
-    /// Pops data from the sequential storage queue.
-    pub async fn pop<'a>(
-        &mut self,
-        buf: &'a mut [u8],
-    ) -> Result<Option<&'a mut [u8]>, SeqStorError<T::Error>> {
-        let Flash {
-            flash,
-            range,
-            cache,
-        } = self;
-        queue::pop(flash, range.clone(), cache, buf).await
-    }
-    /// Peeks at data from the sequential storage queue.
-    pub async fn peek<'a>(
-        &mut self,
-        buf: &'a mut [u8],
-    ) -> Result<Option<&'a mut [u8]>, SeqStorError<T::Error>> {
-        let Flash {
-            flash,
-            range,
-            cache,
-        } = self;
-        queue::peek(flash, range.clone(), cache, buf).await
-    }
-}
