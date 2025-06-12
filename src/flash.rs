@@ -163,7 +163,7 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> NdlElemIterNode for FlashNode<'_, '_, 
         match self.half {
             HalfElem::Start { seq_no } => Elem::Start { seq_no },
             HalfElem::Data => Elem::Data {
-                data: SerData::from_existing(self.qit.deref()),
+                data: SerData::from_existing(self.qit.deref()).unwrap(),
             },
             HalfElem::End { seq_no, calc_crc } => Elem::End { seq_no, calc_crc },
         }

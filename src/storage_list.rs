@@ -563,7 +563,8 @@ impl StorageListInner {
                 used,
                 used.as_ptr() as usize
             );
-            let serdat = SerData::new(used);
+            let serdat =
+                SerData::new(used).ok_or(LoadStoreError::AppError(Error::Serialization))?;
             check_crc.update(serdat.key_val());
             // Try writing to flash
             storage

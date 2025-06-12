@@ -265,7 +265,7 @@ impl<'a> NdlElemIterNode for TestStorageItemNode<'a> {
         match &self.item.elem {
             TestElem::Start { seq_no } => Elem::Start { seq_no: *seq_no },
             TestElem::Data { data } => Elem::Data {
-                data: SerData::from_existing(data),
+                data: SerData::from_existing(data).unwrap(),
             },
             TestElem::End { seq_no, calc_crc } => Elem::End {
                 seq_no: *seq_no,

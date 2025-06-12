@@ -84,25 +84,31 @@ impl<'a> SerData<'a> {
     ///
     /// `data[0]` MUST be the header position, with key+val starting
     /// at `data[1]`. The header will be overwritten with the data discriminant
-    pub fn new(data: &'a mut [u8]) -> Self {
-        if let Some(f) = data.first_mut() {
-            *f = consts::ELEM_DATA;
-        }
-        Self { hdr_key_val: data }
+    ///
+    /// Returns None if the slice is empty.
+    pub fn new(data: &'a mut [u8]) -> Option<Self> {
+        let f = data.first_mut()?;
+        *f = consts::ELEM_DATA;
+
+        Some(Self { hdr_key_val: data })
     }
 
     /// Create a Serialized Data Element from an existing slice. The
     /// discriminant will NOT be written.
-    pub fn from_existing(data: &'a [u8]) -> Self {
-        Self { hdr_key_val: data }
+    ///
+    /// Returns None if the slice is empty.
+    pub fn from_existing(data: &'a [u8]) -> Option<Self> {
+        if data.is_empty() {
+            None
+        } else {
+            Some(Self { hdr_key_val: data })
+        }
     }
 
     /// Obtain the header
-    ///
-    /// If this was created with an empty slice, an invalid header will be returned
     pub fn hdr(&self) -> u8 {
-        // todo: panic?
-        self.hdr_key_val.first().copied().unwrap_or(255)
+        // SAFETY: We checked the slice is not empty
+        unsafe { *self.hdr_key_val.get_unchecked(0) }
     }
 
     /// Get the key+val portion of the SerData
