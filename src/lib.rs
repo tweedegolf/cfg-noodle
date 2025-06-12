@@ -6,6 +6,10 @@ pub mod error;
 pub mod flash;
 pub mod intrusive;
 
+#[cfg(any(test, feature = "std"))]
+#[doc(hidden)]
+pub mod test_utils;
+
 #[allow(unused)]
 pub(crate) mod logging {
     #[cfg(feature = "std")]
