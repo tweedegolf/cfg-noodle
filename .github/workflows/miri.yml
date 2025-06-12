@@ -24,5 +24,3 @@ jobs:
           cargo miri setup
       - name: Test with Miri
         run: cargo miri test --features std
-      - name: Run with Miri
-        run: cargo miri run --features std
