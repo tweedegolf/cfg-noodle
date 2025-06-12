@@ -471,14 +471,7 @@ impl StorageListInner {
                 let mut hdrptr: NonNull<NodeHeader> = node_header;
                 let nodeptr: NonNull<Node<()>> = hdrptr.cast();
 
-                // Note: We MUST have destroyed `node` at this point, so we don't have aliasing
-                // references of both the Node and the NodeHeader. Pointers are fine!
-                //
-                // Pass the `counter_is_some` as the `drop_old` flag because if the counter has been
-                // populated, we must have read that node from flash once already and need to drop
-                // the old value of `node.t`.
-                //
-                // TODO @James: Counter used here to indicate that the old `node.t` needs to be dropped.
+                // Call the deserialization function
                 let res = (vtable.deserialize)(nodeptr, kvpair.body);
 
                 // SAFETY: We can re-magic a reference to the header, because the NonNull<Node<()>>

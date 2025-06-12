@@ -9,9 +9,6 @@ pub enum Error {
     Deserialization,
     /// Serializing a node into the buffer failed
     Serialization,
-    /// Old version of the node was found. Returned when the node does not have the latest
-    /// counter value.
-    OldData,
     /// The key hash already exists in the list
     DuplicateKey,
     /// Recoverable error to tell the caller that the list needs reading first.
