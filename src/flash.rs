@@ -29,7 +29,7 @@ pub struct FlashIter<'flash, T: MultiwriteNorFlash, C: CacheImpl> {
 /// This represents a well-decoded element, where `half` contains the decoded
 /// contents that correspond with `qit`.
 pub struct FlashNode<'flash, 'iter, 'buf, T: MultiwriteNorFlash, C: CacheImpl> {
-    half: HalfElem,
+    half: Option<HalfElem>,
     qit: QueueIteratorEntry<'flash, 'buf, 'iter, T, C>,
 }
 
@@ -130,7 +130,7 @@ impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIte
     async fn next<'iter, 'buf>(
         &'iter mut self,
         buf: &'buf mut [u8],
-    ) -> Result<Option<Option<Self::Item<'iter, 'buf>>>, Self::Error>
+    ) -> Result<Option<Self::Item<'iter, 'buf>>, Self::Error>
     where
         Self: 'buf,
         Self: 'iter,
@@ -142,15 +142,12 @@ impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIte
         // No data? all done.
         let Some(nxt) = nxt else { return Ok(None) };
 
-        // Can we decode this as an element?
-        if let Some(elem) = HalfElem::from_bytes(&nxt) {
-            Ok(Some(Some(FlashNode {
-                half: elem,
-                qit: nxt,
-            })))
-        } else {
-            Ok(Some(None))
-        }
+        let flno = FlashNode {
+            half: HalfElem::from_bytes(&nxt),
+            qit: nxt,
+        };
+
+        Ok(Some(flno))
     }
 }
 
@@ -159,14 +156,15 @@ impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIte
 impl<T: MultiwriteNorFlash, C: CacheImpl> NdlElemIterNode for FlashNode<'_, '_, '_, T, C> {
     type Error = sequential_storage::Error<<T as ErrorType>::Error>;
 
-    fn data(&self) -> Elem<'_> {
-        match self.half {
+    fn data(&self) -> Option<Elem<'_>> {
+        let half = self.half.as_ref()?;
+        Some(match *half {
             HalfElem::Start { seq_no } => Elem::Start { seq_no },
             HalfElem::Data => Elem::Data {
                 data: SerData::from_existing(self.qit.deref()).unwrap(),
             },
             HalfElem::End { seq_no, calc_crc } => Elem::End { seq_no, calc_crc },
-        }
+        })
     }
 
     async fn invalidate(self) -> Result<(), Self::Error> {
