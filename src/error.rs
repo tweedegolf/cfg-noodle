@@ -12,7 +12,15 @@ pub enum Error {
     /// The key hash already exists in the list
     DuplicateKey,
     /// Recoverable error to tell the caller that the list needs reading first.
-    NeedsRead,
+    NeedsFirstRead,
+    /// Recoverable error to tell the caller that the list needs to process garbage
+    /// collection before doing writes. In some cases, this might not be necessary,
+    /// but for now we force it after the first read and after every write to avoid
+    /// running out of space.
+    ///
+    /// In the future, we could only require this if we hit the end of the list when
+    /// actually performing a write.
+    NeedsGarbageCollect,
     /// Node is in a state that is invalid at the particular point of operation.
     /// Contains a tuple of the node key hash and the state that was deemed invalid.
     InvalidState(&'static str, State),
@@ -24,8 +32,6 @@ pub enum Error {
 ///
 /// Sometimes specific to the flash implementation.
 pub enum LoadStoreError<T> {
-    /// Needs Initial read processed
-    NeedsFirstRead,
     /// Writing to flash has failed. Contains the error returned by the storage impl.
     FlashWrite(T),
     /// Reading from flash has failed. Contains the error returned by the storage impl.

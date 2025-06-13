@@ -111,6 +111,7 @@ impl TestStorage {
     /// Print all items contained by this TestStorage
     pub fn print_items(&self) -> String {
         let mut out = String::new();
+        out.push('\n');
         for i in self.items.iter() {
             writeln!(&mut out, "- (ctr: {}): {:?}", i.ctr, i.elem).unwrap();
         }

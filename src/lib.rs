@@ -232,7 +232,7 @@ pub trait NdlElemIterNode {
 }
 
 /// Result used by [`step`] and [`skip_to_seq`] macros
-pub type StepResult<T, E> = Result<T, StepErr<E>>;
+pub type StepResult<T, E> = Result<(T, usize), StepErr<E>>;
 
 /// An error occurred while calling [`step`] or [`skip_to_seq`] macros
 #[derive(Debug, PartialEq)]
@@ -246,14 +246,18 @@ pub enum StepErr<E> {
 /// Advance the iterator one step
 ///
 /// Skips nodes that do not properly decode as an Elem.
+///
+/// On success, it returns the number of items consumed, including the returned item
 #[macro_export]
 macro_rules! step {
-    ($iter:ident, $buf:ident) => {
+    ($iter:ident, $buf:ident) => {{
+        let mut ctr = 0;
         loop {
             let res = $iter.next($buf).await;
+            ctr += 1;
             match res {
                 // Got at item
-                Ok(Some(Some(item))) => break StepResult::Ok(item),
+                Ok(Some(Some(item))) => break StepResult::Ok((item, ctr)),
                 // Got a bad item, continue
                 Ok(Some(None)) => {}
                 // end of list
@@ -262,31 +266,39 @@ macro_rules! step {
                 Err(e) => break Err($crate::StepErr::FlashError(e)),
             }
         }
-    };
+    }};
 }
 
 /// Fast-forwards the iterator to the Elem::Start item with the given seq_no.
 /// Returns an error if not found. If Err is returned, the iterator
 /// is exhausted. If Ok is returned, `Elem::Start { seq_no }` has been consumed.
+///
+/// On success, it returns the number of items consumed, including the Start item
 #[macro_export]
 macro_rules! skip_to_seq {
     ($iter:ident, $buf:ident, $seq:ident) => {
-        loop {
-            let res = $iter.next($buf).await;
-            let item = match res {
-                // Got at item
-                Ok(Some(Some(item))) => item,
-                // Got a bad item, continue
-                Ok(Some(None)) => continue,
-                // end of list
-                Ok(None) => break Err($crate::StepErr::EndOfList),
-                // flash error
-                Err(e) => break Err($crate::StepErr::FlashError(e)),
-            };
-            if !matches!(item.data(), Elem::Start { seq_no } if seq_no == $seq) {
-                continue;
+        {
+            let mut ctr = 0;
+            loop {
+                let res = $iter.next($buf).await;
+                ctr += 1;
+                let item = match res {
+                    // Got at item
+                    Ok(Some(Some(item))) => item,
+                    // Got a bad item, continue
+                    Ok(Some(None)) => {
+                        continue;
+                    },
+                    // end of list
+                    Ok(None) => break Err($crate::StepErr::EndOfList),
+                    // flash error
+                    Err(e) => break Err($crate::StepErr::FlashError(e)),
+                };
+                if !matches!(item.data(), Elem::Start { seq_no } if seq_no == $seq) {
+                    continue;
+                }
+                break StepResult::Ok(((), ctr));
             }
-            break StepResult::Ok(());
         }
     };
 }
