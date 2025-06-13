@@ -52,7 +52,7 @@ pub struct TestStorageItemNode<'a> {
 #[derive(Clone, PartialEq, Debug)]
 pub struct TestItem {
     pub ctr: u64,
-    pub elem: TestElem,
+    pub elem: Option<TestElem>,
 }
 
 /// The test owned/heapful version of [`Elem`].
@@ -130,7 +130,7 @@ impl TestStorage {
         let ctr = self.next_ctr();
         self.items.push(TestItem {
             ctr,
-            elem: TestElem::Start { seq_no },
+            elem: Some(TestElem::Start { seq_no }),
         });
         RecordWriter {
             seq: seq_no,
@@ -178,7 +178,7 @@ impl TestStorage {
         }
         self.items.push(TestItem {
             ctr,
-            elem: TestElem::Data { data: buffer },
+            elem: Some(TestElem::Data { data: buffer }),
         });
     }
 
@@ -193,7 +193,7 @@ impl TestStorage {
         let ctr = self.next_ctr();
         self.items.push(TestItem {
             ctr,
-            elem: TestElem::End { seq_no, calc_crc },
+            elem: Some(TestElem::End { seq_no, calc_crc }),
         });
     }
 }
@@ -221,7 +221,10 @@ impl NdlDataStorage for TestStorage {
         info!("Pushing {data:?}");
         let ctr = self.next_ctr();
         let item: TestElem = data.into();
-        self.items.push(TestItem { ctr, elem: item });
+        self.items.push(TestItem {
+            ctr,
+            elem: Some(item),
+        });
         Ok(())
     }
 }
@@ -240,17 +243,17 @@ impl<'a> NdlElemIter for TestStorageIter<'a> {
     async fn next<'iter, 'buf>(
         &'iter mut self,
         _buf: &'buf mut [u8],
-    ) -> Result<Option<Option<Self::Item<'iter, 'buf>>>, Self::Error>
+    ) -> Result<Option<Self::Item<'iter, 'buf>>, Self::Error>
     where
         Self: 'buf,
         Self: 'iter,
     {
         if let Some(item) = self.remain_items.pop_front() {
             debug!("Popping {item:?}");
-            Ok(Some(Some(TestStorageItemNode {
+            Ok(Some(TestStorageItemNode {
                 item,
                 sto: self.sto,
-            })))
+            }))
         } else {
             Ok(None)
         }
@@ -262,8 +265,9 @@ impl<'a> NdlElemIter for TestStorageIter<'a> {
 impl<'a> NdlElemIterNode for TestStorageItemNode<'a> {
     type Error = ();
 
-    fn data(&self) -> Elem<'_> {
-        match &self.item.elem {
+    fn data(&self) -> Option<Elem<'_>> {
+        let elem = self.item.elem.as_ref()?;
+        Some(match elem {
             TestElem::Start { seq_no } => Elem::Start { seq_no: *seq_no },
             TestElem::Data { data } => Elem::Data {
                 data: SerData::from_existing(data).unwrap(),
@@ -272,7 +276,7 @@ impl<'a> NdlElemIterNode for TestStorageItemNode<'a> {
                 seq_no: *seq_no,
                 calc_crc: *calc_crc,
             },
-        }
+        })
     }
 
     async fn invalidate(self) -> Result<(), Self::Error> {

@@ -199,7 +199,7 @@ pub trait NdlElemIter {
     async fn next<'iter, 'buf>(
         &'iter mut self,
         buf: &'buf mut [u8],
-    ) -> Result<Option<Option<Self::Item<'iter, 'buf>>>, Self::Error>
+    ) -> Result<Option<Self::Item<'iter, 'buf>>, Self::Error>
     where
         Self: 'buf,
         Self: 'iter;
@@ -214,7 +214,7 @@ pub trait NdlElemIterNode {
     ///
     /// Note: this is infallible. Errors in encoding should be detected when calling
     /// `NdlElemIter::next()`, and elements with malformed data should not be yielded.
-    fn data(&self) -> Elem<'_>;
+    fn data(&self) -> Option<Elem<'_>>;
 
     /// Invalidate the element.
     ///
@@ -232,7 +232,7 @@ pub trait NdlElemIterNode {
 }
 
 /// Result used by [`step`] and [`skip_to_seq`] macros
-pub type StepResult<T, E> = Result<(T, usize), StepErr<E>>;
+pub type StepResult<T, E> = Result<T, StepErr<E>>;
 
 /// An error occurred while calling [`step`] or [`skip_to_seq`] macros
 #[derive(Debug, PartialEq)]
@@ -244,22 +244,14 @@ pub enum StepErr<E> {
 }
 
 /// Advance the iterator one step
-///
-/// Skips nodes that do not properly decode as an Elem.
-///
-/// On success, it returns the number of items consumed, including the returned item
 #[macro_export]
 macro_rules! step {
     ($iter:ident, $buf:ident) => {{
-        let mut ctr = 0;
         loop {
             let res = $iter.next($buf).await;
-            ctr += 1;
             match res {
-                // Got at item
-                Ok(Some(Some(item))) => break StepResult::Ok((item, ctr)),
-                // Got a bad item, continue
-                Ok(Some(None)) => {}
+                // Got an item (good or bad)
+                Ok(Some(item)) => break StepResult::Ok(item),
                 // end of list
                 Ok(None) => break Err($crate::StepErr::EndOfList),
                 // flash error
@@ -283,18 +275,14 @@ macro_rules! skip_to_seq {
                 let res = $iter.next($buf).await;
                 ctr += 1;
                 let item = match res {
-                    // Got at item
-                    Ok(Some(Some(item))) => item,
-                    // Got a bad item, continue
-                    Ok(Some(None)) => {
-                        continue;
-                    },
+                    // Got an item
+                    Ok(Some(item)) => item,
                     // end of list
                     Ok(None) => break Err($crate::StepErr::EndOfList),
                     // flash error
                     Err(e) => break Err($crate::StepErr::FlashError(e)),
                 };
-                if !matches!(item.data(), Elem::Start { seq_no } if seq_no == $seq) {
+                if !matches!(item.data(), Some(Elem::Start { seq_no }) if seq_no == $seq) {
                     continue;
                 }
                 break StepResult::Ok(((), ctr));

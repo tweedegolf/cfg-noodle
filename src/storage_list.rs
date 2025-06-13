@@ -14,7 +14,7 @@ use crate::{
     storage_node::{Node, NodeHeader, State},
 };
 use cordyceps::{List, list::IterRaw};
-use core::{num::NonZeroU32, ops::RangeInclusive, ptr::NonNull};
+use core::{convert::identity, num::NonZeroU32, ops::RangeInclusive, ptr::NonNull};
 use maitake_sync::{Mutex, WaitQueue};
 use minicbor::{
     encode::write::{Cursor, EndOfSlice},
@@ -80,7 +80,7 @@ struct GoodWriteRecord {
     range: RangeInclusive<usize>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct SeqState {
     /// Next Sequence Number. Is None if we have not hydrated
     next_seq: Option<NonZeroU32>,
@@ -284,6 +284,57 @@ impl<R: ScopedRawMutex> StorageList<R> {
         Ok(())
     }
 
+    /// Process garbage collection
+    ///
+    /// Note: this process may take a while, but does NOT hold the mutex for the entire
+    /// time. However, attaches and writes will not be processed until after completion.
+    pub async fn process_garbage<S: NdlDataStorage>(
+        &'static self,
+        storage: &mut S,
+        buf: &mut [u8],
+    ) -> Result<(), LoadStoreError<S::Error>> {
+        // Take the mutex for a short time to copy out the current seq_state.
+        let cur_seq_state = {
+            let guard = self.inner.lock().await;
+            if !guard.seq_state.needs_gc {
+                debug!("No garbage collect needed, returning Ok");
+                return Ok(());
+            }
+            guard.seq_state.clone()
+        };
+
+        // TODO: ensure no good items are overlapping?
+        let mut ranges: [Option<RangeInclusive<usize>>; 3] = [const { None }; 3];
+        ranges
+            .iter_mut()
+            .zip(
+                cur_seq_state
+                    .last_three
+                    .iter()
+                    .map(|g| g.as_ref().map(|n| n.range.clone())),
+            )
+            .for_each(|(d, s)| {
+                *d = s;
+            });
+
+        let meta_contains = |n: usize| {
+            ranges
+                .iter()
+                .filter_map(Option::as_ref)
+                .any(|r| r.contains(&n))
+        };
+
+        let mut elems = storage
+            .iter_elems()
+            .await
+            .map_err(LoadStoreError::FlashRead)?;
+
+        let mut idx = 0;
+        loop {}
+
+        todo!()
+    }
+
     /// Returns a reference to the wait queue that signals when nodes need to be read from flash.
     /// This queue is woken when new nodes are attached and require data to be loaded.
     pub fn needs_read(&self) -> &WaitQueue {
@@ -352,36 +403,32 @@ impl StorageListInner {
         let mut ctr = 0;
 
         // Loop over all elements in the storage...
-        'outer: loop {
-            // Loop until we find a valid item. If we reach the end of the list
-            // or a read error, bail.
-            let (item, idx) = loop {
-                let res = iter.next(buf).await;
-                let this = ctr;
-                ctr += 1;
-                match res {
-                    // Got at item
-                    Ok(Some(Some(item))) => break (item, this),
-                    // Got a bad item, continue
-                    Ok(Some(None)) => {}
-                    // end of list
-                    Ok(None) => break 'outer,
-                    // flash error
-                    Err(e) => return Err(LoadStoreError::FlashRead(e)),
-                };
+        loop {
+            let item = match iter.next(buf).await {
+                Ok(Some(item)) => item,
+                // end of list
+                Ok(None) => break,
+                // flash error
+                Err(e) => return Err(LoadStoreError::FlashRead(e)),
             };
+            let idx = ctr;
+            ctr += 1;
 
             // What kind of data is this?
             match item.data() {
+                None => {
+                    // badly decoded data
+                    continue;
+                }
                 // A start node: discard any current state, and start reading this
                 // new node. If we had some other partial data, it is lost.
-                Elem::Start { seq_no } => {
+                Some(Elem::Start { seq_no }) => {
                     current = Some((seq_no, idx));
                     crc = Crc32::new();
                 }
                 // A data element: If we've seen a start, then CRC the data. Otherwise,
                 // just ignore it and keep going until we see a start.
-                Elem::Data { data } => {
+                Some(Elem::Data { data }) => {
                     if current.is_none() {
                         continue;
                     } else {
@@ -392,7 +439,7 @@ impl StorageListInner {
                 // far, and see if it matches what we expect. If it all checks out,
                 // record it as a good item. This doesn't matter what order we visit
                 // Write records, we'll just remember the top three.
-                Elem::End { seq_no, calc_crc } => {
+                Some(Elem::End { seq_no, calc_crc }) => {
                     let Some((seq, start_idx)) = current.take() else {
                         continue;
                     };
@@ -446,24 +493,21 @@ impl StorageListInner {
             Err(StepErr::FlashError(e)) => return Err(LoadStoreError::FlashRead(e)),
         };
 
-        'outer: loop {
-            let item = loop {
-                let res = queue_iter.next(buf).await;
-                match res {
-                    // Got at item
-                    Ok(Some(Some(item))) => break item,
-                    // Got a bad item, continue
-                    Ok(Some(None)) => {}
-                    // end of list
-                    Ok(None) => break 'outer,
-                    // flash error
-                    Err(e) => return Err(LoadStoreError::FlashRead(e)),
-                };
+        loop {
+            let res = queue_iter.next(buf).await;
+            let item = match res {
+                // Got an item
+                Ok(Some(item)) => item,
+                // end of list
+                Ok(None) => break,
+                // flash error
+                Err(e) => return Err(LoadStoreError::FlashRead(e)),
             };
 
             let data = match item.data() {
-                Elem::Start { .. } | Elem::End { .. } => break,
-                Elem::Data { data } => data,
+                None => continue,
+                Some(Elem::Start { .. }) | Some(Elem::End { .. }) => break,
+                Some(Elem::Data { data }) => data,
             };
 
             let Ok(kvpair) = extract(data.key_val()) else {
@@ -870,14 +914,14 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
     };
 
     let mut crc = Crc32::new();
-    let mut ctr = 0;
+    let mut data_ctr = 0;
     let mut ttl_ctr = start_pos;
     loop {
         let res = step!(queue_iter, buf);
-        let (item, cons) = match res {
-            Ok((i, cons)) => {
+        let item = match res {
+            Ok(i) => {
                 debug!("visiting {:?} in verify", i.data());
-                (i, cons)
+                i
             }
             Err(StepErr::EndOfList) => {
                 debug!("Surprising end of list");
@@ -885,24 +929,28 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
             }
             Err(StepErr::FlashError(e)) => return Err(LoadStoreError::FlashRead(e)),
         };
-        ttl_ctr += cons;
+        ttl_ctr += 1;
 
         let data = item.data();
         match data {
-            Elem::Start { .. } => {
+            None => {
+                debug!("Surprising invalid element");
+                return Err(LoadStoreError::WriteVerificationFailed);
+            }
+            Some(Elem::Start { .. }) => {
                 debug!("Surprising start of list");
                 return Err(LoadStoreError::WriteVerificationFailed);
             }
-            Elem::Data { data } => {
+            Some(Elem::Data { data }) => {
                 crc.update(data.key_val());
-                ctr += 1;
+                data_ctr += 1;
             }
-            Elem::End { seq_no, calc_crc } => {
+            Some(Elem::End { seq_no, calc_crc }) => {
                 let check_crc = crc.finalize();
                 let seq_chk = seq_no == rpt.seq;
                 let crc_chk1 = check_crc == rpt.crc;
                 let crc_chk2 = calc_crc == rpt.crc;
-                let ctr_chk = ctr == rpt.ct;
+                let ctr_chk = data_ctr == rpt.ct;
                 let good = seq_chk && crc_chk1 && crc_chk2 && ctr_chk;
                 debug!(
                     "check: {}, {}, {}, {} => {}",
