@@ -5,7 +5,7 @@
 use core::{fmt::Write as _, num::NonZeroU32};
 use std::{collections::VecDeque, sync::Arc};
 
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use maitake_sync::WaitQueue;
 use minicbor::encode::write::{Cursor, EndOfSlice};
 use mutex::ScopedRawMutex;
@@ -78,6 +78,7 @@ pub struct WorkerReport {
     pub flash: TestStorage,
     pub read_errs: usize,
     pub write_errs: usize,
+    pub garbo_errs: usize,
 }
 
 /// A more detailed simulation of the flash
@@ -280,6 +281,7 @@ impl<'a> NdlElemIterNode for TestStorageItemNode<'a> {
     }
 
     async fn invalidate(self) -> Result<(), Self::Error> {
+        warn!("Invalidating {:?}", self.item);
         let item_ctr = self.item.ctr;
         // todo: find + remove might be faster, but whatever, test code
         self.sto.items.retain(|i| i.ctr != item_ctr);
@@ -341,9 +343,11 @@ impl WorkerReport {
             flash: _,
             read_errs,
             write_errs,
+            garbo_errs,
         } = self;
         assert_eq!(*read_errs, 0);
         assert_eq!(*write_errs, 0);
+        assert_eq!(*garbo_errs, 0);
     }
 }
 
@@ -366,6 +370,7 @@ pub async fn worker_task_seq_sto<R: ScopedRawMutex + Sync>(
     mut flash: MockFlash,
 ) {
     let mut buf = [0u8; 4096];
+    let mut first_gc_done = false;
     loop {
         info!("worker_task waiting for needs_* signal");
         match embassy_futures::select::select(list.needs_read().wait(), list.needs_write().wait())
@@ -376,6 +381,13 @@ pub async fn worker_task_seq_sto<R: ScopedRawMutex + Sync>(
                 if let Err(e) = list.process_reads(&mut flash, &mut buf).await {
                     error!("Error in process_reads: {:?}", e);
                 }
+                if !first_gc_done {
+                    if let Err(e) = list.process_garbage(&mut flash, &mut buf).await {
+                        error!("Error in process_garbage: {:?}", e);
+                    } else {
+                        first_gc_done = false;
+                    }
+                }
             }
             embassy_futures::select::Either::Second(_) => {
                 info!("worker task got needs_write signal");
@@ -384,6 +396,10 @@ pub async fn worker_task_seq_sto<R: ScopedRawMutex + Sync>(
                 }
 
                 info!("Wrote to flash: {}", flash.flash().print_items().await);
+
+                if let Err(e) = list.process_garbage(&mut flash, &mut buf).await {
+                    error!("Error in process_garbage: {:?}", e);
+                }
             }
         }
     }
@@ -411,9 +427,11 @@ pub async fn worker_task_tst_sto_custom<R: ScopedRawMutex + Sync>(
 ) -> WorkerReport {
     let mut read_errs = 0;
     let mut write_errs = 0;
+    let mut garbo_errs = 0;
 
     let fut = async {
         let mut buf = [0u8; 4096];
+        let mut first_gc_done = false;
         loop {
             info!("worker_task waiting for needs_* signal");
             match embassy_futures::select::select(
@@ -428,6 +446,15 @@ pub async fn worker_task_tst_sto_custom<R: ScopedRawMutex + Sync>(
                         read_errs += 1;
                         error!("Error in process_reads: {:?}", e);
                     }
+
+                    if !first_gc_done {
+                        if let Err(e) = list.process_garbage(&mut flash, &mut buf).await {
+                            garbo_errs += 1;
+                            error!("Error in process_garbage: {:?}", e);
+                        } else {
+                            first_gc_done = true;
+                        }
+                    }
                 }
                 embassy_futures::select::Either::Second(_) => {
                     info!("worker task got needs_write signal");
@@ -437,6 +464,11 @@ pub async fn worker_task_tst_sto_custom<R: ScopedRawMutex + Sync>(
                     }
 
                     info!("Wrote to flash: {}", flash.print_items());
+
+                    if let Err(e) = list.process_garbage(&mut flash, &mut buf).await {
+                        garbo_errs += 1;
+                        error!("Error in process_garbage: {:?}", e);
+                    }
                 }
             }
         }
@@ -449,5 +481,6 @@ pub async fn worker_task_tst_sto_custom<R: ScopedRawMutex + Sync>(
         flash,
         read_errs,
         write_errs,
+        garbo_errs,
     }
 }

@@ -14,7 +14,7 @@ use crate::{
     storage_node::{Node, NodeHeader, State},
 };
 use cordyceps::{List, list::IterRaw};
-use core::{convert::identity, num::NonZeroU32, ops::RangeInclusive, ptr::NonNull};
+use core::{num::NonZeroU32, ops::RangeInclusive, ptr::NonNull};
 use maitake_sync::{Mutex, WaitQueue};
 use minicbor::{
     encode::write::{Cursor, EndOfSlice},
@@ -330,9 +330,32 @@ impl<R: ScopedRawMutex> StorageList<R> {
             .map_err(LoadStoreError::FlashRead)?;
 
         let mut idx = 0;
-        loop {}
+        loop {
+            let this_idx = idx;
+            let next = elems.next(buf).await.map_err(LoadStoreError::FlashRead)?;
+            let Some(next) = next else {
+                break;
+            };
+            idx += 1;
 
-        todo!()
+            // If it doesn't decode: yeet
+            // If it's not in a good range: yeet
+            if next.data().is_none() || !meta_contains(this_idx) {
+                next.invalidate()
+                    .await
+                    .map_err(LoadStoreError::FlashWrite)?;
+                continue;
+            }
+        }
+        drop(elems);
+
+        // todo: this is lazy, we could probably do offset math, instead do a full rescan for now
+        let mut inner = self.inner.lock().await;
+        inner.seq_state = Default::default();
+        inner.get_or_populate_latest(storage, buf).await?;
+        inner.seq_state.needs_gc = false;
+
+        Ok(())
     }
 
     /// Returns a reference to the wait queue that signals when nodes need to be read from flash.
@@ -389,8 +412,8 @@ impl StorageListInner {
         s: &mut S,
         buf: &mut [u8],
     ) -> Result<Option<NonZeroU32>, LoadStoreError<S::Error>> {
-        // If we've already hydrated, we know the highest number (or that there is none)
-        if self.seq_state.has_hydrated() {
+        // If we've already scanned, we know the highest number (or that there is none)
+        if self.seq_state.initial_scan_completed() {
             return Ok(self.seq_state.highest_seen());
         }
 
@@ -710,7 +733,7 @@ impl StorageListInner {
 impl SeqState {
     /// Have we hydrated from the external flash?
     #[inline]
-    fn has_hydrated(&self) -> bool {
+    fn initial_scan_completed(&self) -> bool {
         self.next_seq.is_some()
     }
 
