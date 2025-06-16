@@ -36,7 +36,14 @@ pub struct FlashNode<'flash, 'iter, 'buf, T: MultiwriteNorFlash, C: CacheImpl> {
 /// A partially decoded element
 ///
 /// This is a helper type that mimics [`Elem`], so we don't need to re-decode it
-/// on every access.
+/// on every access. HalfElem is called that because it's a "half parsed [`Elem`]"
+///
+/// If we parse out good start/end data, we just store that so we don't have to keep reloading it
+/// If it's a data elem, we just check that the discriminant is right, but we don't store it,
+/// we just remember that the slice of data that we have is a data slice, and we use that
+/// when we create the real [`Elem`].
+///
+/// This is a trick to not re-parse the raw data every time we call `.data()`.
 #[derive(Clone, Copy)]
 enum HalfElem {
     Start { seq_no: NonZeroU32 },
