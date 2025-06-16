@@ -74,24 +74,54 @@ pub(crate) struct StorageListInner {
     seq_state: SeqState,
 }
 
+/// The metadata of a verified "Write Record"
+///
+/// This records the existence of a valid Write Record, that had a well formed
+/// Start, Data (repeated), End sequence of elements, AND had a valid CRC.
+///
+/// This is used to remember both the sequence number and iterator-range of this
+/// valid WriteRecord, so we can cache that discovery.
 #[derive(Clone, Debug, PartialEq)]
 struct GoodWriteRecord {
+    /// The sequence number of the valid Write Record
     seq: NonZeroU32,
+    /// The range of storage iterator nodes that this Write Record resides in
     range: RangeInclusive<usize>,
 }
 
+/// The current cache state of the StorageList
+///
+/// This serves as a cache that is loaded on the initial scan of the external
+/// storage. It retains what our next sequence number should be, and what we consider
+/// the three most recent, valid, Write Records to be, and where they reside on the
+/// external flash.
+///
+/// This is populated when we perform the first `process_read`s, updated during
+/// during each successful `process_write`, and invalidated and re-calculated
+/// during each successful `process_garbage` call.
 #[derive(Default, Clone)]
 struct SeqState {
-    /// Next Sequence Number. Is None if we have not hydrated
+    /// Next Sequence Number. Is None if we have not performed the initial scan of the storage
     next_seq: Option<NonZeroU32>,
-    /// The last three valid sequence numbers, in sorted order
+    /// The three most recent, valid, Write Records (as sorted by their sequence numbers)
+    ///
+    /// We retain three for the purpose of garbage collection: we don't necessarily want to
+    /// invalidate ALL old records, in the off chance that our LATEST written record becomes
+    /// corrupt. In this case, we
     last_three: [Option<GoodWriteRecord>; 3],
+    /// Do we need to perform a garbage collection pass?
+    ///
+    /// This is set after each call to process_write, and
     needs_gc: bool,
 }
 
+/// Information regarding a successful Record Write
 struct WriteReport {
+    /// The sequence number used for writing the record
     seq: NonZeroU32,
+    /// The CRC of data contained in this record
     crc: u32,
+    /// The count of data items contained in this record
     ct: usize,
 }
 
@@ -574,7 +604,12 @@ impl StorageListInner {
                 // If we reached a malformed element, OR a new start, OR an end for the wrong
                 // sequence number, that is bad, because this is SUPPOSED to be a pre-validated
                 // write record. Something has gone very wrong.
-                None | Some(Elem::Start { .. }) | Some(Elem::End { .. }) => break,
+                None | Some(Elem::Start { .. }) | Some(Elem::End { .. }) => {
+                    warn!(
+                        "Reached an unexpected item when extracting a pre-verified Write Record!"
+                    );
+                    return Err(LoadStoreError::AppError(Error::InconsistentFlash));
+                }
             };
 
             let Ok(kvpair) = extract(data.key_val()) else {
@@ -986,8 +1021,8 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
     };
 
     let mut crc = Crc32::new();
-    let mut data_ctr = 0;
-    let mut ttl_ctr = start_pos;
+    let mut data_items_consumed_ctr = 0;
+    let mut total_items_seen_ctr = start_pos;
     loop {
         let res = step!(queue_iter, buf);
         let item = match res {
@@ -1001,7 +1036,7 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
             }
             Err(StepErr::FlashError(e)) => return Err(LoadStoreError::FlashRead(e)),
         };
-        ttl_ctr += 1;
+        total_items_seen_ctr += 1;
 
         let data = item.data();
         match data {
@@ -1015,21 +1050,21 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
             }
             Some(Elem::Data { data }) => {
                 crc.update(data.key_val());
-                data_ctr += 1;
+                data_items_consumed_ctr += 1;
             }
             Some(Elem::End { seq_no, calc_crc }) => {
                 let check_crc = crc.finalize();
                 let seq_chk = seq_no == rpt.seq;
                 let crc_chk1 = check_crc == rpt.crc;
                 let crc_chk2 = calc_crc == rpt.crc;
-                let ctr_chk = data_ctr == rpt.ct;
+                let ctr_chk = data_items_consumed_ctr == rpt.ct;
                 let good = seq_chk && crc_chk1 && crc_chk2 && ctr_chk;
                 debug!(
                     "check: {}, {}, {}, {} => {}",
                     seq_chk, crc_chk1, crc_chk2, ctr_chk, good
                 );
                 if good {
-                    return Ok(RangeInclusive::new(start_pos, ttl_ctr));
+                    return Ok(RangeInclusive::new(start_pos, total_items_seen_ctr));
                 } else {
                     return Err(LoadStoreError::WriteVerificationFailed);
                 }

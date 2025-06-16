@@ -161,7 +161,9 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> NdlElemIterNode for FlashNode<'_, '_, 
         Some(match *half {
             HalfElem::Start { seq_no } => Elem::Start { seq_no },
             HalfElem::Data => Elem::Data {
-                data: SerData::from_existing(self.qit.deref()).unwrap(),
+                // NOTE: IF HalfElem decoded successfully (and we have a Some(HalfElem)), then the
+                // SerData creation must ALWAYS be valid (they check the same header).
+                data: SerData::from_existing(self.qit.deref())?,
             },
             HalfElem::End { seq_no, calc_crc } => Elem::End { seq_no, calc_crc },
         })

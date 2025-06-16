@@ -17,9 +17,6 @@ pub enum Error {
     /// collection before doing writes. In some cases, this might not be necessary,
     /// but for now we force it after the first read and after every write to avoid
     /// running out of space.
-    ///
-    /// In the future, we could only require this if we hit the end of the list when
-    /// actually performing a write.
     NeedsGarbageCollect,
     /// Node is in a state that is invalid at the particular point of operation.
     /// Contains a tuple of the node key hash and the state that was deemed invalid.

@@ -181,16 +181,15 @@ pub trait NdlElemIter {
 
     /// Obtain the next item, in oldest-to-newest order.
     ///
-    /// For lifetime reason, this returns an awkward `Option<Option<Item>>`. Return
-    /// values mean:
+    /// The item returned MAY not be a valid Element, however access is still provided
+    /// to allow invalidation of this node when relevant.
     ///
-    /// - `Ok(Some(Some(item)))` - An item exists and was properly decoded as an `Elem`
-    /// - `Ok(Some(None))` - An item exists, BUT it cannot be properly decoded as an `Elem`
-    /// - `Ok(None)` - No item exists, but no flash error occurred
-    /// - `Err(e)` - An error occurred when decoding
+    /// This method returns:
     ///
-    /// This method should normally be used with the [`step!()`] and [`skip_to_seq!()`]
-    /// macros for convenience.
+    /// - `Ok(Some(item))`: There is an item here, but it may or may not contain a valid
+    ///   Elem when [`NdlElemIterNode::data()`] is called.
+    /// - `Ok(None)`: The end of the iterator has been reached successfully
+    /// - `Err(e)`: An error occurred while reading from the storage
     ///
     /// This method MUST be cancellation safe, however cancellation of this function
     /// may require re-creation of the iterator (e.g. the iterator may return a
@@ -212,8 +211,9 @@ pub trait NdlElemIterNode {
 
     /// Returns the present element.
     ///
-    /// Note: this is infallible. Errors in encoding should be detected when calling
-    /// `NdlElemIter::next()`, and elements with malformed data should not be yielded.
+    /// If the contained item is NOT a valid element, `None` is returned here.
+    /// This means that the storage did not consider this item invalid, however we
+    /// are unable to decode it as a valid [`Elem`].
     fn data(&self) -> Option<Elem<'_>>;
 
     /// Invalidate the element.
@@ -246,7 +246,7 @@ pub enum StepErr<E> {
 /// Advance the iterator one step
 #[macro_export]
 macro_rules! step {
-    ($iter:ident, $buf:ident) => {{
+    ($iter:ident, $buf:ident) => {
         loop {
             let res = $iter.next($buf).await;
             match res {
@@ -258,7 +258,7 @@ macro_rules! step {
                 Err(e) => break Err($crate::StepErr::FlashError(e)),
             }
         }
-    }};
+    };
 }
 
 /// Fast-forwards the iterator to the Elem::Start item with the given seq_no.
