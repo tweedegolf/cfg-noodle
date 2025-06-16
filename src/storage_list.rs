@@ -9,12 +9,12 @@
 use crate::{
     Crc32, Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData, StepErr, StepResult,
     error::{Error, LoadStoreError},
-    logging::{debug, info},
+    logging::{debug, info, warn},
     skip_to_seq, step,
     storage_node::{Node, NodeHeader, State},
 };
 use cordyceps::{List, list::IterRaw};
-use core::{num::NonZeroU32, ptr::NonNull};
+use core::{num::NonZeroU32, ops::RangeInclusive, ptr::NonNull};
 use maitake_sync::{Mutex, WaitQueue};
 use minicbor::{
     encode::write::{Cursor, EndOfSlice},
@@ -74,17 +74,54 @@ pub(crate) struct StorageListInner {
     seq_state: SeqState,
 }
 
-#[derive(Default)]
-struct SeqState {
-    /// Next Sequence Number. Is None if we have not hydrated
-    next_seq: Option<NonZeroU32>,
-    /// The last three valid sequence numbers, in sorted order
-    last_three: [Option<NonZeroU32>; 3],
+/// The metadata of a verified "Write Record"
+///
+/// This records the existence of a valid Write Record, that had a well formed
+/// Start, Data (repeated), End sequence of elements, AND had a valid CRC.
+///
+/// This is used to remember both the sequence number and iterator-range of this
+/// valid WriteRecord, so we can cache that discovery.
+#[derive(Clone, Debug, PartialEq)]
+struct GoodWriteRecord {
+    /// The sequence number of the valid Write Record
+    seq: NonZeroU32,
+    /// The range of storage iterator nodes that this Write Record resides in
+    range: RangeInclusive<usize>,
 }
 
+/// The current cache state of the StorageList
+///
+/// This serves as a cache that is loaded on the initial scan of the external
+/// storage. It retains what our next sequence number should be, and what we consider
+/// the three most recent, valid, Write Records to be, and where they reside on the
+/// external flash.
+///
+/// This is populated when we perform the first `process_read`s, updated during
+/// during each successful `process_write`, and invalidated and re-calculated
+/// during each successful `process_garbage` call.
+#[derive(Default, Clone)]
+struct SeqState {
+    /// Next Sequence Number. Is None if we have not performed the initial scan of the storage
+    next_seq: Option<NonZeroU32>,
+    /// The three most recent, valid, Write Records (as sorted by their sequence numbers)
+    ///
+    /// We retain three for the purpose of garbage collection: we don't necessarily want to
+    /// invalidate ALL old records, in the off chance that our LATEST written record becomes
+    /// corrupt. In this case, we
+    last_three: [Option<GoodWriteRecord>; 3],
+    /// Do we need to perform a garbage collection pass?
+    ///
+    /// This is set after each call to process_write, and
+    needs_gc: bool,
+}
+
+/// Information regarding a successful Record Write
 struct WriteReport {
+    /// The sequence number used for writing the record
     seq: NonZeroU32,
+    /// The CRC of data contained in this record
     crc: u32,
+    /// The count of data items contained in this record
     ct: usize,
 }
 
@@ -108,7 +145,8 @@ impl<R: ScopedRawMutex + ConstInit> StorageList<R> {
                     list: List::new(),
                     seq_state: SeqState {
                         next_seq: None,
-                        last_three: [None; 3],
+                        last_three: [const { None }; 3],
+                        needs_gc: false,
                     },
                 },
                 R::INIT,
@@ -228,8 +266,12 @@ impl<R: ScopedRawMutex> StorageList<R> {
         debug!("process_writes locked list");
 
         let Some(next_seq) = inner.seq_state.next_seq else {
-            return Err(LoadStoreError::NeedsFirstRead);
+            return Err(LoadStoreError::AppError(Error::NeedsFirstRead));
         };
+
+        if inner.seq_state.needs_gc {
+            return Err(LoadStoreError::AppError(Error::NeedsGarbageCollect));
+        }
 
         let needs_writing = inner.needs_writing()?;
 
@@ -247,8 +289,17 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
         // Read back all items in the list any verify the data on the flash
         // actually is what we wanted to write.
-        verify_list_in_flash(storage, rpt, buf).await?;
-        inner.seq_state.insert_good(next_seq);
+        debug!("Verifying seq {}", rpt.seq);
+        let range = verify_list_in_flash(storage, rpt, buf).await?;
+        debug!(
+            "Verified new write at pos {}..={}",
+            range.start(),
+            range.end()
+        );
+        inner.seq_state.insert_good(GoodWriteRecord {
+            seq: next_seq,
+            range,
+        });
 
         // The write must have succeeded. So mark all nodes accordingly.
         for hdrmut in inner.list.iter_mut() {
@@ -259,6 +310,88 @@ impl<R: ScopedRawMutex> StorageList<R> {
             // the node while we are modifying it.
             unsafe { hdrmut.set_state(State::ValidNoWriteNeeded) }
         }
+
+        Ok(())
+    }
+
+    /// Process garbage collection
+    ///
+    /// Note: this process may take a while, but does NOT hold the mutex for the entire
+    /// time. However, attaches and writes will not be processed until after completion.
+    ///
+    /// Although we don't HOLD the mutex for the entire time, by nature of the fact
+    /// that we have exclusive access to the storage medium, we can be fairly confident
+    /// it would not be possible to have some other function like `process_reads` or
+    /// `process_writes` called, even while we are not holding the mutex.
+    pub async fn process_garbage<S: NdlDataStorage>(
+        &'static self,
+        storage: &mut S,
+        buf: &mut [u8],
+    ) -> Result<(), LoadStoreError<S::Error>> {
+        // Take the mutex for a short time to copy out the current seq_state.
+        let cur_seq_state = {
+            let mut guard = self.inner.lock().await;
+            if !guard.seq_state.needs_gc {
+                debug!("No garbage collect needed, returning Ok");
+                return Ok(());
+            }
+
+            // Take the seq_state to inhibit any other reads/writes until
+            // we successfully complete, AND that a re-index will be required
+            // even if we early-return here
+            core::mem::take(&mut guard.seq_state)
+        };
+
+        // Helper function that iterates over each present GoodWriteRecord,
+        // and returns whether ANY of the good records contain this iterator-index
+        //
+        // TODO: ensure none of the good items are overlapping?
+        let last_three_contains = |n: usize| {
+            cur_seq_state
+                .last_three
+                .iter()
+                .filter_map(Option::as_ref)
+                .any(|r| r.range.contains(&n))
+        };
+
+        // Create an iterator
+        let mut elems = storage
+            .iter_elems()
+            .await
+            .map_err(LoadStoreError::FlashRead)?;
+
+        // Begin iterating, keeping track of our index in the iterator
+        let mut idx = 0;
+        loop {
+            let this_idx = idx;
+            let next = elems.next(buf).await.map_err(LoadStoreError::FlashRead)?;
+            let Some(next) = next else {
+                // End of list reached
+                break;
+            };
+            idx += 1;
+
+            // If it doesn't decode: yeet
+            // If it's not in a good range: yeet
+            if next.data().is_none() || !last_three_contains(this_idx) {
+                next.invalidate()
+                    .await
+                    .map_err(LoadStoreError::FlashWrite)?;
+                continue;
+            }
+        }
+        drop(elems);
+
+        // todo: It's possible we could avoid a full rescan, and just update the positions
+        // of the ranges based on what elements we have popped. That would require extensive
+        // testing to make sure we don't accidentally drift from the correct items, so instead
+        // we just reset the seq_state and re-perform the initial scan procedure.
+        //
+        // This will hold the mutex for a bit, but HOPEFULLY not for too long, as we only perform
+        // reads here, never writes or erases.
+        let mut inner = self.inner.lock().await;
+        inner.get_or_populate_latest(storage, buf).await?;
+        inner.seq_state.needs_gc = false;
 
         Ok(())
     }
@@ -309,16 +442,16 @@ impl StorageListInner {
     ///
     /// Returns:
     ///
-    /// - `Ok(Some(seq))` - This is the highest valid seen sequence number
+    /// - `Ok(Some(rpt))` - The most recent valid Write Record (as a [`GoodWriteRecord`])
     /// - `Ok(None)` - The storage contains NO valid write records
     /// - `Err(e)` - An error while accessing storage
     async fn get_or_populate_latest<S: NdlDataStorage>(
         &mut self,
         s: &mut S,
         buf: &mut [u8],
-    ) -> Result<Option<NonZeroU32>, LoadStoreError<S::Error>> {
-        // If we've already hydrated, we know the highest number (or that there is none)
-        if self.seq_state.has_hydrated() {
+    ) -> Result<Option<GoodWriteRecord>, LoadStoreError<S::Error>> {
+        // If we've already scanned, we know the highest number (or that there is none)
+        if self.seq_state.initial_scan_completed() {
             return Ok(self.seq_state.highest_seen());
         }
 
@@ -326,38 +459,39 @@ impl StorageListInner {
         //
         // Start by getting an iterator, and setting up some tracking state
         let mut iter = s.iter_elems().await.map_err(LoadStoreError::FlashRead)?;
-        let mut current: Option<NonZeroU32> = None;
+        let mut current: Option<(NonZeroU32, usize)> = None;
         let mut crc = Crc32::new();
+        let mut ctr = 0;
 
         // Loop over all elements in the storage...
-        'outer: loop {
-            // Loop until we find a valid item. If we reach the end of the list
-            // or a read error, bail.
-            let item = loop {
-                let res = iter.next(buf).await;
-                match res {
-                    // Got at item
-                    Ok(Some(Some(item))) => break item,
-                    // Got a bad item, continue
-                    Ok(Some(None)) => {}
-                    // end of list
-                    Ok(None) => break 'outer,
-                    // flash error
-                    Err(e) => return Err(LoadStoreError::FlashRead(e)),
-                };
+        loop {
+            let item = match iter.next(buf).await {
+                Ok(Some(item)) => item,
+                // end of list
+                Ok(None) => break,
+                // flash error
+                Err(e) => return Err(LoadStoreError::FlashRead(e)),
             };
+            let idx = ctr;
+            ctr += 1;
 
             // What kind of data is this?
             match item.data() {
+                None => {
+                    // badly decoded data - if we're in the middle of a maybe-good
+                    // record, invalidate it.
+                    current = None;
+                    continue;
+                }
                 // A start node: discard any current state, and start reading this
                 // new node. If we had some other partial data, it is lost.
-                Elem::Start { seq_no } => {
-                    current = Some(seq_no);
+                Some(Elem::Start { seq_no }) => {
+                    current = Some((seq_no, idx));
                     crc = Crc32::new();
                 }
                 // A data element: If we've seen a start, then CRC the data. Otherwise,
                 // just ignore it and keep going until we see a start.
-                Elem::Data { data } => {
+                Some(Elem::Data { data }) => {
                     if current.is_none() {
                         continue;
                     } else {
@@ -368,8 +502,8 @@ impl StorageListInner {
                 // far, and see if it matches what we expect. If it all checks out,
                 // record it as a good item. This doesn't matter what order we visit
                 // Write records, we'll just remember the top three.
-                Elem::End { seq_no, calc_crc } => {
-                    let Some(seq) = current.take() else {
+                Some(Elem::End { seq_no, calc_crc }) => {
+                    let Some((seq, start_idx)) = current.take() else {
                         continue;
                     };
                     let check_crc = crc.finalize();
@@ -381,7 +515,16 @@ impl StorageListInner {
                     if calc_crc != check_crc {
                         continue;
                     }
-                    self.seq_state.insert_good(seq_no);
+                    debug!(
+                        "Good found seq: {}, range {}..={}",
+                        u32::from(seq_no),
+                        start_idx,
+                        idx
+                    );
+                    self.seq_state.insert_good(GoodWriteRecord {
+                        seq: seq_no,
+                        range: start_idx..=idx,
+                    });
                 }
             }
         }
@@ -401,7 +544,7 @@ impl StorageListInner {
     /// data into it.
     async fn extract_all<S: NdlDataStorage>(
         &mut self,
-        latest: NonZeroU32,
+        latest: GoodWriteRecord,
         storage: &mut S,
         buf: &mut [u8],
     ) -> Result<(), LoadStoreError<S::Error>> {
@@ -410,35 +553,69 @@ impl StorageListInner {
             .await
             .map_err(LoadStoreError::FlashRead)?;
 
-        let skipres = skip_to_seq!(queue_iter, buf, latest);
-        match skipres {
-            Ok(()) => {}
-            // This state should be impossible: we already determined which seq_no to skip to
-            Err(StepErr::EndOfList) => unreachable!("external flash inconsistent"),
-            Err(StepErr::FlashError(e)) => return Err(LoadStoreError::FlashRead(e)),
-        };
+        // skip items before the start
+        //
+        // NOTE: We do NOT use `skip_to_seq`, because we have not necessarily
+        // performed gc yet, so there may be invalid starts that we could falsely
+        // match on here. Instead, ONLY trust the GoodWriteRecord indexes, and validate
+        // that we end up at the sequence number that we expect.
+        for _ in 0..*latest.range.start() {
+            match queue_iter.next(buf).await {
+                Ok(Some(_item)) => {}
+                Ok(None) => return Err(LoadStoreError::AppError(Error::InconsistentFlash)),
+                Err(e) => return Err(LoadStoreError::FlashRead(e)),
+            }
+        }
 
-        'outer: loop {
-            let item = loop {
-                let res = queue_iter.next(buf).await;
-                match res {
-                    // Got at item
-                    Ok(Some(Some(item))) => break item,
-                    // Got a bad item, continue
-                    Ok(Some(None)) => {}
-                    // end of list
-                    Ok(None) => break 'outer,
-                    // flash error
-                    Err(e) => return Err(LoadStoreError::FlashRead(e)),
-                };
+        // We need the next item to exist...
+        let Ok(Some(item)) = queue_iter.next(buf).await else {
+            return Err(LoadStoreError::AppError(Error::InconsistentFlash));
+        };
+        // ...and it needs to be a Start record...
+        let Some(Elem::Start { seq_no }) = item.data() else {
+            return Err(LoadStoreError::AppError(Error::InconsistentFlash));
+        };
+        // ...and it needs to be the start record we expect
+        if latest.seq != seq_no {
+            return Err(LoadStoreError::AppError(Error::InconsistentFlash));
+        }
+        drop(item);
+
+        // We should now be at the start of data elements.
+        loop {
+            let res = queue_iter.next(buf).await;
+            let item = match res {
+                // Got an item
+                Ok(Some(item)) => item,
+                // end of list - we did NOT hit a good End record!
+                Ok(None) => return Err(LoadStoreError::AppError(Error::InconsistentFlash)),
+                // flash error
+                Err(e) => return Err(LoadStoreError::FlashRead(e)),
             };
 
             let data = match item.data() {
-                Elem::Start { .. } | Elem::End { .. } => break,
-                Elem::Data { data } => data,
+                // Got data: great!
+                Some(Elem::Data { data }) => data,
+                // Got end: if it's the one we expect, great!
+                Some(Elem::End {
+                    seq_no,
+                    calc_crc: _,
+                }) if seq_no == latest.seq => {
+                    break;
+                }
+                // If we reached a malformed element, OR a new start, OR an end for the wrong
+                // sequence number, that is bad, because this is SUPPOSED to be a pre-validated
+                // write record. Something has gone very wrong.
+                None | Some(Elem::Start { .. }) | Some(Elem::End { .. }) => {
+                    warn!(
+                        "Reached an unexpected item when extracting a pre-verified Write Record!"
+                    );
+                    return Err(LoadStoreError::AppError(Error::InconsistentFlash));
+                }
             };
 
             let Ok(kvpair) = extract(data.key_val()) else {
+                warn!("Failed to extract data on extract_all!");
                 continue;
             };
 
@@ -447,7 +624,9 @@ impl StorageListInner {
                 kvpair.key, kvpair.body,
             );
             let Some(node_header) = self.find_node(kvpair.key) else {
-                // No node found?
+                // No node found? This could happen if the node was "late"
+                // to the initial hydration
+                debug!("Skipping key {:?}", kvpair.key);
                 continue;
             };
 
@@ -465,9 +644,7 @@ impl StorageListInner {
                 }
             };
             if let Some(vtable) = header_meta {
-                // Make a node pointer from a header pointer. This *consumes* the `Pin<&mut NodeHeader>`, meaning
-                // we are free to later re-invent other mutable ptrs/refs, AS LONG AS we still treat the data
-                // as pinned.
+                // Make a node pointer from a header pointer.
                 let mut hdrptr: NonNull<NodeHeader> = node_header;
                 let nodeptr: NonNull<Node<()>> = hdrptr.cast();
 
@@ -489,6 +666,10 @@ impl StorageListInner {
                     // actually be useful.
                     //
                     // todo: add logs? some kind of asserts?
+                    warn!(
+                        "Key {:?} exists and was wanted, but deserialization failed",
+                        kvpair.key
+                    );
                     hdrmut.state = State::NonResident;
                 }
             }
@@ -618,7 +799,7 @@ impl StorageListInner {
                 // `process_reads` hasn't run, yet. Should we return early here and trigger
                 // another process_reads?
                 State::Initial => {
-                    return Err(Error::NeedsRead);
+                    return Err(Error::NeedsFirstRead);
                 }
                 // A node may be NonResident if we are quickly doing a write after an
                 // initial read, but the storage node has not yet had a chance to
@@ -638,33 +819,44 @@ impl StorageListInner {
 impl SeqState {
     /// Have we hydrated from the external flash?
     #[inline]
-    fn has_hydrated(&self) -> bool {
+    fn initial_scan_completed(&self) -> bool {
         self.next_seq.is_some()
     }
 
     /// What is the highest sequence number we've seen in external flash, if any?
     #[inline]
-    fn highest_seen(&self) -> Option<NonZeroU32> {
-        self.last_three.last().copied()?
+    fn highest_seen(&self) -> Option<GoodWriteRecord> {
+        if let Some(last) = self.last_three.last() {
+            if let Some(seen) = last.as_ref() {
+                return Some(seen.clone());
+            }
+        }
+        None
     }
 
     /// Insert a known-good sequence number
-    fn insert_good(&mut self, seq: NonZeroU32) {
+    fn insert_good(&mut self, rec: GoodWriteRecord) {
         // todo: smarter than this
         let mut last_four = [
-            self.last_three[0],
-            self.last_three[1],
-            self.last_three[2],
-            Some(seq),
+            self.last_three[0].clone(),
+            self.last_three[1].clone(),
+            self.last_three[2].clone(),
+            Some(rec),
         ];
-        last_four.sort_unstable();
-        self.last_three.copy_from_slice(&last_four[1..]);
+        last_four.sort_unstable_by_key(|n| n.as_ref().map(|i| i.seq));
+        self.last_three.clone_from_slice(&last_four[1..]);
 
         // Should be impossible to not have something, just prevent panic branches
-        let next = self.last_three[2].unwrap_or(const { NonZeroU32::new(1).unwrap() });
+        let next = self.last_three[2]
+            .as_ref()
+            .map(|n| n.seq)
+            .unwrap_or(const { NonZeroU32::new(1).unwrap() });
         // Note: this could overflow, but it would take 2^32 writes, which is
         // likely much more than the durability of reasonable flash parts (100k cycles)
         self.next_seq = next.checked_add(1);
+        // Note: this is an overly cautious heuristic, if we are either doing
+        // first pass, OR if we just inserted something, assume we need GC.
+        self.needs_gc = true;
     }
 }
 
@@ -810,7 +1002,7 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
     storage: &mut S,
     rpt: WriteReport,
     buf: &mut [u8],
-) -> Result<(), LoadStoreError<S::Error>> {
+) -> Result<RangeInclusive<usize>, LoadStoreError<S::Error>> {
     // Create a `QueueIterator`
     let mut queue_iter = storage
         .iter_elems()
@@ -819,15 +1011,20 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
 
     let seq = rpt.seq;
     let skipres = skip_to_seq!(queue_iter, buf, seq);
-    match skipres {
-        Ok(()) => {}
+    let start_pos: usize = match skipres {
+        Ok(((), consumed)) => {
+            // The start item was consumed, so subtract one to get the position
+            // of the start item
+            consumed - 1
+        }
         // This state should be impossible: we already determined which seq_no to skip to
         Err(StepErr::EndOfList) => unreachable!("external flash inconsistent"),
         Err(StepErr::FlashError(e)) => return Err(LoadStoreError::FlashRead(e)),
     };
 
     let mut crc = Crc32::new();
-    let mut ctr = 0;
+    let mut data_items_consumed_ctr = 0;
+    let mut total_items_seen_ctr = start_pos;
     loop {
         let res = step!(queue_iter, buf);
         let item = match res {
@@ -841,30 +1038,35 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
             }
             Err(StepErr::FlashError(e)) => return Err(LoadStoreError::FlashRead(e)),
         };
+        total_items_seen_ctr += 1;
 
         let data = item.data();
         match data {
-            Elem::Start { .. } => {
+            None => {
+                debug!("Surprising invalid element");
+                return Err(LoadStoreError::WriteVerificationFailed);
+            }
+            Some(Elem::Start { .. }) => {
                 debug!("Surprising start of list");
                 return Err(LoadStoreError::WriteVerificationFailed);
             }
-            Elem::Data { data } => {
+            Some(Elem::Data { data }) => {
                 crc.update(data.key_val());
-                ctr += 1;
+                data_items_consumed_ctr += 1;
             }
-            Elem::End { seq_no, calc_crc } => {
+            Some(Elem::End { seq_no, calc_crc }) => {
                 let check_crc = crc.finalize();
                 let seq_chk = seq_no == rpt.seq;
                 let crc_chk1 = check_crc == rpt.crc;
                 let crc_chk2 = calc_crc == rpt.crc;
-                let ctr_chk = ctr == rpt.ct;
+                let ctr_chk = data_items_consumed_ctr == rpt.ct;
                 let good = seq_chk && crc_chk1 && crc_chk2 && ctr_chk;
                 debug!(
                     "check: {}, {}, {}, {} => {}",
                     seq_chk, crc_chk1, crc_chk2, ctr_chk, good
                 );
                 if good {
-                    return Ok(());
+                    return Ok(RangeInclusive::new(start_pos, total_items_seen_ctr));
                 } else {
                     return Err(LoadStoreError::WriteVerificationFailed);
                 }
@@ -897,10 +1099,18 @@ mod test {
 
     #[test]
     fn seq_sort() {
-        const ONE: NonZeroU32 = NonZeroU32::new(1).unwrap();
-        const TWO: NonZeroU32 = NonZeroU32::new(2).unwrap();
-        const THREE: NonZeroU32 = NonZeroU32::new(3).unwrap();
-        const FOUR: NonZeroU32 = NonZeroU32::new(4).unwrap();
+        const fn maker(seq: u32, range: RangeInclusive<usize>) -> GoodWriteRecord {
+            GoodWriteRecord {
+                seq: NonZeroU32::new(seq).unwrap(),
+                range,
+            }
+        }
+
+        const ONE: GoodWriteRecord = maker(1, 10..=15);
+        const TWO: GoodWriteRecord = maker(2, 20..=25);
+        const THREE: GoodWriteRecord = maker(3, 30..=35);
+        const FOUR: GoodWriteRecord = maker(4, 40..=45);
+
         let mut s = SeqState::default();
         assert_eq!(s.last_three, [None, None, None]);
         s.insert_good(ONE);

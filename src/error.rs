@@ -9,13 +9,20 @@ pub enum Error {
     Deserialization,
     /// Serializing a node into the buffer failed
     Serialization,
-    /// The key hash already exists in the list
+    /// The key already exists in the list
     DuplicateKey,
     /// Recoverable error to tell the caller that the list needs reading first.
-    NeedsRead,
+    NeedsFirstRead,
+    /// Recoverable error to tell the caller that the list needs to process garbage
+    /// collection before doing writes. In some cases, this might not be necessary,
+    /// but for now we force it after the first read and after every write to avoid
+    /// running out of space.
+    NeedsGarbageCollect,
     /// Node is in a state that is invalid at the particular point of operation.
-    /// Contains a tuple of the node key hash and the state that was deemed invalid.
+    /// Contains a tuple of the node key and the state that was deemed invalid.
     InvalidState(&'static str, State),
+    /// The flash returned inconsistent data between iterations. This is likely fatal.
+    InconsistentFlash,
 }
 
 #[derive(Debug)]
@@ -24,8 +31,6 @@ pub enum Error {
 ///
 /// Sometimes specific to the flash implementation.
 pub enum LoadStoreError<T> {
-    /// Needs Initial read processed
-    NeedsFirstRead,
     /// Writing to flash has failed. Contains the error returned by the storage impl.
     FlashWrite(T),
     /// Reading from flash has failed. Contains the error returned by the storage impl.

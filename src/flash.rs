@@ -29,14 +29,21 @@ pub struct FlashIter<'flash, T: MultiwriteNorFlash, C: CacheImpl> {
 /// This represents a well-decoded element, where `half` contains the decoded
 /// contents that correspond with `qit`.
 pub struct FlashNode<'flash, 'iter, 'buf, T: MultiwriteNorFlash, C: CacheImpl> {
-    half: HalfElem,
+    half: Option<HalfElem>,
     qit: QueueIteratorEntry<'flash, 'buf, 'iter, T, C>,
 }
 
 /// A partially decoded element
 ///
 /// This is a helper type that mimics [`Elem`], so we don't need to re-decode it
-/// on every access.
+/// on every access. HalfElem is called that because it's a "half parsed [`Elem`]"
+///
+/// If we parse out good start/end data, we just store that so we don't have to keep reloading it
+/// If it's a data elem, we just check that the discriminant is right, but we don't store it,
+/// we just remember that the slice of data that we have is a data slice, and we use that
+/// when we create the real [`Elem`].
+///
+/// This is a trick to not re-parse the raw data every time we call `.data()`.
 #[derive(Clone, Copy)]
 enum HalfElem {
     Start { seq_no: NonZeroU32 },
@@ -130,7 +137,7 @@ impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIte
     async fn next<'iter, 'buf>(
         &'iter mut self,
         buf: &'buf mut [u8],
-    ) -> Result<Option<Option<Self::Item<'iter, 'buf>>>, Self::Error>
+    ) -> Result<Option<Self::Item<'iter, 'buf>>, Self::Error>
     where
         Self: 'buf,
         Self: 'iter,
@@ -142,15 +149,12 @@ impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIte
         // No data? all done.
         let Some(nxt) = nxt else { return Ok(None) };
 
-        // Can we decode this as an element?
-        if let Some(elem) = HalfElem::from_bytes(&nxt) {
-            Ok(Some(Some(FlashNode {
-                half: elem,
-                qit: nxt,
-            })))
-        } else {
-            Ok(Some(None))
-        }
+        let flno = FlashNode {
+            half: HalfElem::from_bytes(&nxt),
+            qit: nxt,
+        };
+
+        Ok(Some(flno))
     }
 }
 
@@ -159,14 +163,17 @@ impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIte
 impl<T: MultiwriteNorFlash, C: CacheImpl> NdlElemIterNode for FlashNode<'_, '_, '_, T, C> {
     type Error = sequential_storage::Error<<T as ErrorType>::Error>;
 
-    fn data(&self) -> Elem<'_> {
-        match self.half {
+    fn data(&self) -> Option<Elem<'_>> {
+        let half = self.half.as_ref()?;
+        Some(match *half {
             HalfElem::Start { seq_no } => Elem::Start { seq_no },
             HalfElem::Data => Elem::Data {
-                data: SerData::from_existing(self.qit.deref()).unwrap(),
+                // NOTE: IF HalfElem decoded successfully (and we have a Some(HalfElem)), then the
+                // SerData creation must ALWAYS be valid (they check the same header).
+                data: SerData::from_existing(self.qit.deref())?,
             },
             HalfElem::End { seq_no, calc_crc } => Elem::End { seq_no, calc_crc },
-        }
+        })
     }
 
     async fn invalidate(self) -> Result<(), Self::Error> {
