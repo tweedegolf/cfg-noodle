@@ -342,11 +342,11 @@ impl<R: ScopedRawMutex> StorageList<R> {
             core::mem::take(&mut guard.seq_state)
         };
 
-        // Helper function that iterates over each present GoodRecord,
-        // and returns whether ANY of the good records contain this index
+        // Helper function that iterates over each present GoodWriteRecord,
+        // and returns whether ANY of the good records contain this iterator-index
         //
         // TODO: ensure none of the good items are overlapping?
-        let meta_contains = |n: usize| {
+        let last_three_contains = |n: usize| {
             cur_seq_state
                 .last_three
                 .iter()
@@ -373,7 +373,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
             // If it doesn't decode: yeet
             // If it's not in a good range: yeet
-            if next.data().is_none() || !meta_contains(this_idx) {
+            if next.data().is_none() || !last_three_contains(this_idx) {
                 next.invalidate()
                     .await
                     .map_err(LoadStoreError::FlashWrite)?;
