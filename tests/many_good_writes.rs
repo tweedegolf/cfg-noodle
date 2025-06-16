@@ -23,6 +23,8 @@ async fn many_good_writes() {
     local.run_until(many_good_writes_inner()).await;
 }
 
+/// This is a test that just does a bunch of nominally valid writes, to ensure we
+/// behave reasonably in the happy path case over time.
 async fn many_good_writes_inner() {
     static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
     static NODE_A: StorageListNode<SimpleConfig> = StorageListNode::new("test/config1");
@@ -43,6 +45,7 @@ async fn many_good_writes_inner() {
     // yield to ensure initial gc has a chance to run
     yield_now().await;
 
+    // One thousand write cycles later...
     for i in 1..1000 {
         node_a.write(&SimpleConfig { data: i }).await.unwrap();
         node_b.write(&SimpleConfig { data: i * 10 }).await.unwrap();
@@ -56,6 +59,10 @@ async fn many_good_writes_inner() {
     rpt.assert_no_errs();
 
     let contents = &rpt.flash.items;
+
+    // This is a basic snapshot that we end up with the last three valid write records
+    // as the only contents in flash. All older items have been continually invalidated,
+    // leaving us with a fairly straightforward set in flash.
     #[rustfmt::skip]
     let expected = &[
         // Oldest item, seq_no 997
@@ -145,6 +152,8 @@ async fn many_good_writes_inner() {
     let rpt = hdl.await.unwrap();
     rpt.assert_no_errs();
 
+    // Similar to our snapshot above, we want to see exactly one write record (997)
+    // get rotated out, with the newest one (1000) as the newest item.
     #[rustfmt::skip]
     let expected2 = &[
         // Oldest item, seq_no 998

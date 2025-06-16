@@ -122,6 +122,9 @@ async fn gc_handles_bad_contents_inner() {
     let rpt = hdl.await.unwrap();
     rpt.assert_no_errs();
 
+    // This is a general snapshot test that ensures that we end up with the two records
+    // that we expect, and none of the garbage, meaning that `process_garbage` has removed
+    // everything that is not reasonable data.
     #[rustfmt::skip]
     let expected: &[_] = &[
         TestItem { ctr: 10, elem: Some(TestElem::Start { seq_no: NonZeroU32::new(5).unwrap() }) },
