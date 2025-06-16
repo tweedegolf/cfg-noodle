@@ -25,7 +25,6 @@ defmt = ["dep:defmt", "sequential-storage/defmt-03"]
 arbitrary = ["dep:arbitrary"]
 
 [dependencies]
-const-fnv1a-hash = "1.1.0"
 embedded-storage-async = "0.4.1"
 minicbor = { version = "1.0.0", features = ["derive"] }
 sequential-storage = "4.0.1"
