@@ -385,7 +385,7 @@ pub async fn worker_task_seq_sto<R: ScopedRawMutex + Sync>(
                     if let Err(e) = list.process_garbage(&mut flash, &mut buf).await {
                         error!("Error in process_garbage: {:?}", e);
                     } else {
-                        first_gc_done = false;
+                        first_gc_done = true;
                     }
                 }
             }

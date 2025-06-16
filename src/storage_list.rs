@@ -475,7 +475,7 @@ impl StorageListInner {
                     if calc_crc != check_crc {
                         continue;
                     }
-                    debug!("Good found seq: {seq_no}, range {start_idx}..={idx}");
+                    debug!("Good found seq: {}, range {}..={}", u32::from(seq_no), start_idx, idx);
                     self.seq_state.insert_good(GoodWriteRecord {
                         seq: seq_no,
                         range: start_idx..=idx,
