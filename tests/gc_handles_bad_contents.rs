@@ -17,12 +17,16 @@ struct SimpleConfig {
 }
 
 #[test(tokio::test)]
-async fn bad_gc_stress() {
+async fn gc_handles_bad_contents() {
     let local = LocalSet::new();
-    local.run_until(bad_gc_stress_inner()).await;
+    local.run_until(gc_handles_bad_contents_inner()).await;
 }
 
-async fn bad_gc_stress_inner() {
+/// A test that fills the flash with lots of garbage among a few good records
+///
+/// We check that this is handled correctly, and the GC algo leaves us with only the
+/// valid Write Records we care about.
+async fn gc_handles_bad_contents_inner() {
     let mut flash = TestStorage::default();
 
     // add a bunch of bad elements

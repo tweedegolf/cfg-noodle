@@ -442,7 +442,7 @@ impl StorageListInner {
     ///
     /// Returns:
     ///
-    /// - `Ok(Some(seq))` - This is the highest valid seen sequence number
+    /// - `Ok(Some(rpt))` - The most recent valid Write Record (as a [`GoodWriteRecord`])
     /// - `Ok(None)` - The storage contains NO valid write records
     /// - `Err(e)` - An error while accessing storage
     async fn get_or_populate_latest<S: NdlDataStorage>(
