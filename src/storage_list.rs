@@ -288,6 +288,11 @@ impl<R: ScopedRawMutex> StorageList<R> {
     ///
     /// Note: this process may take a while, but does NOT hold the mutex for the entire
     /// time. However, attaches and writes will not be processed until after completion.
+    ///
+    /// Although we don't HOLD the mutex for the entire time, by nature of the fact
+    /// that we have exclusive access to the storage medium, we can be fairly confident
+    /// it would not be possible to have some other function like `process_reads` or
+    /// `process_writes` called, even while we are not holding the mutex.
     pub async fn process_garbage<S: NdlDataStorage>(
         &'static self,
         storage: &mut S,
@@ -295,45 +300,43 @@ impl<R: ScopedRawMutex> StorageList<R> {
     ) -> Result<(), LoadStoreError<S::Error>> {
         // Take the mutex for a short time to copy out the current seq_state.
         let cur_seq_state = {
-            let guard = self.inner.lock().await;
+            let mut guard = self.inner.lock().await;
             if !guard.seq_state.needs_gc {
                 debug!("No garbage collect needed, returning Ok");
                 return Ok(());
             }
-            guard.seq_state.clone()
+
+            // Take the seq_state to inhibit any other reads/writes until
+            // we successfully complete, AND that a re-index will be required
+            // even if we early-return here
+            core::mem::take(&mut guard.seq_state)
         };
 
-        // TODO: ensure no good items are overlapping?
-        let mut ranges: [Option<RangeInclusive<usize>>; 3] = [const { None }; 3];
-        ranges
-            .iter_mut()
-            .zip(
-                cur_seq_state
-                    .last_three
-                    .iter()
-                    .map(|g| g.as_ref().map(|n| n.range.clone())),
-            )
-            .for_each(|(d, s)| {
-                *d = s;
-            });
-
+        // Helper function that iterates over each present GoodRecord,
+        // and returns whether ANY of the good records contain this index
+        //
+        // TODO: ensure none of the good items are overlapping?
         let meta_contains = |n: usize| {
-            ranges
+            cur_seq_state
+                .last_three
                 .iter()
                 .filter_map(Option::as_ref)
-                .any(|r| r.contains(&n))
+                .any(|r| r.range.contains(&n))
         };
 
+        // Create an iterator
         let mut elems = storage
             .iter_elems()
             .await
             .map_err(LoadStoreError::FlashRead)?;
 
+        // Begin iterating, keeping track of our index in the iterator
         let mut idx = 0;
         loop {
             let this_idx = idx;
             let next = elems.next(buf).await.map_err(LoadStoreError::FlashRead)?;
             let Some(next) = next else {
+                // End of list reached
                 break;
             };
             idx += 1;
@@ -349,9 +352,14 @@ impl<R: ScopedRawMutex> StorageList<R> {
         }
         drop(elems);
 
-        // todo: this is lazy, we could probably do offset math, instead do a full rescan for now
+        // todo: It's possible we could avoid a full rescan, and just update the positions
+        // of the ranges based on what elements we have popped. That would require extensive
+        // testing to make sure we don't accidentally drift from the correct items, so instead
+        // we just reset the seq_state and re-perform the initial scan procedure.
+        //
+        // This will hold the mutex for a bit, but HOPEFULLY not for too long, as we only perform
+        // reads here, never writes or erases.
         let mut inner = self.inner.lock().await;
-        inner.seq_state = Default::default();
         inner.get_or_populate_latest(storage, buf).await?;
         inner.seq_state.needs_gc = false;
 
@@ -563,7 +571,7 @@ impl StorageListInner {
                 }) if seq_no == latest.seq => {
                     break;
                 }
-                // If we reached the end of the list, OR a new start, OR an end for the wrong
+                // If we reached a malformed element, OR a new start, OR an end for the wrong
                 // sequence number, that is bad, because this is SUPPOSED to be a pre-validated
                 // write record. Something has gone very wrong.
                 None | Some(Elem::Start { .. }) | Some(Elem::End { .. }) => break,
