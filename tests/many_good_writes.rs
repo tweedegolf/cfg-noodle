@@ -2,12 +2,12 @@
 
 use std::{num::NonZeroU32, sync::Arc};
 
+use cfg_noodle::test_utils::{TestElem, TestItem, worker_task_tst_sto, worker_task_tst_sto_custom};
 use cfg_noodle::{StorageList, StorageListNode};
 use maitake_sync::WaitQueue;
 use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
-use tokio::task::{yield_now, LocalSet};
-use cfg_noodle::test_utils::{worker_task_tst_sto, worker_task_tst_sto_custom, TestItem, TestElem};
+use tokio::task::{LocalSet, yield_now};
 
 #[derive(Debug, Default, Encode, Decode, Clone, CborLen, PartialEq)]
 struct SimpleConfig {
@@ -20,9 +20,7 @@ struct SimpleConfig {
 #[cfg(not(miri))]
 async fn many_good_writes() {
     let local = LocalSet::new();
-    local
-        .run_until(many_good_writes_inner())
-        .await;
+    local.run_until(many_good_writes_inner()).await;
 }
 
 async fn many_good_writes_inner() {
@@ -89,7 +87,11 @@ async fn many_good_writes_inner() {
     static NODE_C2: StorageListNode<SimpleConfig> = StorageListNode::new("test/config3");
 
     let stopper = Arc::new(WaitQueue::new());
-    let hdl = tokio::task::spawn_local(worker_task_tst_sto_custom(&LIST2, stopper.clone(), rpt.flash));
+    let hdl = tokio::task::spawn_local(worker_task_tst_sto_custom(
+        &LIST2,
+        stopper.clone(),
+        rpt.flash,
+    ));
 
     let node_a = NODE_A2.attach(&LIST2).await.unwrap();
     let node_b = NODE_B2.attach(&LIST2).await.unwrap();
@@ -116,7 +118,11 @@ async fn many_good_writes_inner() {
     static NODE_C3: StorageListNode<SimpleConfig> = StorageListNode::new("test/config3");
 
     let stopper = Arc::new(WaitQueue::new());
-    let hdl = tokio::task::spawn_local(worker_task_tst_sto_custom(&LIST3, stopper.clone(), rpt.flash));
+    let hdl = tokio::task::spawn_local(worker_task_tst_sto_custom(
+        &LIST3,
+        stopper.clone(),
+        rpt.flash,
+    ));
 
     let node_a = NODE_A3.attach(&LIST3).await.unwrap();
     let node_b = NODE_B3.attach(&LIST3).await.unwrap();

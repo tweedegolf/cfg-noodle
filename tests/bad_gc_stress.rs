@@ -2,13 +2,13 @@
 
 use std::{num::NonZeroU32, sync::Arc};
 
+use cfg_noodle::test_utils::{TestElem, TestItem, TestStorage, worker_task_tst_sto_custom};
 use cfg_noodle::{StorageList, StorageListNode};
 use maitake_sync::WaitQueue;
 use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
-use tokio::task::{yield_now, LocalSet};
-use cfg_noodle::test_utils::{TestStorage, worker_task_tst_sto_custom, TestElem, TestItem};
 use test_log::test;
+use tokio::task::{LocalSet, yield_now};
 
 #[derive(Debug, Default, Encode, Decode, Clone, CborLen, PartialEq)]
 struct SimpleConfig {
@@ -19,26 +19,16 @@ struct SimpleConfig {
 #[test(tokio::test)]
 async fn bad_gc_stress() {
     let local = LocalSet::new();
-    local
-        .run_until(bad_gc_stress_inner())
-        .await;
+    local.run_until(bad_gc_stress_inner()).await;
 }
 
 async fn bad_gc_stress_inner() {
     let mut flash = TestStorage::default();
 
     // add a bunch of bad elements
-    flash.add_data_elem::<SimpleConfig>(
-        "test/configx",
-        &SimpleConfig { data: 1 },
-        None,
-    );
+    flash.add_data_elem::<SimpleConfig>("test/configx", &SimpleConfig { data: 1 }, None);
     flash.start_write_record(NonZeroU32::new(4).unwrap());
-    flash.add_data_elem::<SimpleConfig>(
-        "test/configx",
-        &SimpleConfig { data: 2 },
-        None,
-    );
+    flash.add_data_elem::<SimpleConfig>("test/configx", &SimpleConfig { data: 2 }, None);
     flash.start_write_record(NonZeroU32::new(5).unwrap());
     flash.end_write_record(NonZeroU32::new(4).unwrap(), 1234);
 
@@ -50,7 +40,11 @@ async fn bad_gc_stress_inner() {
     wr.end_write_record();
     {
         let item = flash.items.last_mut().unwrap();
-        let TestElem::End { seq_no: _, calc_crc } = item.elem.as_mut().unwrap() else {
+        let TestElem::End {
+            seq_no: _,
+            calc_crc,
+        } = item.elem.as_mut().unwrap()
+        else {
             panic!()
         };
         *calc_crc = !*calc_crc;
@@ -71,24 +65,20 @@ async fn bad_gc_stress_inner() {
     wr.end_write_record();
     {
         let item = flash.items.last_mut().unwrap();
-        let TestElem::End { seq_no: _, calc_crc } = item.elem.as_mut().unwrap() else {
+        let TestElem::End {
+            seq_no: _,
+            calc_crc,
+        } = item.elem.as_mut().unwrap()
+        else {
             panic!()
         };
         *calc_crc = !*calc_crc;
     }
 
     // add a bunch of bad elements
-    flash.add_data_elem::<SimpleConfig>(
-        "test/configx",
-        &SimpleConfig { data: 1 },
-        None,
-    );
+    flash.add_data_elem::<SimpleConfig>("test/configx", &SimpleConfig { data: 1 }, None);
     flash.start_write_record(NonZeroU32::new(4).unwrap());
-    flash.add_data_elem::<SimpleConfig>(
-        "test/configx",
-        &SimpleConfig { data: 2 },
-        None,
-    );
+    flash.add_data_elem::<SimpleConfig>("test/configx", &SimpleConfig { data: 2 }, None);
     flash.start_write_record(NonZeroU32::new(5).unwrap());
     flash.end_write_record(NonZeroU32::new(4).unwrap(), 1234);
 
@@ -100,17 +90,9 @@ async fn bad_gc_stress_inner() {
     wr.end_write_record();
 
     // and finally a bunch more bad elements
-    flash.add_data_elem::<SimpleConfig>(
-        "test/configx",
-        &SimpleConfig { data: 1 },
-        None,
-    );
+    flash.add_data_elem::<SimpleConfig>("test/configx", &SimpleConfig { data: 1 }, None);
     flash.start_write_record(NonZeroU32::new(4).unwrap());
-    flash.add_data_elem::<SimpleConfig>(
-        "test/configx",
-        &SimpleConfig { data: 2 },
-        None,
-    );
+    flash.add_data_elem::<SimpleConfig>("test/configx", &SimpleConfig { data: 2 }, None);
     flash.start_write_record(NonZeroU32::new(5).unwrap());
     flash.end_write_record(NonZeroU32::new(4).unwrap(), 1234);
 

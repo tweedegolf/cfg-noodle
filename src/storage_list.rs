@@ -475,7 +475,12 @@ impl StorageListInner {
                     if calc_crc != check_crc {
                         continue;
                     }
-                    debug!("Good found seq: {}, range {}..={}", u32::from(seq_no), start_idx, idx);
+                    debug!(
+                        "Good found seq: {}, range {}..={}",
+                        u32::from(seq_no),
+                        start_idx,
+                        idx
+                    );
                     self.seq_state.insert_good(GoodWriteRecord {
                         seq: seq_no,
                         range: start_idx..=idx,
@@ -516,7 +521,7 @@ impl StorageListInner {
         // that we end up at the sequence number that we expect.
         for _ in 0..*latest.range.start() {
             match queue_iter.next(buf).await {
-                Ok(Some(_item)) => {},
+                Ok(Some(_item)) => {}
                 Ok(None) => return Err(LoadStoreError::AppError(Error::InconsistentFlash)),
                 Err(e) => return Err(LoadStoreError::FlashRead(e)),
             }
@@ -552,9 +557,12 @@ impl StorageListInner {
                 // Got data: great!
                 Some(Elem::Data { data }) => data,
                 // Got end: if it's the one we expect, great!
-                Some(Elem::End { seq_no, calc_crc: _ }) if seq_no == latest.seq => {
+                Some(Elem::End {
+                    seq_no,
+                    calc_crc: _,
+                }) if seq_no == latest.seq => {
                     break;
-                },
+                }
                 // If we reached the end of the list, OR a new start, OR an end for the wrong
                 // sequence number, that is bad, because this is SUPPOSED to be a pre-validated
                 // write record. Something has gone very wrong.
@@ -613,7 +621,10 @@ impl StorageListInner {
                     // actually be useful.
                     //
                     // todo: add logs? some kind of asserts?
-                    warn!("Key {:?} exists and was wanted, but deserialization failed", kvpair.key);
+                    warn!(
+                        "Key {:?} exists and was wanted, but deserialization failed",
+                        kvpair.key
+                    );
                     hdrmut.state = State::NonResident;
                 }
             }
