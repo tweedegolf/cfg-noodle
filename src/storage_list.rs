@@ -478,7 +478,9 @@ impl StorageListInner {
             // What kind of data is this?
             match item.data() {
                 None => {
-                    // badly decoded data
+                    // badly decoded data - if we're in the middle of a maybe-good
+                    // record, invalidate it.
+                    current = None;
                     continue;
                 }
                 // A start node: discard any current state, and start reading this
