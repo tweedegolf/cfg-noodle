@@ -7,7 +7,7 @@ use maitake_sync::WaitQueue;
 use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use tokio::task::{yield_now, LocalSet};
-use cfg_noodle::test_utils::{TestStorage, worker_task_tst_sto, worker_task_tst_sto_custom, TestItem, TestElem};
+use cfg_noodle::test_utils::{TestStorage, worker_task_tst_sto_custom, TestElem, TestItem};
 use test_log::test;
 
 #[derive(Debug, Default, Encode, Decode, Clone, CborLen, PartialEq)]
@@ -50,7 +50,7 @@ async fn bad_gc_stress_inner() {
     wr.end_write_record();
     {
         let item = flash.items.last_mut().unwrap();
-        let TestElem::End { seq_no, calc_crc } = item.elem.as_mut().unwrap() else {
+        let TestElem::End { seq_no: _, calc_crc } = item.elem.as_mut().unwrap() else {
             panic!()
         };
         *calc_crc = !*calc_crc;
@@ -71,7 +71,7 @@ async fn bad_gc_stress_inner() {
     wr.end_write_record();
     {
         let item = flash.items.last_mut().unwrap();
-        let TestElem::End { seq_no, calc_crc } = item.elem.as_mut().unwrap() else {
+        let TestElem::End { seq_no: _, calc_crc } = item.elem.as_mut().unwrap() else {
             panic!()
         };
         *calc_crc = !*calc_crc;
@@ -132,4 +132,23 @@ async fn bad_gc_stress_inner() {
 
     // yield to ensure initial gc has a chance to run
     yield_now().await;
+    stopper.close();
+    let rpt = hdl.await.unwrap();
+    rpt.assert_no_errs();
+
+    #[rustfmt::skip]
+    let expected: &[_] = &[
+        TestItem { ctr: 10, elem: Some(TestElem::Start { seq_no: NonZeroU32::new(5).unwrap() }) },
+            TestItem { ctr: 11, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 13] }) },
+            TestItem { ctr: 12, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 14] }) },
+            TestItem { ctr: 13, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 15] }) },
+        TestItem { ctr: 14, elem: Some(TestElem::End { seq_no: NonZeroU32::new(5).unwrap(), calc_crc: 2695063543 }) },
+        TestItem { ctr: 25, elem: Some(TestElem::Start { seq_no: NonZeroU32::new(6).unwrap() }) },
+            TestItem { ctr: 26, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 24, 33] }) },
+            TestItem { ctr: 27, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 24, 34] }) },
+            TestItem { ctr: 28, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 24, 35] }) },
+        TestItem { ctr: 29, elem: Some(TestElem::End { seq_no: NonZeroU32::new(6).unwrap(), calc_crc: 2808308182 }) },
+    ];
+    let items = &rpt.flash.items;
+    assert_eq!(expected, items);
 }

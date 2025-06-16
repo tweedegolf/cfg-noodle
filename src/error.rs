@@ -24,6 +24,8 @@ pub enum Error {
     /// Node is in a state that is invalid at the particular point of operation.
     /// Contains a tuple of the node key hash and the state that was deemed invalid.
     InvalidState(&'static str, State),
+    /// The flash returned inconsistent data between iterations. This is likely fatal.
+    InconsistentFlash,
 }
 
 #[derive(Debug)]

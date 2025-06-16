@@ -9,7 +9,7 @@
 use crate::{
     Crc32, Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData, StepErr, StepResult,
     error::{Error, LoadStoreError},
-    logging::{debug, info},
+    logging::{debug, info, warn},
     skip_to_seq, step,
     storage_node::{Node, NodeHeader, State},
 };
@@ -411,7 +411,7 @@ impl StorageListInner {
         &mut self,
         s: &mut S,
         buf: &mut [u8],
-    ) -> Result<Option<NonZeroU32>, LoadStoreError<S::Error>> {
+    ) -> Result<Option<GoodWriteRecord>, LoadStoreError<S::Error>> {
         // If we've already scanned, we know the highest number (or that there is none)
         if self.seq_state.initial_scan_completed() {
             return Ok(self.seq_state.highest_seen());
@@ -499,7 +499,7 @@ impl StorageListInner {
     /// data into it.
     async fn extract_all<S: NdlDataStorage>(
         &mut self,
-        latest: NonZeroU32,
+        latest: GoodWriteRecord,
         storage: &mut S,
         buf: &mut [u8],
     ) -> Result<(), LoadStoreError<S::Error>> {
@@ -508,32 +508,61 @@ impl StorageListInner {
             .await
             .map_err(LoadStoreError::FlashRead)?;
 
-        let skipres = skip_to_seq!(queue_iter, buf, latest);
-        match skipres {
-            Ok(((), _)) => {}
-            // This state should be impossible: we already determined which seq_no to skip to
-            Err(StepErr::EndOfList) => unreachable!("external flash inconsistent"),
-            Err(StepErr::FlashError(e)) => return Err(LoadStoreError::FlashRead(e)),
-        };
+        // skip items before the start
+        //
+        // NOTE: We do NOT use `skip_to_seq`, because we have not necessarily
+        // performed gc yet, so there may be invalid starts that we could falsely
+        // match on here. Instead, ONLY trust the GoodWriteRecord indexes, and validate
+        // that we end up at the sequence number that we expect.
+        for _ in 0..*latest.range.start() {
+            match queue_iter.next(buf).await {
+                Ok(Some(_item)) => {},
+                Ok(None) => return Err(LoadStoreError::AppError(Error::InconsistentFlash)),
+                Err(e) => return Err(LoadStoreError::FlashRead(e)),
+            }
+        }
 
+        // We need the next item to exist...
+        let Ok(Some(item)) = queue_iter.next(buf).await else {
+            return Err(LoadStoreError::AppError(Error::InconsistentFlash));
+        };
+        // ...and it needs to be a Start record...
+        let Some(Elem::Start { seq_no }) = item.data() else {
+            return Err(LoadStoreError::AppError(Error::InconsistentFlash));
+        };
+        // ...and it needs to be the start record we expect
+        if latest.seq != seq_no {
+            return Err(LoadStoreError::AppError(Error::InconsistentFlash));
+        }
+        drop(item);
+
+        // We should now be at the start of data elements.
         loop {
             let res = queue_iter.next(buf).await;
             let item = match res {
                 // Got an item
                 Ok(Some(item)) => item,
-                // end of list
-                Ok(None) => break,
+                // end of list - we did NOT hit a good End record!
+                Ok(None) => return Err(LoadStoreError::AppError(Error::InconsistentFlash)),
                 // flash error
                 Err(e) => return Err(LoadStoreError::FlashRead(e)),
             };
 
             let data = match item.data() {
-                None => continue,
-                Some(Elem::Start { .. }) | Some(Elem::End { .. }) => break,
+                // Got data: great!
                 Some(Elem::Data { data }) => data,
+                // Got end: if it's the one we expect, great!
+                Some(Elem::End { seq_no, calc_crc: _ }) if seq_no == latest.seq => {
+                    break;
+                },
+                // If we reached the end of the list, OR a new start, OR an end for the wrong
+                // sequence number, that is bad, because this is SUPPOSED to be a pre-validated
+                // write record. Something has gone very wrong.
+                None | Some(Elem::Start { .. }) | Some(Elem::End { .. }) => break,
             };
 
             let Ok(kvpair) = extract(data.key_val()) else {
+                warn!("Failed to extract data on extract_all!");
                 continue;
             };
 
@@ -542,7 +571,9 @@ impl StorageListInner {
                 kvpair.key, kvpair.body,
             );
             let Some(node_header) = self.find_node(kvpair.key) else {
-                // No node found?
+                // No node found? This could happen if the node was "late"
+                // to the initial hydration
+                debug!("Skipping key {:?}", kvpair.key);
                 continue;
             };
 
@@ -560,9 +591,7 @@ impl StorageListInner {
                 }
             };
             if let Some(vtable) = header_meta {
-                // Make a node pointer from a header pointer. This *consumes* the `Pin<&mut NodeHeader>`, meaning
-                // we are free to later re-invent other mutable ptrs/refs, AS LONG AS we still treat the data
-                // as pinned.
+                // Make a node pointer from a header pointer.
                 let mut hdrptr: NonNull<NodeHeader> = node_header;
                 let nodeptr: NonNull<Node<()>> = hdrptr.cast();
 
@@ -584,6 +613,7 @@ impl StorageListInner {
                     // actually be useful.
                     //
                     // todo: add logs? some kind of asserts?
+                    warn!("Key {:?} exists and was wanted, but deserialization failed", kvpair.key);
                     hdrmut.state = State::NonResident;
                 }
             }
@@ -739,10 +769,10 @@ impl SeqState {
 
     /// What is the highest sequence number we've seen in external flash, if any?
     #[inline]
-    fn highest_seen(&self) -> Option<NonZeroU32> {
+    fn highest_seen(&self) -> Option<GoodWriteRecord> {
         if let Some(last) = self.last_three.last() {
             if let Some(seen) = last.as_ref() {
-                return Some(seen.seq);
+                return Some(seen.clone());
             }
         }
         None
