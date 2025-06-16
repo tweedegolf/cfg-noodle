@@ -9,7 +9,7 @@ pub enum Error {
     Deserialization,
     /// Serializing a node into the buffer failed
     Serialization,
-    /// The key hash already exists in the list
+    /// The key already exists in the list
     DuplicateKey,
     /// Recoverable error to tell the caller that the list needs reading first.
     NeedsFirstRead,
@@ -19,7 +19,7 @@ pub enum Error {
     /// running out of space.
     NeedsGarbageCollect,
     /// Node is in a state that is invalid at the particular point of operation.
-    /// Contains a tuple of the node key hash and the state that was deemed invalid.
+    /// Contains a tuple of the node key and the state that was deemed invalid.
     InvalidState(&'static str, State),
     /// The flash returned inconsistent data between iterations. This is likely fatal.
     InconsistentFlash,

@@ -223,7 +223,7 @@ where
     /// returned in the second element of the Result::Error tuple.
     ///
     /// # Panics
-    /// This function will panic if a node with the same key(-hash) already
+    /// This function will panic if a node with the same key already
     /// exists in the list.
     ///
     /// TODO: Re-evaluate the panicking behavior and whether or not to return
