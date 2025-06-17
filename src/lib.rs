@@ -62,6 +62,11 @@ pub(crate) mod logging {
     pub(crate) use {debug, error, info, log_warn as warn, trace};
 }
 
+/// Const helper to compute the maximum of two usize values
+const fn max(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
+}
+
 mod consts {
     /// Discriminant used to mark Start elements on disk
     pub(crate) const ELEM_START: u8 = 0;
@@ -167,6 +172,9 @@ pub trait NdlDataStorage {
     /// Cancellation MUST NOT lead to data loss, other than the element currently
     /// being written.
     async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::Error>;
+    
+    /// Return the maximum size of an `Elem` that may be stored in the list in bytes.
+    const MAX_ELEM_SIZE: usize;
 }
 
 /// An iterator over `Elem`s stored in the queue.

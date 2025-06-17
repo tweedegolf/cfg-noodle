@@ -228,6 +228,9 @@ impl NdlDataStorage for TestStorage {
         });
         Ok(())
     }
+
+    // No actual limit on the test storage, use some reasonable value.
+    const MAX_ELEM_SIZE: usize = 4080;
 }
 
 // ---- impl TestStorageIter ----

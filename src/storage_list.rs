@@ -9,7 +9,7 @@
 use crate::{
     Crc32, Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData, StepErr, StepResult,
     error::{Error, LoadStoreError},
-    logging::{debug, info, warn},
+    logging::{debug, error, info, warn},
     skip_to_seq, step,
     storage_node::{Node, NodeHeader, State},
 };
@@ -195,8 +195,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// ## Params:
     ///
     /// - `storage`: a [`NdlDataStorage`] object containing the necessary information to call [`NdlDataStorage::push`]
-    /// - `buf`: a scratch-buffer that must be large enough to hold the largest serialized node.
-    ///   In practice, a buffer as large as the flash's page size is enough.
+    /// - `buf`: a scratch-buffer of length `S::MAX_ELEM_SIZE`.
     ///
     pub async fn process_reads<S: NdlDataStorage>(
         &'static self,
@@ -204,6 +203,9 @@ impl<R: ScopedRawMutex> StorageList<R> {
         buf: &mut [u8],
     ) -> Result<(), LoadStoreError<S::Error>> {
         info!("Start process_reads");
+
+        assert_eq!(buf.len(), S::MAX_ELEM_SIZE);
+        
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
         let mut inner = self.inner.lock().await;
@@ -250,9 +252,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// * `storage`: a [`NdlDataStorage`] backend that the list should be written to
     /// * `read_buf`: a scratch buffer used to store data read from flash during verification.
     ///   Must be able to hold any serialized node.
-    /// * `buf`: a scratch buffer used to serialize nodes for writing.  Must be able to hold
-    ///   any serialized node. In practice, a buffer as large as the flash's page size is
-    ///   sufficient.
+    /// * `buf`: a scratch-buffer of length `S::MAX_ELEM_SIZE`.
     pub async fn process_writes<S: NdlDataStorage>(
         &'static self,
         storage: &mut S,
@@ -260,6 +260,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
     ) -> Result<(), LoadStoreError<S::Error>> {
         debug!("Start process_writes");
 
+        assert_eq!(buf.len(), S::MAX_ELEM_SIZE);
+        
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
         let mut inner = self.inner.lock().await;
@@ -713,22 +715,7 @@ impl StorageListInner {
             // discriminant
             let (_first, rest) = buf.split_first_mut().ok_or(Error::Serialization)?;
 
-            let res = serialize_node(hdrptr.ptr, rest);
-
-            let Ok(used) = res else {
-                // TODO @James: This comment is still from your first version. I am
-                // unsure how up to date this is and whether or not this becomes a
-                // problem with sequential storage.
-
-                // I'm honestly not sure what we should do if serialization failed.
-                // If it was a simple "out of space" because we have a batch of writes
-                // already, we might want to try again later. If it failed for some
-                // other reason, or it fails even with an empty page (e.g. serializes
-                // to more than 1k or 4k or something), there's really not much to be
-                // done, other than log.
-                // For now, we just return an error and let the caller decide what to do.
-                return Err(LoadStoreError::AppError(Error::Serialization));
-            };
+            let used = serialize_node(hdrptr.ptr, rest)?;
 
             let used = &mut buf[..(used + 1)];
 
@@ -962,19 +949,25 @@ pub(crate) fn serialize_node(
     let mut cursor = Cursor::new(&mut *buf);
     let res: Result<(), minicbor::encode::Error<EndOfSlice>> = minicbor::encode(key, &mut cursor);
     let Ok(()) = res else {
+        error!("Key could not be serialized to the buffer.");
         return Err(Error::Serialization);
     };
     let used = cursor.position();
     let Some(remain) = buf.get_mut(used..) else {
+        error!("Serialized key consumed the entire buffer");
         return Err(Error::Serialization);
     };
 
     let nodeptr: NonNull<Node<()>> = headerptr.cast();
 
     // Serialize payload into buffer
-    (vtable.serialize)(nodeptr, remain)
-        .map(|len| len + used)
-        .map_err(|_| Error::Serialization)
+    match (vtable.serialize)(nodeptr, remain) {
+        Ok(len) => Ok(len + used),
+        Err(_) => {
+            error!("Node key+payload too large for serializing into the buffer.");
+            Err(Error::Serialization)
+        }
+    }
 }
 
 /// Verifies that the storage list was correctly written to flash memory.

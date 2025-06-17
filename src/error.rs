@@ -7,7 +7,7 @@ use crate::storage_node::State;
 pub enum Error {
     /// Deserializing node from the buffer failed
     Deserialization,
-    /// Serializing a node into the buffer failed
+    /// Serializing a node into the buffer failed because the buffer was too small
     Serialization,
     /// The key already exists in the list
     DuplicateKey,

@@ -119,7 +119,12 @@ impl<T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlDataStorage for
         )
         .await
     }
+
+    const MAX_ELEM_SIZE: usize = T::ERASE_SIZE
+        - 2 * crate::max(T::WRITE_SIZE, T::READ_SIZE)
+        - sequential_storage::item_overhead_size::<T>() as usize;
 }
+
 
 // ---- impl FlashIter ----
 
