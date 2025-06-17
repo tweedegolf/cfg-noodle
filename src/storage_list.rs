@@ -1341,7 +1341,6 @@ mod test {
 
     /// Test that attaching duplicate keys causes a panic
     #[test(tokio::test)]
-    #[should_panic]
     async fn test_duplicate_key() {
         static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
         static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
@@ -1365,8 +1364,11 @@ mod test {
                 };
 
                 // Obtain a handle for the second config. It has the same key as the first.
-                // This must panic!
-                let _expecting_panic = POSITRON_CONFIG2.attach(&GLOBAL_LIST).await;
+                let config_handle = POSITRON_CONFIG2.attach(&GLOBAL_LIST).await;
+                assert_eq!(
+                    config_handle.expect_err("Duplicate key did not cause an error"),
+                    Error::DuplicateKey,
+                );
             })
             .await;
     }

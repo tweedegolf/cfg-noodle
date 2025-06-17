@@ -67,7 +67,7 @@ where
 ///                                  ▲                      │
 ///                                  └──────────────────────┘
 /// ```
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum State {
@@ -217,21 +217,13 @@ where
     /// Attaches node to a list and waits for hydration.
     /// If the value is not found in flash, a default value is used.
     ///
-    /// If the value is found in flash but only from an older write (e.g.
-    /// because the latest write operation was interrupted), the node
-    /// is initialized with the default, and the value from flash is
-    /// returned in the second element of the Result::Error tuple.
-    ///
-    /// # Panics
-    /// This function will panic if a node with the same key already
-    /// exists in the list.
-    ///
-    /// TODO: Re-evaluate the panicking behavior and whether or not to return
-    /// and "old data" in the Error case.
+    /// # Error
+    /// This function will return an [`Error::DuplicateKey`] if a node
+    /// with the same key already exists in the list.
     pub async fn attach<R>(
         &'static self,
         list: &'static StorageList<R>,
-    ) -> Result<StorageListNodeHandle<T, R>, (StorageListNodeHandle<T, R>, T)>
+    ) -> Result<StorageListNodeHandle<T, R>, Error>
     where
         R: ScopedRawMutex + 'static,
     {
@@ -255,7 +247,7 @@ where
             let key = unsafe { &nodenn.as_ref().header.key };
             if inner.find_node(key).is_some() {
                 error!("Key already in use: {:?}", key);
-                panic!("Node with the same key already in the list");
+                return Err(Error::DuplicateKey);
             } else {
                 inner.list.push_front(hdrnn);
             }
@@ -265,41 +257,40 @@ where
         }
 
         // Wait until we have a value, or we know it is non-resident
-        loop {
-            debug!("Waiting for reading_done");
-            list.reading_done
-                .wait()
-                .await
-                .expect("waitcell should never close");
+        debug!("Waiting for reading_done");
+        list.reading_done
+            .wait()
+            .await
+            .expect("waitcell should never close");
 
-            // We need the lock to look at ourself!
-            let _inner = list.inner.lock().await;
+        // We need the lock to look at ourself!
+        let _inner = list.inner.lock().await;
 
-            // We have the lock, we can gaze into the UnsafeCell
-            let nodeptr: *mut Node<T> = self.inner.get();
-            let noderef: &mut Node<T> = unsafe { &mut *nodeptr };
-            // Are we in a state with a valid T?
-            match noderef.header.state {
-                // TODO @James: This should not really happen because it means we attached in
-                // the middle of the read process, which implies that we AND the read process
-                // have the list locked simultaneously.
-                // Is "handling" it with a "continue" reasonable or should we panic because it
-                // technically is an invalid state at this point.
-                State::Initial => continue,
-                State::NonResident => {
-                    debug!(
-                        "Node with key {:?} non resident. Init with default",
-                        noderef.header.key
-                    );
-                    // We are nonresident, we need to initialize
-                    noderef.t = MaybeUninit::new(T::default());
-                    noderef.header.state = State::DefaultUnwritten;
-                    break;
-                }
-                State::DefaultUnwritten => todo!("shouldn't observe this in attach"),
-                State::ValidNoWriteNeeded => break,
-                State::NeedsWrite => todo!("shouldn't observe this in attach"),
+        // We have the lock, we can gaze into the UnsafeCell
+        let nodeptr: *mut Node<T> = self.inner.get();
+        let noderef: &mut Node<T> = unsafe { &mut *nodeptr };
+        // Are we in a state with a valid T?
+        match noderef.header.state {
+            // This should never happen because it means we attached in
+            // the middle of the read process, which implies that we AND
+            // the read process have the list locked simultaneously.
+            State::Initial => unreachable!("shouldn't observe this in attach"),
+            // Not found in flash, init with default value.
+            State::NonResident => {
+                debug!(
+                    "Node with key {:?} non resident. Init with default",
+                    noderef.header.key
+                );
+                // We are nonresident, we need to initialize
+                noderef.t = MaybeUninit::new(T::default());
+                noderef.header.state = State::DefaultUnwritten;
             }
+            // This state is set by this function if the node is non resident
+            State::DefaultUnwritten => unreachable!("shouldn't observe this in attach"),
+            // This is the usual case: key found in flash and node hydrated
+            State::ValidNoWriteNeeded => (),
+            // NeedsWrite indicates that this handle has done a write, which is not possible until after attach has completed
+            State::NeedsWrite => unreachable!("shouldn't observe this in attach"),
         }
 
         Ok(StorageListNodeHandle { list, inner: self })
