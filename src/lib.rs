@@ -71,6 +71,18 @@ pub(crate) mod logging {
     }
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     pub(crate) use {debug, error, info, log_warn as warn, trace};
+    
+    
+    #[cfg(not(feature = "defmt"))]
+    pub trait MaybeDefmtFormat {}
+    #[cfg(feature = "defmt")]
+    pub trait MaybeDefmtFormat: defmt::Format {}
+    
+    #[cfg(not(feature = "defmt"))]
+    impl<T> MaybeDefmtFormat for T {}
+    
+    #[cfg(feature = "defmt")]
+    impl<T: defmt::Format> MaybeDefmtFormat for T {}
 }
 
 mod consts {
@@ -161,7 +173,7 @@ pub trait NdlDataStorage {
     where
         Self: 'this;
     /// The error returned when pushing fails
-    type Error;
+    type Error: MaybeDefmtFormat;
 
     /// Returns an iterator over all elements, back to front.
     ///
@@ -303,6 +315,8 @@ macro_rules! skip_to_seq {
 }
 
 use crc::{CRC_32_CKSUM, Crc, Digest, NoTable};
+
+use crate::logging::MaybeDefmtFormat;
 
 /// CRC32 implementation
 ///

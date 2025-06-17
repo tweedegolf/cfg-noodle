@@ -10,7 +10,9 @@ use sequential_storage::{
     queue::{self, QueueIterator, QueueIteratorEntry},
 };
 
-use crate::{Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData, consts};
+use crate::{
+    Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData, consts, logging::MaybeDefmtFormat,
+};
 
 /// Owns a flash and the range reserved for the `StorageList`
 pub struct Flash<T: MultiwriteNorFlash, C: CacheImpl> {
@@ -74,7 +76,10 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> Flash<T, C> {
     }
 }
 
-impl<T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlDataStorage for Flash<T, C> {
+impl<T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlDataStorage for Flash<T, C>
+where
+    <T as ErrorType>::Error: MaybeDefmtFormat,
+{
     type Iter<'this>
         = FlashIter<'this, T, C>
     where
