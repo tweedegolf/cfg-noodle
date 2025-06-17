@@ -6,6 +6,7 @@
 
 pub mod error;
 pub mod flash;
+pub mod worker_task;
 
 #[cfg(any(test, feature = "std"))]
 #[doc(hidden)]
