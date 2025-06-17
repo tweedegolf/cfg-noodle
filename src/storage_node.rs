@@ -197,6 +197,7 @@ where
     T: Default + Clone,
     // TODO @James: Should we remove all those Debug trait bounds? I added them to make debugging easier
     T: Debug,
+    T: MaybeDefmtFormat,
 {
     /// Make a new StorageListNode, initially empty and unattached
     pub const fn new(path: &'static str) -> Self {
@@ -323,6 +324,15 @@ where
     T: Clone + Send + 'static,
     R: ScopedRawMutex + 'static,
 {
+    /// .
+    pub async fn key(&self) -> &str {
+        // todo: this probably doesn't need to be async
+        let _inner = self.list.inner.lock().await;
+        let nodeptr: *mut Node<T> = self.inner.inner.get();
+        let noderef = unsafe { &*nodeptr };
+        noderef.header.key
+    }
+
     /// This is a `load` function that copies out the data
     ///
     /// Note that we *copy out*, instead of returning a ref, because we MUST hold
@@ -451,6 +461,7 @@ impl VTable {
         T: CborLen<()>,
         T: Debug,
         for<'a> T: Decode<'a, ()>,
+        T: MaybeDefmtFormat,
     {
         let ser = serialize::<T>;
         let deser = deserialize::<T>;
@@ -460,6 +471,18 @@ impl VTable {
         }
     }
 }
+
+/// lol
+#[cfg(not(feature = "defmt"))]
+pub trait MaybeDefmtFormat {}
+#[cfg(feature = "defmt")]
+pub trait MaybeDefmtFormat: defmt::Format {}
+
+#[cfg(not(feature = "defmt"))]
+impl<T> MaybeDefmtFormat for T {}
+
+#[cfg(feature = "defmt")]
+impl<T: defmt::Format> MaybeDefmtFormat for T {}
 
 /// Tricky monomorphizing serialization function.
 ///
@@ -477,6 +500,8 @@ where
     T: Encode<()>,
     T: Debug,
     T: minicbor::CborLen<()>,
+    T: MaybeDefmtFormat,
+
 {
     let node: NonNull<Node<T>> = node.cast();
     let noderef: &Node<T> = unsafe { node.as_ref() };
