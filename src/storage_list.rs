@@ -1364,9 +1364,11 @@ mod test {
                 };
 
                 // Obtain a handle for the second config. It has the same key as the first.
-                let Err(Error::DuplicateKey) = POSITRON_CONFIG2.attach(&GLOBAL_LIST).await else {
-                    panic!("Duplicate key did not cause an error");
-                };
+                let config_handle = POSITRON_CONFIG2.attach(&GLOBAL_LIST).await;
+                assert_eq!(
+                    config_handle.expect_err("Duplicate key did not cause an error"),
+                    Error::DuplicateKey,
+                );
             })
             .await;
     }

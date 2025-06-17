@@ -2,7 +2,7 @@
 use crate::storage_node::State;
 
 /// General error that is not specific to the flash implementation
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
     /// Deserializing node from the buffer failed
