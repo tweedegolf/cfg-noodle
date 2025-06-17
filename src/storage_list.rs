@@ -204,7 +204,9 @@ impl<R: ScopedRawMutex> StorageList<R> {
     ) -> Result<(), LoadStoreError<S::Error>> {
         info!("Start process_reads");
 
-        assert_eq!(buf.len(), S::MAX_ELEM_SIZE);
+        if buf.len() != S::MAX_ELEM_SIZE {
+            return Err(LoadStoreError::InvalidBufferSize);
+        }
         
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
@@ -260,7 +262,9 @@ impl<R: ScopedRawMutex> StorageList<R> {
     ) -> Result<(), LoadStoreError<S::Error>> {
         debug!("Start process_writes");
 
-        assert_eq!(buf.len(), S::MAX_ELEM_SIZE);
+        if buf.len() != S::MAX_ELEM_SIZE {
+            return Err(LoadStoreError::InvalidBufferSize);
+        }
         
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!

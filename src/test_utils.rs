@@ -372,7 +372,7 @@ pub async fn worker_task_seq_sto<R: ScopedRawMutex + Sync>(
     list: &'static StorageList<R>,
     mut flash: MockFlash,
 ) {
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; MockFlash::MAX_ELEM_SIZE];
     let mut first_gc_done = false;
     loop {
         info!("worker_task waiting for needs_* signal");
@@ -433,7 +433,7 @@ pub async fn worker_task_tst_sto_custom<R: ScopedRawMutex + Sync>(
     let mut garbo_errs = 0;
 
     let fut = async {
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; TestStorage::MAX_ELEM_SIZE];
         let mut first_gc_done = false;
         loop {
             info!("worker_task waiting for needs_* signal");

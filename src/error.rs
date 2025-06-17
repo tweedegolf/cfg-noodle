@@ -35,6 +35,8 @@ pub enum LoadStoreError<T> {
     FlashWrite(T),
     /// Reading from flash has failed. Contains the error returned by the storage impl.
     FlashRead(T),
+    /// Buffer size wrong
+    InvalidBufferSize,
     /// Value read back from the flash during verification did not match serialized list node.
     WriteVerificationFailed,
     /// Application-level error that occurred during list operations.
