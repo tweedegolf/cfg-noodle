@@ -2,6 +2,7 @@
 
 use core::fmt::Debug;
 use embassy_futures::select::{Either, select};
+use embassy_time::Duration;
 use mutex::ScopedRawMutex;
 
 use crate::{
@@ -25,13 +26,36 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
     let waker_future = async {
         let mut first_gc_done = false;
         loop {
+            let read_fut = async {
+                loop {
+                    // Make sure we go 100ms with no changes
+                    if embassy_time::with_timeout(
+                        Duration::from_millis(100),
+                        list.needs_read().wait(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                }
+            };
+            let write_fut = async {
+                loop {
+                    // Make sure we go 10s with no changes
+                    if embassy_time::with_timeout(
+                        Duration::from_millis(10_000),
+                        list.needs_write().wait(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                }
+            };
             info!("worker_task waiting for signals");
-            match embassy_futures::select::select(
-                list.needs_read().wait(),
-                list.needs_write().wait(),
-            )
-            .await
-            {
+            match embassy_futures::select::select(read_fut, write_fut).await {
                 // needs_read signalled
                 Either::First(_) => {
                     info!("worker task got needs_read signal. Waiting to trigger process_read");
