@@ -289,7 +289,7 @@ where
             State::DefaultUnwritten => unreachable!("shouldn't observe this in attach"),
             // This is the usual case: key found in flash and node hydrated
             State::ValidNoWriteNeeded => (),
-            // Can't call write() without the handle returned by this function
+            // NeedsWrite indicates that this handle has done a write, which is not possible until after attach has completed
             State::NeedsWrite => unreachable!("shouldn't observe this in attach"),
         }
 
