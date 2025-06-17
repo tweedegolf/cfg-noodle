@@ -1341,7 +1341,7 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
 
 //     /// Test that attaching duplicate keys causes a panic
 //     #[test(tokio::test)]
-    #[should_panic]
+    // #[should_panic]
 //     async fn test_duplicate_key() {
 //         static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
 //         static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
