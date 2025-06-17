@@ -37,27 +37,37 @@ pub(crate) mod logging {
     /// No-op macros when no logging feature is enabled
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! trace {
-        ($($arg:tt)*) => {()}
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! debug {
-        ($($arg:tt)*) => {()}
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! info {
-        ($($arg:tt)*) => {()}
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! log_warn {
-        ($($arg:tt)*) => {()}
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! error {
-        ($($arg:tt)*) => {()}
+        ($($arg:tt)*) => {
+            ()
+        };
     }
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     pub(crate) use {debug, error, info, log_warn as warn, trace};
