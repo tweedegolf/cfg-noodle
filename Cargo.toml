@@ -42,7 +42,6 @@ std = [
     "dep:tokio",
 ]
 defmt = ["dep:defmt", "sequential-storage/defmt-03"]
-arbitrary = ["dep:arbitrary"]
 
 [dependencies]
 crc                     = "3.3.0"
@@ -54,7 +53,6 @@ mutex-traits            = "1.0.0"
 pin-project             = "1.1.10"
 sequential-storage      = "4.0.3"
 
-arbitrary       = { version = "1", optional = true, features = ["derive"] }
 cordyceps       = { version = "0.3.4", default-features = false }
 defmt           = { version = "1.0.1", optional = true }
 log             = { version = "0.4.27", optional = true }
