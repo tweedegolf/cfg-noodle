@@ -3,7 +3,7 @@
 
 use crate::{
     error::Error,
-    logging::{debug, error},
+    logging::{MaybeDefmtFormat, debug, error},
     storage_list::StorageList,
 };
 use cordyceps::{Linked, list};
@@ -26,7 +26,7 @@ use mutex::ScopedRawMutex;
 ///
 /// Users will [`attach`](Self::attach) it to the [`StorageList`] to make it part of
 /// the "connected configuration system", and receive a [`StorageListNodeHandle`].
-pub struct StorageListNode<T: 'static> {
+pub struct StorageListNode<T: 'static + MaybeDefmtFormat> {
     /// The `inner` data is "observable" in the linked list. We put it inside
     /// an [`UnsafeCell`], because it might be mutated "spookily" either through the
     /// `StorageListNode`, or via the linked list.
@@ -532,6 +532,7 @@ where
     T: 'static,
     T: Encode<()>,
     T: minicbor::CborLen<()>,
+    T: MaybeDefmtFormat,
 {
     let node: NonNull<Node<T>> = node.cast();
     let noderef: &Node<T> = unsafe { node.as_ref() };
