@@ -380,6 +380,16 @@ where
     T: Clone + Send + 'static,
     R: ScopedRawMutex + 'static,
 {
+    /// Obtain the key of a node
+    pub async fn key(&self) -> &str {
+        // todo: this probably doesn't need to be async
+        //
+        // update to be non-async when we work on https://github.com/tweedegolf/cfg-noodle/issues/34
+        let _inner = self.list.inner.lock().await;
+        let nodeptr: *mut Node<T> = self.inner.inner.get();
+        let noderef = unsafe { &*nodeptr };
+        noderef.header.key
+    }
     /// This is a `load` function that copies out the data
     ///
     /// Note that we *copy out*, instead of returning a ref, because we MUST hold

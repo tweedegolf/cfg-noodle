@@ -26,12 +26,12 @@ arbitrary = ["dep:arbitrary"]
 
 [dependencies]
 embedded-storage-async = "0.4.1"
-minicbor = { version = "1.0.0", features = ["derive"] }
+minicbor = { version = "1.0.0", default-features = false, features = ["derive"] }
 sequential-storage = "4.0.1"
 
-cordyceps = "0.3.4"
+cordyceps = { version = "0.3.4", default-features = false }
 critical-section = "1.2.0"
-maitake-sync = "0.2.1"
+maitake-sync = { version = "0.2.1", default-features = false }
 mutex = { version = "1.0.0", features = ["impl-critical-section"] }
 
 pin-project = "1.1.10"
