@@ -27,7 +27,7 @@ arbitrary = ["dep:arbitrary"]
 [dependencies]
 embedded-storage-async = "0.4.1"
 minicbor = { version = "1.0.0", default-features = false, features = ["derive"] }
-sequential-storage = "4.0.1"
+sequential-storage = "4.0.3"
 
 cordyceps = { version = "0.3.4", default-features = false }
 critical-section = "1.2.0"
