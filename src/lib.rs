@@ -74,6 +74,7 @@ mod consts {
 /// Serialized Data Element
 ///
 /// Includes header, key, and value
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, PartialEq)]
 pub struct SerData<'a> {
     hdr_key_val: &'a [u8],
@@ -120,6 +121,7 @@ impl<'a> SerData<'a> {
 }
 
 /// A single element stored in flash
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, PartialEq)]
 pub enum Elem<'a> {
     /// Start element
