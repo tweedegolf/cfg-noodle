@@ -187,6 +187,47 @@ type SerFn = fn(NonNull<Node<()>>, &mut [u8]) -> Result<usize, ()>;
 type DeserFn = fn(NonNull<Node<()>>, &[u8]) -> Result<usize, ()>;
 
 // ---- impl StorageListNode ----
+impl<T> StorageListNode<T>
+where
+    T: 'static,
+    T: Encode<()>,
+    T: CborLen<()>,
+    for<'a> T: Decode<'a, ()>,
+    T: Clone,
+    T: Default,
+{
+    /// Attaches node to a list and waits for hydration.
+    /// If the value is not found in flash, a default value is used.
+    ///
+    /// # Error
+    /// This function will return an [`Error::DuplicateKey`] if a node
+    /// with the same key already exists in the list.
+    /// 
+    /// # Example
+    /// ```
+    /// # async {
+    ///   use cfg_noodle::{StorageList, StorageListNode};
+    ///   use minicbor::*;
+    ///   use mutex::raw_impls::cs::CriticalSectionRawMutex;
+    /// 
+    ///   #[derive(Default, Debug, Encode, Decode, Clone, PartialEq, CborLen)]
+    ///   struct MyStoredVar(#[n(0)] u8);
+    /// 
+    ///   static MY_CONFIG: StorageListNode<MyStoredVar> = StorageListNode::new("config/myconfig");
+    ///   static MY_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    /// 
+    ///   MY_CONFIG.attach(&MY_LIST).await;
+    /// # };
+    pub async fn attach<R>(
+        &'static self,
+        list: &'static StorageList<R>,
+    ) -> Result<StorageListNodeHandle<T, R>, Error>
+    where
+        R: ScopedRawMutex + 'static,
+    {
+        self.attach_with_default(list, Default::default).await
+    }
+}
 
 impl<T> StorageListNode<T>
 where
@@ -194,9 +235,7 @@ where
     T: Encode<()>,
     T: CborLen<()>,
     for<'a> T: Decode<'a, ()>,
-    T: Default + Clone,
-    // TODO @James: Should we remove all those Debug trait bounds? I added them to make debugging easier
-    T: Debug,
+    T: Clone,
 {
     /// Make a new StorageListNode, initially empty and unattached
     pub const fn new(path: &'static str) -> Self {
@@ -215,14 +254,32 @@ where
     }
 
     /// Attaches node to a list and waits for hydration.
-    /// If the value is not found in flash, a default value is used.
+    /// If the value is not found in flash, use the default value provided by the closure `f`
     ///
     /// # Error
     /// This function will return an [`Error::DuplicateKey`] if a node
     /// with the same key already exists in the list.
-    pub async fn attach<R>(
+    ///
+    /// # Example
+    /// ```
+    /// # async {
+    ///   use cfg_noodle::{StorageList, StorageListNode};
+    ///   use minicbor::*;
+    ///   use mutex::raw_impls::cs::CriticalSectionRawMutex;
+    /// 
+    ///   #[derive(Debug, Encode, Decode, Clone, PartialEq, CborLen)]
+    ///   struct MyStoredVar(#[n(0)] u8);
+    /// 
+    ///   static MY_CONFIG: StorageListNode<MyStoredVar> = StorageListNode::new("config/myconfig");
+    ///   static MY_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    /// 
+    ///   MY_CONFIG.attach_with_default(&MY_LIST, || MyStoredVar(123)).await;
+    /// # };
+    /// ```
+    pub async fn attach_with_default<R, F: FnOnce() -> T>(
         &'static self,
         list: &'static StorageList<R>,
+        f: F,
     ) -> Result<StorageListNodeHandle<T, R>, Error>
     where
         R: ScopedRawMutex + 'static,
@@ -282,7 +339,7 @@ where
                     noderef.header.key
                 );
                 // We are nonresident, we need to initialize
-                noderef.t = MaybeUninit::new(T::default());
+                noderef.t = MaybeUninit::new(f());
                 noderef.header.state = State::DefaultUnwritten;
             }
             // This state is set by this function if the node is non resident
@@ -449,7 +506,6 @@ impl VTable {
         T: 'static,
         T: Encode<()>,
         T: CborLen<()>,
-        T: Debug,
         for<'a> T: Decode<'a, ()>,
     {
         let ser = serialize::<T>;
@@ -475,7 +531,6 @@ fn serialize<T>(node: NonNull<Node<()>>, buf: &mut [u8]) -> Result<usize, ()>
 where
     T: 'static,
     T: Encode<()>,
-    T: Debug,
     T: minicbor::CborLen<()>,
 {
     let node: NonNull<Node<T>> = node.cast();
@@ -487,11 +542,10 @@ where
     let res: Result<(), minicbor::encode::Error<EndOfSlice>> = minicbor::encode(tref, &mut cursor);
 
     debug!(
-        "Finished serializing: {} bytes written, len_with(): {}, content: {:?}, type: {:#?}",
+        "Finished serializing: {} bytes written, len_with(): {}, content: {:?}",
         cursor.position(),
         len_with(tref, &mut ()),
         &cursor.get_ref()[..cursor.position()],
-        tref
     );
     // Make sure len_with returns the correct number of bytes
     // Important because we depend on it in deserialize()
