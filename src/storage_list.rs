@@ -415,19 +415,15 @@ impl<R: ScopedRawMutex> StorageList<R> {
     /// Returns a reference to the wait queue that signals when nodes need to be read from flash.
     /// This queue is woken when new nodes are attached and require data to be loaded.
     pub async fn needs_read(&self) {
-        self.needs_read
-            .wait()
-            .await
-            .expect("wait queue should not be dropped");
+        // No need to check for errors, we never close the WaitQueue
+        let _ = self.needs_read.wait().await;
     }
 
     /// Returns a reference to the wait queue that signals when nodes have pending writes to flash.
     /// This queue is woken when node data is modified and needs to be persisted.
     pub async fn needs_write(&self) {
-        self.needs_write
-            .wait()
-            .await
-            .expect("wait queue should not be dropped")
+        // No need to check for errors, we never close the WaitQueue
+        let _ = self.needs_write.wait().await;
     }
 }
 
