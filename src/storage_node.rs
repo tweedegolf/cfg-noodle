@@ -202,6 +202,22 @@ where
     /// # Error
     /// This function will return an [`Error::DuplicateKey`] if a node
     /// with the same key already exists in the list.
+    /// 
+    /// # Example
+    /// ```
+    /// # async {
+    ///   use cfg_noodle::{StorageList, StorageListNode};
+    ///   use minicbor::*;
+    ///   use mutex::raw_impls::cs::CriticalSectionRawMutex;
+    /// 
+    ///   #[derive(Default, Debug, Encode, Decode, Clone, PartialEq, CborLen)]
+    ///   struct MyStoredVar(#[n(0)] u8);
+    /// 
+    ///   static MY_CONFIG: StorageListNode<MyStoredVar> = StorageListNode::new("config/myconfig");
+    ///   static MY_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    /// 
+    ///   MY_CONFIG.attach(&MY_LIST).await;
+    /// # };
     pub async fn attach<R>(
         &'static self,
         list: &'static StorageList<R>,
@@ -243,6 +259,23 @@ where
     /// # Error
     /// This function will return an [`Error::DuplicateKey`] if a node
     /// with the same key already exists in the list.
+    ///
+    /// # Example
+    /// ```
+    /// # async {
+    ///   use cfg_noodle::{StorageList, StorageListNode};
+    ///   use minicbor::*;
+    ///   use mutex::raw_impls::cs::CriticalSectionRawMutex;
+    /// 
+    ///   #[derive(Debug, Encode, Decode, Clone, PartialEq, CborLen)]
+    ///   struct MyStoredVar(#[n(0)] u8);
+    /// 
+    ///   static MY_CONFIG: StorageListNode<MyStoredVar> = StorageListNode::new("config/myconfig");
+    ///   static MY_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    /// 
+    ///   MY_CONFIG.attach_with_default(&MY_LIST, || MyStoredVar(123)).await;
+    /// # };
+    /// ```
     pub async fn attach_with_default<R, F: FnOnce() -> T>(
         &'static self,
         list: &'static StorageList<R>,
