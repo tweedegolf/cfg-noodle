@@ -166,14 +166,10 @@ pub async fn blinker(
                 } else {
                     val.off_time_ms * 2
                 }
-            }
+            },
         };
 
-        defmt::info!(
-            "Button pressed, changing {:?} -> {:?}",
-            val,
-            new,
-        );
+        defmt::info!("Button pressed, changing {:?} -> {:?}", val, new,);
         val = new;
 
         // As above, this writes to the NODE, which will eventually be flushed
@@ -245,7 +241,6 @@ pub async fn worker(flash: DkMX25R) {
 
     let mut first_gc_done = false;
     loop {
-
         // This is a helper future that waits until a node has been attached and
         // has requested a read, but then begins a 100ms debouncing-timer to see
         // if any more nodes are attached. If another node DOES request a read in
@@ -263,13 +258,12 @@ pub async fn worker(flash: DkMX25R) {
         // You likely can fine-tune this to values typical for your operation,
         // based on the time it takes for nodes to all reach their `attach` calls.
         let read_fut = async {
-            LIST.needs_read().wait().await.unwrap();
+            LIST.needs_read().await;
 
             loop {
                 // Make sure we go 100ms with no changes
                 let res = LIST
                     .needs_read()
-                    .wait()
                     .with_timeout(Duration::from_millis(100))
                     .await;
                 if res.is_err() {
@@ -296,13 +290,12 @@ pub async fn worker(flash: DkMX25R) {
         // however it is useful to having this be reasonably short (1s) for the
         // demo so that you can see writes occur.
         let write_fut = async {
-            LIST.needs_write().wait().await.unwrap();
+            LIST.needs_write().await;
 
             loop {
                 // Make sure we go 1s with no changes
                 let res = LIST
                     .needs_write()
-                    .wait()
                     .with_timeout(Duration::from_millis(1_000))
                     .await;
                 if res.is_err() {
@@ -368,4 +361,3 @@ pub async fn worker(flash: DkMX25R) {
         }
     }
 }
-

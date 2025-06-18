@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+cfg-noodle              = { version = "0.1.0", features = ["defmt"], default-features = false }
 cortex-m                = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
 embassy-executor        = { version = "0.7.0", features = ["task-arena-size-32768", "arch-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-nrf             = { version = "0.3.0", features = ["defmt", "nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac", "time"] }
@@ -14,7 +15,6 @@ mutex                   = { version = "1.0.0", features = ["impl-critical-sectio
 panic-probe             = { version = "0.3",   features = ["print-defmt"] }
 portable-atomic         = { version = "1.6.0", features = ["critical-section"] }
 
-cfg-noodle              = { git = "https://github.com/tweedegolf/cfg-noodle", rev = "3336e793dcd861116445e51a61598823c178ae94", features = ["defmt"], default-features = false }
 mx25r                   = { git = "https://github.com/jamesmunns/mx25r-rs",   rev = "e45629f497cdc6b917c6a08cb9df0fac3ba33b0a", features = ["defmt"] }
 
 cortex-m-rt             = "0.7.0"
@@ -22,7 +22,7 @@ defmt                   = "0.3.11"
 defmt-rtt               = "0.4"
 embassy-embedded-hal    = "0.3.0"
 embassy-futures         = "0.1.1"
-sequential-storage      = "4.0.2"
+sequential-storage      = "4.0.3"
 static_cell             = "2.1"
 
 [profile.release]
