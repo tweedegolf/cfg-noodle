@@ -8,6 +8,8 @@ pub mod error;
 pub mod flash;
 pub mod worker_task;
 
+pub use mutex_traits;
+
 #[cfg(any(test, feature = "std"))]
 #[doc(hidden)]
 pub mod test_utils;

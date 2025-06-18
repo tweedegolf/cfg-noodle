@@ -8,7 +8,7 @@ use std::{collections::VecDeque, sync::Arc};
 use log::{debug, error, info, warn};
 use maitake_sync::WaitQueue;
 use minicbor::encode::write::{Cursor, EndOfSlice};
-use mutex::ScopedRawMutex;
+use mutex_traits::ScopedRawMutex;
 use sequential_storage::{
     cache::NoCache,
     mock_flash::{MockFlashBase, WriteCountCheck},

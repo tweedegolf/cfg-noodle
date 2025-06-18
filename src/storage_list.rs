@@ -20,7 +20,7 @@ use minicbor::{
     encode::write::{Cursor, EndOfSlice},
     len_with,
 };
-use mutex::{ConstInit, ScopedRawMutex};
+use mutex_traits::{ConstInit, ScopedRawMutex};
 
 /// "Global anchor" of all storage items.
 ///

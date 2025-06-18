@@ -3,7 +3,7 @@
 use core::fmt::Debug;
 use embassy_futures::select::{Either, select};
 use embassy_time::Duration;
-use mutex::ScopedRawMutex;
+use mutex_traits::ScopedRawMutex;
 
 use crate::{
     NdlDataStorage, StorageList,
