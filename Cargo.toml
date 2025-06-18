@@ -36,7 +36,7 @@ std = [
     "tokio/sync",
     "critical-section/std",
     "maitake-sync/std",
-    "mutex/std",
+    "mutex-traits/std",
     "dep:log",
     "dep:simple_logger",
     "dep:tokio",
@@ -50,6 +50,7 @@ critical-section        = "1.2.0"
 embassy-futures         = "0.1.1"
 embassy-time            = "0.4.0"
 embedded-storage-async  = "0.4.1"
+mutex-traits            = "1.0.0"
 pin-project             = "1.1.10"
 sequential-storage      = "4.0.3"
 
@@ -66,6 +67,8 @@ tokio           = { version = "1.45.1", optional = true, features = ["macros", "
 [dev-dependencies]
 approx = "0.5.1"
 futures-test = "0.3.31"
+
 test-log = "0.2.17"
 
 futures = { version = "0.3.31", features = ["executor"] }
+mutex   = { version = "1.0.0",  features = ["impl-critical-section"] }

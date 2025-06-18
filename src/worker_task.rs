@@ -3,7 +3,7 @@
 use core::fmt::Debug;
 use embassy_futures::select::{Either, select};
 use embassy_time::Duration;
-use mutex::ScopedRawMutex;
+use mutex_traits::ScopedRawMutex;
 
 use crate::{
     NdlDataStorage, StorageList,
@@ -63,7 +63,7 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
                     // Make sure we go 100ms with no changes
                     if embassy_time::with_timeout(
                         Duration::from_millis(100),
-                        list.needs_read().wait(),
+                        list.needs_read()
                     )
                     .await
                     .is_err()
@@ -78,7 +78,7 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
                     // Make sure we go 10s with no changes
                     if embassy_time::with_timeout(
                         Duration::from_secs(10),
-                        list.needs_write().wait(),
+                        list.needs_write()
                     )
                     .await
                     .is_err()

@@ -20,7 +20,7 @@ use minicbor::{
     encode::write::{Cursor, EndOfSlice},
     len_with,
 };
-use mutex::ScopedRawMutex;
+use mutex_traits::ScopedRawMutex;
 
 /// Represents the storage of a single `T`, linkable to a `StorageList`
 ///
