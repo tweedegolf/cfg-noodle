@@ -16,6 +16,7 @@ mod storage_node;
 
 use core::num::NonZeroU32;
 
+use minicbor::{CborLen, Encode, len_with};
 #[doc(inline)]
 pub use storage_list::StorageList;
 
@@ -180,6 +181,18 @@ pub trait NdlDataStorage {
     /// This includes a one byte element header, the CBOR-serialized key, and the
     /// CBOR-serialized value.
     const MAX_ELEM_SIZE: usize;
+
+    /// Checks whether the size of the `key` and `node` fit into the maximium
+    /// element size of this `NdlDataStorage`.
+    ///
+    /// This function can be used to check if writing the node to flash is
+    /// possible before the node is serialized at a later stage.
+    fn check_node_size<T>(key: &str, node: T) -> bool
+    where
+        T: CborLen<()> + Encode<()>,
+    {
+        Self::MAX_ELEM_SIZE >= 1 + len_with(key, &mut ()) + len_with(node, &mut ())
+    }
 }
 
 /// An iterator over `Elem`s stored in the queue.
