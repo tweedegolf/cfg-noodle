@@ -71,8 +71,7 @@ pub(crate) mod logging {
     }
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     pub(crate) use {debug, error, info, log_warn as warn, trace};
-    
-    
+
     /// A marker trait that requires `T: defmt::Format` when the `defmt` feature is enabled
     #[cfg(not(feature = "defmt"))]
     pub trait MaybeDefmtFormat {}
@@ -80,10 +79,10 @@ pub(crate) mod logging {
     /// A marker trait that requires `T: defmt::Format` when the `defmt` feature is enabled
     #[cfg(feature = "defmt")]
     pub trait MaybeDefmtFormat: defmt::Format {}
-    
+
     #[cfg(not(feature = "defmt"))]
     impl<T> MaybeDefmtFormat for T {}
-    
+
     #[cfg(feature = "defmt")]
     impl<T: defmt::Format> MaybeDefmtFormat for T {}
 }
