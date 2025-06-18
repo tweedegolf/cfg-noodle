@@ -3,7 +3,7 @@
 
 use crate::{
     error::Error,
-    logging::{debug, error},
+    logging::{MaybeDefmtFormat, debug, error},
     storage_list::StorageList,
 };
 use cordyceps::{Linked, list};
@@ -26,7 +26,7 @@ use mutex::ScopedRawMutex;
 ///
 /// Users will [`attach`](Self::attach) it to the [`StorageList`] to make it part of
 /// the "connected configuration system", and receive a [`StorageListNodeHandle`].
-pub struct StorageListNode<T: 'static> {
+pub struct StorageListNode<T: 'static + MaybeDefmtFormat> {
     /// The `inner` data is "observable" in the linked list. We put it inside
     /// an [`UnsafeCell`], because it might be mutated "spookily" either through the
     /// `StorageListNode`, or via the linked list.
@@ -39,7 +39,7 @@ pub struct StorageListNode<T: 'static> {
 /// to the configuration they care about.
 pub struct StorageListNodeHandle<T, R>
 where
-    T: 'static,
+    T: 'static + MaybeDefmtFormat,
     R: ScopedRawMutex + 'static,
 {
     /// `StorageList` to which this node has been attached
@@ -195,6 +195,7 @@ where
     for<'a> T: Decode<'a, ()>,
     T: Clone,
     T: Default,
+    T: MaybeDefmtFormat,
 {
     /// Attaches node to a list and waits for hydration.
     /// If the value is not found in flash, a default value is used.
@@ -202,20 +203,20 @@ where
     /// # Error
     /// This function will return an [`Error::DuplicateKey`] if a node
     /// with the same key already exists in the list.
-    /// 
+    ///
     /// # Example
     /// ```
     /// # async {
     ///   use cfg_noodle::{StorageList, StorageListNode};
     ///   use minicbor::*;
     ///   use mutex::raw_impls::cs::CriticalSectionRawMutex;
-    /// 
+    ///
     ///   #[derive(Default, Debug, Encode, Decode, Clone, PartialEq, CborLen)]
     ///   struct MyStoredVar(#[n(0)] u8);
-    /// 
+    ///
     ///   static MY_CONFIG: StorageListNode<MyStoredVar> = StorageListNode::new("config/myconfig");
     ///   static MY_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-    /// 
+    ///
     ///   MY_CONFIG.attach(&MY_LIST).await;
     /// # };
     pub async fn attach<R>(
@@ -236,6 +237,7 @@ where
     T: CborLen<()>,
     for<'a> T: Decode<'a, ()>,
     T: Clone,
+    T: MaybeDefmtFormat,
 {
     /// Make a new StorageListNode, initially empty and unattached
     pub const fn new(path: &'static str) -> Self {
@@ -266,13 +268,13 @@ where
     ///   use cfg_noodle::{StorageList, StorageListNode};
     ///   use minicbor::*;
     ///   use mutex::raw_impls::cs::CriticalSectionRawMutex;
-    /// 
+    ///
     ///   #[derive(Debug, Encode, Decode, Clone, PartialEq, CborLen)]
     ///   struct MyStoredVar(#[n(0)] u8);
-    /// 
+    ///
     ///   static MY_CONFIG: StorageListNode<MyStoredVar> = StorageListNode::new("config/myconfig");
     ///   static MY_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
-    /// 
+    ///
     ///   MY_CONFIG.attach_with_default(&MY_LIST, || MyStoredVar(123)).await;
     /// # };
     /// ```
@@ -354,7 +356,7 @@ where
     }
 }
 
-impl<T> Drop for StorageListNode<T> {
+impl<T: MaybeDefmtFormat> Drop for StorageListNode<T> {
     fn drop(&mut self) {
         // If we DO want to be able to drop, we probably want to unlink from the list.
         //
@@ -371,13 +373,13 @@ impl<T> Drop for StorageListNode<T> {
 
 /// I think this is safe? If we can move data into the node, its
 /// Sync-safety is guaranteed by the StorageList mutex.
-unsafe impl<T> Sync for StorageListNode<T> where T: Send + 'static {}
+unsafe impl<T> Sync for StorageListNode<T> where T: Send + 'static + MaybeDefmtFormat {}
 
 // ---- impl StorageListNodeHandle ----
 
 impl<T, R> StorageListNodeHandle<T, R>
 where
-    T: Clone + Send + 'static,
+    T: Clone + Send + 'static + MaybeDefmtFormat,
     R: ScopedRawMutex + 'static,
 {
     /// Obtain the key of a node
@@ -462,7 +464,7 @@ where
 /// Impl Debug to allow for using unwrap in tests.
 impl<T, R> Debug for StorageListNodeHandle<T, R>
 where
-    T: 'static,
+    T: 'static + MaybeDefmtFormat,
     R: ScopedRawMutex + 'static,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -516,6 +518,7 @@ impl VTable {
         T: 'static,
         T: Encode<()>,
         T: CborLen<()>,
+        T: MaybeDefmtFormat,
         for<'a> T: Decode<'a, ()>,
     {
         let ser = serialize::<T>;
@@ -542,6 +545,7 @@ where
     T: 'static,
     T: Encode<()>,
     T: minicbor::CborLen<()>,
+    T: MaybeDefmtFormat,
 {
     let node: NonNull<Node<T>> = node.cast();
     let noderef: &Node<T> = unsafe { node.as_ref() };

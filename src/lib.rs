@@ -6,6 +6,7 @@
 
 pub mod error;
 pub mod flash;
+pub mod worker_task;
 
 #[cfg(any(test, feature = "std"))]
 #[doc(hidden)]
@@ -36,30 +37,54 @@ pub(crate) mod logging {
     /// No-op macros when no logging feature is enabled
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! trace {
-        ($($arg:tt)*) => {};
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! debug {
-        ($($arg:tt)*) => {};
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! info {
-        ($($arg:tt)*) => {};
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! log_warn {
-        ($($arg:tt)*) => {};
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! error {
-        ($($arg:tt)*) => {};
+        ($($arg:tt)*) => {
+            ()
+        };
     }
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     pub(crate) use {debug, error, info, log_warn as warn, trace};
+
+    /// A marker trait that requires `T: defmt::Format` when the `defmt` feature is enabled
+    #[cfg(not(feature = "defmt"))]
+    pub trait MaybeDefmtFormat {}
+
+    /// A marker trait that requires `T: defmt::Format` when the `defmt` feature is enabled
+    #[cfg(feature = "defmt")]
+    pub trait MaybeDefmtFormat: defmt::Format {}
+
+    #[cfg(not(feature = "defmt"))]
+    impl<T> MaybeDefmtFormat for T {}
+
+    #[cfg(feature = "defmt")]
+    impl<T: defmt::Format> MaybeDefmtFormat for T {}
 }
 
 /// Const helper to compute the maximum of two usize values
@@ -157,7 +182,7 @@ pub trait NdlDataStorage {
     where
         Self: 'this;
     /// The error returned when pushing fails
-    type Error;
+    type Error: MaybeDefmtFormat;
 
     /// Returns an iterator over all elements, back to front.
     ///
@@ -305,6 +330,8 @@ macro_rules! skip_to_seq {
 }
 
 use crc::{CRC_32_CKSUM, Crc, Digest, NoTable};
+
+use crate::logging::MaybeDefmtFormat;
 
 /// CRC32 implementation
 ///

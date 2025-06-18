@@ -1,5 +1,5 @@
 //! Error types used for the list
-use crate::storage_node::State;
+use crate::{logging::MaybeDefmtFormat, storage_node::State};
 
 /// General error that is not specific to the flash implementation
 #[derive(Debug, PartialEq)]
@@ -30,7 +30,7 @@ pub enum Error {
 /// Errors during loading from and storing to flash.
 ///
 /// Sometimes specific to the flash implementation.
-pub enum LoadStoreError<T> {
+pub enum LoadStoreError<T: MaybeDefmtFormat> {
     /// Writing to flash has failed. Contains the error returned by the storage impl.
     FlashWrite(T),
     /// Reading from flash has failed. Contains the error returned by the storage impl.
@@ -43,7 +43,7 @@ pub enum LoadStoreError<T> {
     AppError(Error),
 }
 
-impl<T> From<Error> for LoadStoreError<T> {
+impl<T: MaybeDefmtFormat> From<Error> for LoadStoreError<T> {
     fn from(value: Error) -> Self {
         Self::AppError(value)
     }
