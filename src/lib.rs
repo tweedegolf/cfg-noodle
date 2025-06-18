@@ -174,6 +174,9 @@ pub trait NdlDataStorage {
     async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::Error>;
     
     /// Return the maximum size of an `Elem` that may be stored in the list in bytes.
+    ///
+    /// This includes a one byte element header, the CBOR-serialized key, and the
+    /// CBOR-serialized value.
     const MAX_ELEM_SIZE: usize;
 }
 
