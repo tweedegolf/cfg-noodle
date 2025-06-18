@@ -373,7 +373,7 @@ impl<T: MaybeDefmtFormat> Drop for StorageListNode<T> {
 
 /// I think this is safe? If we can move data into the node, its
 /// Sync-safety is guaranteed by the StorageList mutex.
-unsafe impl<T> Sync for StorageListNode<T> where T: Send + 'static {}
+unsafe impl<T> Sync for StorageListNode<T> where T: Send + 'static + MaybeDefmtFormat {}
 
 // ---- impl StorageListNodeHandle ----
 
