@@ -19,4 +19,4 @@ Each time the speed is changed via button press, the value is stored back to the
 
 The I/O worker performs basic debouncing of writes: if you press the button multiple times, a write to flash does NOT occur for every press. Only when a timeout has been exceeded between write events, is the data actually written back to flash.
 
-See [`main.rs`](./src/main.rs) for initialization and setup code, and [`noodle.rs`](./src/noodle.rs) for usage of the `cfg-noodle` library API.
+See [`main.rs`](./nrf52840/src/main.rs) for initialization and setup code, and [`noodle.rs`](./nrf52840/src/noodle.rs) for usage of the `cfg-noodle` library API.
