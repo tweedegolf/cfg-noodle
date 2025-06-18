@@ -205,9 +205,14 @@ impl<R: ScopedRawMutex> StorageList<R> {
         info!("Start process_reads");
 
         if buf.len() != S::MAX_ELEM_SIZE {
-            return Err(LoadStoreError::InvalidBufferSize);
+            warn!(
+                "mismatch in size of buffer provided ({}), vs storage's MAX_ELEM_SIZE ({}). Maximum item size will be limited to {}",
+                buf.len(),
+                S::MAX_ELEM_SIZE,
+                std::cmp::min(buf.len(), S::MAX_ELEM_SIZE)
+            );
         }
-        
+
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
         let mut inner = self.inner.lock().await;
@@ -263,9 +268,14 @@ impl<R: ScopedRawMutex> StorageList<R> {
         debug!("Start process_writes");
 
         if buf.len() != S::MAX_ELEM_SIZE {
-            return Err(LoadStoreError::InvalidBufferSize);
+            warn!(
+                "mismatch in size of buffer provided ({}), vs storage's MAX_ELEM_SIZE ({}). Maximum item size will be limited to {}",
+                buf.len(),
+                S::MAX_ELEM_SIZE,
+                std::cmp::min(buf.len(), S::MAX_ELEM_SIZE)
+            );
         }
-        
+
         // Lock the list, remember, if we're touching nodes, we need to have the list
         // locked the entire time!
         let mut inner = self.inner.lock().await;
