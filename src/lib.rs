@@ -38,38 +38,48 @@ pub(crate) mod logging {
     /// No-op macros when no logging feature is enabled
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! trace {
-        ($($arg:tt)*) => {
-            ()
+        ($s:literal $(, $x:expr)* $(,)?) => {
+            {
+            let _ = ($( & $x ),*);
+            }
         };
     }
 
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! debug {
-        ($($arg:tt)*) => {
-            ()
+        ($s:literal $(, $x:expr)* $(,)?) => {
+            {
+            let _ = ($( & $x ),*);
+            }
         };
     }
 
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! info {
-        ($($arg:tt)*) => {
-            ()
+        ($s:literal $(, $x:expr)* $(,)?) => {
+            {
+            let _ = ($( & $x ),*);
+            }
         };
     }
 
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! log_warn {
-        ($($arg:tt)*) => {
-            ()
+        ($s:literal $(, $x:expr)* $(,)?) => {
+            {
+            let _ = ($( & $x ),*);
+            }
         };
     }
 
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     macro_rules! error {
-        ($($arg:tt)*) => {
-            ()
+        ($s:literal $(, $x:expr)* $(,)?) => {{
+            let _ = ($( & $x ),*);
+        }
         };
     }
+
     #[cfg(not(any(feature = "std", feature = "defmt")))]
     pub(crate) use {debug, error, info, log_warn as warn, trace};
 
@@ -200,7 +210,7 @@ pub trait NdlDataStorage {
     /// Cancellation MUST NOT lead to data loss, other than the element currently
     /// being written.
     async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::Error>;
-    
+
     /// Return the maximum size of an `Elem` that may be stored in the list in bytes.
     ///
     /// This includes a one byte element header, the CBOR-serialized key, and the
