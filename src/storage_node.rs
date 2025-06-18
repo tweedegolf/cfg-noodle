@@ -68,7 +68,6 @@ where
 ///                                  └──────────────────────┘
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum State {
     /// The node has been created, but never "hydrated" with data from the
