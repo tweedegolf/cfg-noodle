@@ -15,8 +15,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@cargo-hack
       - name: Check each feature
-        run: cargo hack check --each-feature --no-dev-deps --exclude-all-features --exclude-features arbitrary
+        run: cargo hack check --each-feature --no-dev-deps --exclude-all-features
       - name: Build each feature
-        run: cargo hack build --each-feature --no-dev-deps --exclude-all-features --exclude-features arbitrary
+        run: cargo hack build --each-feature --no-dev-deps --exclude-all-features
       - name: Test each feature
         run: cargo hack test --features std
