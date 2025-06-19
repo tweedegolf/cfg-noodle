@@ -14,7 +14,7 @@ use crate::{
     storage_node::{Node, NodeHeader, State},
 };
 use cordyceps::{List, list::IterRaw};
-use core::{num::NonZeroU32, ops::RangeInclusive, ptr::NonNull};
+use core::{num::NonZeroU32, ops::RangeInclusive, ptr::NonNull, sync::atomic::Ordering};
 use maitake_sync::{Mutex, WaitQueue};
 use minicbor::{
     encode::write::{Cursor, EndOfSlice},
@@ -653,7 +653,7 @@ impl StorageListInner {
             // which is important because we might throw away our `node` ptr shortly.
             let header_meta = {
                 let node_header = unsafe { node_header.as_ref() };
-                match node_header.state {
+                match node_header.state.load(Ordering::SeqCst) {
                     State::Initial => Some(node_header.vtable),
                     State::NonResident => None,
                     State::DefaultUnwritten => None,
@@ -675,7 +675,9 @@ impl StorageListInner {
 
                 if res.is_ok() {
                     // If it went okay, let the node know that it has been hydrated with data
-                    hdrmut.state = State::ValidNoWriteNeeded;
+                    hdrmut
+                        .state
+                        .store(State::ValidNoWriteNeeded, Ordering::SeqCst);
                 } else {
                     // If there WAS a key, but the deser failed, this means that either the data
                     // was corrupted, or there was a breaking schema change. Either way, we can't
@@ -688,7 +690,7 @@ impl StorageListInner {
                         "Key {:?} exists and was wanted, but deserialization failed",
                         kvpair.key
                     );
-                    hdrmut.state = State::NonResident;
+                    hdrmut.state.store(State::NonResident, Ordering::SeqCst);
                 }
             }
         }
@@ -771,7 +773,7 @@ impl StorageListInner {
     fn mark_initial_nonresident(&mut self) {
         // Set nodes in initial states to non resident
         for hdrmut in self.list.iter_mut() {
-            if matches!(hdrmut.state, State::Initial) {
+            if matches!(hdrmut.state.load(Ordering::SeqCst), State::Initial) {
                 // SAFETY: Initial -> NonResident is always a safe transition for a node
                 unsafe {
                     hdrmut.set_state(State::NonResident);
@@ -789,7 +791,7 @@ impl StorageListInner {
         for hdrptr in self.list.iter_raw() {
             let header = unsafe { hdrptr.as_ref() };
 
-            match header.state {
+            match header.state.load(Ordering::SeqCst) {
                 // If no write is needed, we obviously won't write.
                 State::ValidNoWriteNeeded => {}
                 // If the node hasn't been written to flash yet and we initialized it

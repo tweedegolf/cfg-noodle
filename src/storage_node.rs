@@ -6,6 +6,7 @@ use crate::{
     logging::{MaybeDefmtFormat, debug, error},
     storage_list::StorageList,
 };
+use atomic_enum::atomic_enum;
 use cordyceps::{Linked, list};
 use core::{
     cell::UnsafeCell,
@@ -14,6 +15,7 @@ use core::{
     mem::MaybeUninit,
     pin::Pin,
     ptr::{self, NonNull},
+    sync::atomic::Ordering,
 };
 use minicbor::{
     CborLen, Decode, Encode,
@@ -67,7 +69,8 @@ where
 ///                                  ▲                      │
 ///                                  └──────────────────────┘
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[atomic_enum]
+#[derive(PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum State {
     /// The node has been created, but never "hydrated" with data from the
@@ -146,7 +149,7 @@ pub(crate) struct NodeHeader {
     pub(crate) key: &'static str,
     /// The current state of the node. THIS IS SAFETY LOAD BEARING whether
     /// we can access the `T` in the `Node<T>`
-    pub(crate) state: State,
+    pub(crate) state: AtomicState,
     /// This is the type-erased serialize/deserialize `VTable` that is
     /// unique to each `T`, and will be used by the storage worker
     /// to access the `t` indirectly for loading and storing.
@@ -245,7 +248,7 @@ where
                 header: NodeHeader {
                     links: list::Links::new(),
                     key: path,
-                    state: State::Initial,
+                    state: AtomicState::new(State::Initial),
                     vtable: VTable::for_ty::<T>(),
                 },
                 t: MaybeUninit::uninit(),
@@ -328,7 +331,7 @@ where
         let nodeptr: *mut Node<T> = self.inner.get();
         let noderef: &mut Node<T> = unsafe { &mut *nodeptr };
         // Are we in a state with a valid T?
-        match noderef.header.state {
+        match noderef.header.state.load(Ordering::SeqCst) {
             // This should never happen because it means we attached in
             // the middle of the read process, which implies that we AND
             // the read process have the list locked simultaneously.
@@ -341,7 +344,10 @@ where
                 );
                 // We are nonresident, we need to initialize
                 noderef.t = MaybeUninit::new(f());
-                noderef.header.state = State::DefaultUnwritten;
+                noderef
+                    .header
+                    .state
+                    .store(State::DefaultUnwritten, Ordering::SeqCst);
             }
             // This state is set by this function if the node is non resident
             State::DefaultUnwritten => unreachable!("shouldn't observe this in attach"),
@@ -392,31 +398,24 @@ where
         noderef.header.key
     }
     /// This is a `load` function that copies out the data
-    ///
-    /// Note that we *copy out*, instead of returning a ref, because we MUST hold
-    /// the guard as long as &T is live. For a blocking mutex, that's all kinds
-    /// of problematic, but even with the async mutex, holding a `MutexGuard<T>`
-    /// or similiar **will inhibit all other flash operations**, which is bad!
-    ///
-    /// So just hold the lock and copy out.
     pub async fn load(&self) -> Result<T, Error> {
-        // Lock the list if we look at ourself
-        let _inner = self.list.inner.lock().await;
+        // No need to lock the list because if the state is proper, we can always
+        // read node.t. The I/O worker will never change node.t except at initial
+        // hydration. Later, only write() will change node.t, but it requires &self.
 
         let nodeptr: *mut Node<T> = self.inner.inner.get();
         let noderef = unsafe { &mut *nodeptr };
+        let state = noderef.header.state.load(Ordering::SeqCst);
+
         // is T valid?
-        match noderef.header.state {
+        match state {
             // All these states implicate that process_reads/_writes has not finished
             // but they hold a lock on the list, so we should never reach this piece
             // of code while holding a lock ourselves
             //
             // TODO @James: Again, if we are in an invalid state, should we rather panic?
             State::Initial | State::NonResident => {
-                return Err(Error::InvalidState(
-                    noderef.header.key,
-                    noderef.header.state,
-                ));
+                return Err(Error::InvalidState(noderef.header.key, state));
             }
             // Handle all states here explicitly to avoid bugs with a catch-all
             State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
@@ -431,15 +430,14 @@ where
 
         let nodeptr: *mut Node<T> = self.inner.inner.get();
         let noderef = unsafe { &mut *nodeptr };
-        match noderef.header.state {
+        let state = noderef.header.state.load(Ordering::SeqCst);
+
+        match state {
             // `Initial` and `NonResident` can not occur for the same reason as
             // outlined in load(). OldData should have been replaced with a Default value.
             State::Initial | State::NonResident => {
                 debug!("write() on invalid state: {:?}", noderef.header.state);
-                return Err(Error::InvalidState(
-                    noderef.header.key,
-                    noderef.header.state,
-                ));
+                return Err(Error::InvalidState(noderef.header.key, state));
             }
             State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
         }
@@ -450,7 +448,10 @@ where
             let mutref: &mut T = noderef.t.assume_init_mut();
             core::mem::swap(&mut t, mutref);
         }
-        noderef.header.state = State::NeedsWrite;
+        noderef
+            .header
+            .state
+            .store(State::NeedsWrite, Ordering::SeqCst);
 
         // Let the write task know we have work
         self.list.needs_write.wake();
@@ -481,7 +482,9 @@ where
 impl NodeHeader {
     pub(crate) unsafe fn set_state(self: Pin<&mut Self>, state: State) {
         unsafe {
-            self.get_unchecked_mut().state = state;
+            self.get_unchecked_mut()
+                .state
+                .store(state, Ordering::SeqCst);
         }
     }
 }
@@ -617,7 +620,10 @@ where
     let len = len_with(&t, &mut ());
 
     // TODO(AJM): anything to do here?
-    debug_assert!(matches!(noderef.header.state, State::Initial));
+    debug_assert!(matches!(
+        noderef.header.state.load(Ordering::SeqCst),
+        State::Initial
+    ));
     noderef.t = MaybeUninit::new(t);
 
     Ok(len)
