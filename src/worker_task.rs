@@ -1,7 +1,8 @@
 //! Default worker task implementation
 
 use core::fmt::Debug;
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either, Either3, select};
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
 use embassy_time::Duration;
 use mutex_traits::ScopedRawMutex;
 
@@ -55,18 +56,21 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
     // future and the `stopper` future.
     let waker_future = async {
         let mut first_gc_done = false;
+        let needs_gc: Signal<NoopRawMutex, Duration> = Signal::new();
 
         // Wait for either the needs_read or needs_write to be signaled
         loop {
             let read_fut = async {
+                // Wait for needs_read to be signaled once
+                list.needs_read().await;
+
+                // Run debounce loop that breaks when needs_read hasn't been signaled
+                // for more than 100ms
                 'debounce: loop {
                     // Make sure we go 100ms with no changes
-                    if embassy_time::with_timeout(
-                        Duration::from_millis(100),
-                        list.needs_read()
-                    )
-                    .await
-                    .is_err()
+                    if embassy_time::with_timeout(Duration::from_millis(100), list.needs_read())
+                        .await
+                        .is_err()
                     {
                         // Error means timeout reached, so no more debouncing
                         break 'debounce;
@@ -74,14 +78,17 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
                 }
             };
             let write_fut = async {
+                // Wait for needs_read to be signaled once
+                list.needs_write().await;
+
+                // Run debounce loop that breaks when needs_write hasn't been signaled
+                // for more than 100ms
                 'debounce: loop {
+                    list.needs_write().await;
                     // Make sure we go 10s with no changes
-                    if embassy_time::with_timeout(
-                        Duration::from_secs(10),
-                        list.needs_write()
-                    )
-                    .await
-                    .is_err()
+                    if embassy_time::with_timeout(Duration::from_secs(10), list.needs_write())
+                        .await
+                        .is_err()
                     {
                         // Error means timeout reached, so no more debouncing
                         break 'debounce;
@@ -89,10 +96,15 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
                 }
             };
 
+            let gc_fut = async {
+                let delay = needs_gc.wait().await;
+                embassy_time::Timer::after(delay).await;
+            };
+
             info!("worker_task waiting for signals");
-            match embassy_futures::select::select(read_fut, write_fut).await {
+            match embassy_futures::select::select3(read_fut, write_fut, gc_fut).await {
                 // needs_read signaled
-                Either::First(_) => {
+                Either3::First(_) => {
                     info!("worker task got needs_read signal, processing reads");
 
                     if let Err(e) = list.process_reads(&mut flash, buf).await {
@@ -105,19 +117,14 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
                     // block the for a longer time with garbage collection.
                     if !first_gc_done {
                         info!(
-                            "worker task finished process_reads. Waiting to trigger process_garbage"
+                            "worker task finished process_reads. Trigger process_garbage with delay"
                         );
-                        embassy_time::Timer::after_secs(120).await;
 
-                        if let Err(e) = list.process_garbage(&mut flash, buf).await {
-                            error!("Error in process_garbage: {:?}", e);
-                        } else {
-                            first_gc_done = true;
-                        }
+                        needs_gc.signal(Duration::from_secs(120));
                     }
                 }
                 // needs_write signaled
-                Either::Second(_) => {
+                Either3::Second(_) => {
                     info!("worker task got needs_write signal, processing writes");
                     if let Err(e) = list.process_writes(&mut flash, buf).await {
                         error!("Error in process_writes: {:?}", e);
@@ -126,6 +133,13 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
                     info!("worker task finished process_writes, triggering process_garbage");
                     if let Err(e) = list.process_garbage(&mut flash, buf).await {
                         error!("Error in process_garbage: {:?}", e);
+                    }
+                }
+                Either3::Third(_) => {
+                    if let Err(e) = list.process_garbage(&mut flash, buf).await {
+                        error!("Error in process_garbage: {:?}", e);
+                    } else {
+                        first_gc_done = true;
                     }
                 }
             };

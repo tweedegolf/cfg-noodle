@@ -11,13 +11,8 @@ repository = "https://github.com/tweedegolf/cfg-noodle"
 description = "A nonvolatile configuration storage service"
 license = "MIT"
 
-categories = [
-    "embedded",
-    "no-std",
-]
-keywords = [
-    "storage",
-]
+categories = ["embedded", "no-std"]
+keywords = ["storage"]
 documentation = "https://docs.rs/cfg-noodle/"
 
 [package.metadata.docs.rs]
@@ -30,6 +25,9 @@ required-features = ["std"]
 [features]
 default = []
 std = [
+    "embassy-sync/std",
+    "embassy-time/std",
+    "embassy-futures/log",
     "minicbor/std",
     "sequential-storage/std",
     "sequential-storage/_test",
@@ -41,12 +39,18 @@ std = [
     "dep:simple_logger",
     "dep:tokio",
 ]
-defmt = ["dep:defmt", "sequential-storage/defmt-03"]
+defmt = [
+    "dep:defmt",
+    "embassy-futures/defmt",
+    "embassy-sync/defmt",
+    "sequential-storage/defmt-03",
+]
 
 [dependencies]
 crc                     = "3.3.0"
 critical-section        = "1.2.0"
 embassy-futures         = "0.1.1"
+embassy-sync            = "0.7.0"
 embassy-time            = "0.4.0"
 embedded-storage-async  = "0.4.1"
 mutex-traits            = "1.0.0"
