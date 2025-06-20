@@ -12,8 +12,7 @@ use core::{
     fmt::Debug,
     marker::PhantomPinned,
     mem::MaybeUninit,
-    pin::Pin,
-    ptr::{self, NonNull},
+    ptr::{self, NonNull, addr_of, addr_of_mut},
     sync::atomic::{AtomicU8, Ordering},
 };
 use minicbor::{
@@ -325,6 +324,7 @@ where
         debug!("Attaching new node");
 
         // Add a scope so that the Lock on the List is dropped
+
         {
             let mut inner = list.inner.lock().await;
             debug!("attach() got Lock on list");
@@ -351,38 +351,61 @@ where
             debug!("attach() release Lock on list");
         }
 
-        // Wait until we have a value, or we know it is non-resident
         debug!("Waiting for reading_done");
-        list.reading_done
-            .wait()
-            .await
-            .expect("waitcell should never close");
 
-        // We need the lock to look at ourself!
-        let _inner = list.inner.lock().await;
-
-        // We have the lock, we can gaze into the UnsafeCell
+        // We know our node is now on the list. Create a ref to the header which
+        // we can use to observe state changes.
+        //
+        // SAFETY: we can always create a shared ref to the header
         let nodeptr: *mut Node<T> = self.inner.get();
-        let noderef: &mut Node<T> = unsafe { &mut *nodeptr };
+        let hdrref: &NodeHeader = unsafe { &*addr_of!((*nodeptr).header) };
+
+        // Wait for the state to reach any non-Initial value. This handles races
+        // where the I/O worker ALREADY loaded us between releasing the lock and
+        // now (would require interrupts/threads/multicore), and handles cases
+        // where we get a spurious wake BEFORE we've actually been loaded.
+        let state = list
+            .reading_done
+            .wait_for_value(|| {
+                // We do NOT hold the lock, use Acquire ordering.
+                let state = State::from_u8(hdrref.state.load(Ordering::Acquire));
+                if state != State::Initial {
+                    Some(state)
+                } else {
+                    None
+                }
+            })
+            .await
+            .expect("waitqueue never closes");
+
         // Are we in a state with a valid T?
-        // Note: We hold the lock, so use Relaxed ordering
-        match State::from_u8(noderef.header.state.load(Ordering::Relaxed)) {
-            // This should never happen because it means we attached in
-            // the middle of the read process, which implies that we AND
-            // the read process have the list locked simultaneously.
+        match state {
+            // This should never happen because `wait_for_value` explicitly does not yield
+            // until we've reached the Non-Initial state.
             State::Initial => unreachable!("shouldn't observe this in attach"),
             // Not found in flash, init with default value.
             State::NonResident => {
                 debug!(
                     "Node with key {:?} non resident. Init with default",
-                    noderef.header.key
+                    hdrref.key
                 );
                 // We are nonresident, we need to initialize
-                noderef.t = MaybeUninit::new(f());
-                noderef
-                    .header
+                //
+                // SAFETY: We only create a mutref of body when we are in a state where we have
+                // exclusive access, the queue will NEVER attempt to perceive the body when
+                // we are in the NonResident state. Although we COULD safely just write ourselves
+                // now, we still take the lock so that we do not "magically" become DefaultUnwritten
+                // while the i/o worker is in the process of writing, which could cause us to be
+                // marked as written even though have not been, e.g. we showed up as "not eligible"
+                // when first checked in `write_to_flash`, but later in `process_writes` we WOULD
+                // have been, and marked as a completed write.
+                let _inner = list.inner.lock().await;
+                let body: &mut MaybeUninit<T> = unsafe { &mut *addr_of_mut!((*nodeptr).t) };
+                *body = MaybeUninit::new(f());
+                // We do NOT hold the lock, use Release ordering.
+                hdrref
                     .state
-                    .store(State::DefaultUnwritten.into_u8(), Ordering::Relaxed); // we hold the lock -> Relaxed
+                    .store(State::DefaultUnwritten.into_u8(), Ordering::Release);
             }
             // This state is set by this function if the node is non resident
             State::DefaultUnwritten => unreachable!("shouldn't observe this in attach"),
@@ -466,7 +489,6 @@ where
         let nodeptr: *mut Node<T> = self.inner.inner.get();
         let noderef = unsafe { &mut *nodeptr };
 
-        // We hold a lock to the list, so use Relaxed
         let state = State::from_u8(noderef.header.state.load(Ordering::Relaxed));
 
         match state {
@@ -517,18 +539,6 @@ where
 // ---- impl State ----
 // ---- impl Node ----
 // ---- impl NodeHeader ----
-
-impl NodeHeader {
-    /// SAFETY: Caller must hold the lock to the list
-    pub(crate) unsafe fn set_state(self: Pin<&mut Self>, state: State) {
-        unsafe {
-            // Caller holds the lock, so use Relaxed ordering
-            self.get_unchecked_mut()
-                .state
-                .store(state.into_u8(), Ordering::Relaxed);
-        }
-    }
-}
 
 /// This is cordyceps' intrusive linked list trait. It's mostly how you
 /// shift around pointers semantically.
@@ -635,20 +645,18 @@ where
 /// # Safety
 /// The caller must ensure that:
 /// - The storage list mutex is held during the entire operation to prevent concurrent access
-/// - The `node` pointer is valid and points to a properly initialized `Node<T>`
-/// - If `drop_old` is `true`, the target `MaybeUninit<T>` contains a valid, initialized `T`
-/// - If `drop_old` is `false`, the target `MaybeUninit<T>` is uninitialized
-/// - The buffer contains valid CBOR data that can be decoded into type `T`
-///
-/// TODO @James: Please review these safety requirements. Are they correct and complete?
+/// - The `node` pointer is valid and points to a properly initialized `Node<T>` in the
+///   `State::Initial` state
 fn deserialize<T>(node: NonNull<Node<()>>, buf: &[u8]) -> Result<usize, ()>
 where
     T: 'static,
     T: CborLen<()>,
     for<'a> T: Decode<'a, ()>,
 {
-    let mut node: NonNull<Node<T>> = node.cast();
-    let noderef: &mut Node<T> = unsafe { node.as_mut() };
+    let node: NonNull<Node<T>> = node.cast();
+
+    // SAFETY: We can always make a shared pointer to the header
+    let hdrref: &NodeHeader = unsafe { &*addr_of!((*node.as_ptr()).header) };
 
     let res = minicbor::decode::<T>(buf);
 
@@ -660,13 +668,14 @@ where
 
     let len = len_with(&t, &mut ());
 
-    // TODO(AJM): anything to do here?
     // We require the caller to hold a lock to the list, so use Relaxed
     debug_assert!(matches!(
-        State::from_u8(noderef.header.state.load(Ordering::Relaxed)),
+        State::from_u8(hdrref.state.load(Ordering::Relaxed)),
         State::Initial
     ));
-    noderef.t = MaybeUninit::new(t);
+    // SAFETY: We only call deser with the lock held, and in the Initial state
+    let body: &mut MaybeUninit<T> = unsafe { &mut *addr_of_mut!((*node.as_ptr()).t) };
+    *body = MaybeUninit::new(t);
 
     Ok(len)
 }
