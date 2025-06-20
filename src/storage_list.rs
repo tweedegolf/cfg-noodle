@@ -651,9 +651,10 @@ impl StorageListInner {
             // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
             // to the contents of the node. We COPY OUT the vtable for later use,
             // which is important because we might throw away our `node` ptr shortly.
+            // Also, when holding the lock, use Relaxed ordering.
             let header_meta = {
                 let node_header = unsafe { node_header.as_ref() };
-                match node_header.state.load(Ordering::SeqCst) {
+                match State::from_u8(node_header.state.load(Ordering::Relaxed)) {
                     State::Initial => Some(node_header.vtable),
                     State::NonResident => None,
                     State::DefaultUnwritten => None,
@@ -677,7 +678,7 @@ impl StorageListInner {
                     // If it went okay, let the node know that it has been hydrated with data
                     hdrmut
                         .state
-                        .store(State::ValidNoWriteNeeded, Ordering::SeqCst);
+                        .store(State::ValidNoWriteNeeded.into_u8(), Ordering::Relaxed);
                 } else {
                     // If there WAS a key, but the deser failed, this means that either the data
                     // was corrupted, or there was a breaking schema change. Either way, we can't
@@ -690,7 +691,10 @@ impl StorageListInner {
                         "Key {:?} exists and was wanted, but deserialization failed",
                         kvpair.key
                     );
-                    hdrmut.state.store(State::NonResident, Ordering::SeqCst);
+                    // We hold the lock, so use Relaxed
+                    hdrmut
+                        .state
+                        .store(State::NonResident.into_u8(), Ordering::Relaxed);
                 }
             }
         }
@@ -773,7 +777,11 @@ impl StorageListInner {
     fn mark_initial_nonresident(&mut self) {
         // Set nodes in initial states to non resident
         for hdrmut in self.list.iter_mut() {
-            if matches!(hdrmut.state.load(Ordering::SeqCst), State::Initial) {
+            // We hold the lock, use Relaxed
+            if matches!(
+                State::from_u8(hdrmut.state.load(Ordering::Relaxed)),
+                State::Initial
+            ) {
                 // SAFETY: Initial -> NonResident is always a safe transition for a node
                 unsafe {
                     hdrmut.set_state(State::NonResident);
@@ -791,7 +799,8 @@ impl StorageListInner {
         for hdrptr in self.list.iter_raw() {
             let header = unsafe { hdrptr.as_ref() };
 
-            match header.state.load(Ordering::SeqCst) {
+            // We hold the lock, use Relaxed
+            match State::from_u8(header.state.load(Ordering::Relaxed)) {
                 // If no write is needed, we obviously won't write.
                 State::ValidNoWriteNeeded => {}
                 // If the node hasn't been written to flash yet and we initialized it

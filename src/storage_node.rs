@@ -6,7 +6,6 @@ use crate::{
     logging::{MaybeDefmtFormat, debug, error},
     storage_list::StorageList,
 };
-use atomic_enum::atomic_enum;
 use cordyceps::{Linked, list};
 use core::{
     cell::UnsafeCell,
@@ -15,7 +14,7 @@ use core::{
     mem::MaybeUninit,
     pin::Pin,
     ptr::{self, NonNull},
-    sync::atomic::Ordering,
+    sync::atomic::{AtomicU8, Ordering},
 };
 use minicbor::{
     CborLen, Decode, Encode,
@@ -56,6 +55,15 @@ where
 /// This is used to determine how to unsafely interact with other pieces
 /// of the `Node<T>`!
 ///
+/// ## Safety
+/// The State is stored in the nodes as an AtomicU8 so that after initial
+/// hydration the configuration data stored in the node can be loaded without
+/// locking the list mutex (i.e., without delay).
+///
+/// This is sound because atomics can be shared and the "valid" (i.e. loadable)
+/// states are "latching" (the I/O worker NEVER modifies the content of node.t).
+/// See <https://github.com/tweedegolf/cfg-noodle/issues/34>
+///
 /// ## State transition diagram
 ///
 /// ```text
@@ -69,8 +77,7 @@ where
 ///                                  ▲                      │
 ///                                  └──────────────────────┘
 /// ```
-#[atomic_enum]
-#[derive(PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum State {
     /// The node has been created, but never "hydrated" with data from the
@@ -106,6 +113,33 @@ pub enum State {
     /// In this state, `t` IS valid, and may be read at any time (by the holder
     /// of the lock).
     NeedsWrite,
+}
+
+impl State {
+    /// Convert State to u8.
+    pub const fn into_u8(self) -> u8 {
+        match self {
+            State::Initial => 0,
+            State::NonResident => 1,
+            State::DefaultUnwritten => 2,
+            State::ValidNoWriteNeeded => 3,
+            State::NeedsWrite => 4,
+        }
+    }
+    /// Convert u8 to state.
+    ///
+    /// Panics if the u8 value does not have a matchin state as
+    /// returned by [`Self::into_u8`].
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            0 => State::Initial,
+            1 => State::NonResident,
+            2 => State::DefaultUnwritten,
+            3 => State::ValidNoWriteNeeded,
+            4 => State::NeedsWrite,
+            _ => panic!("Invalid state value"),
+        }
+    }
 }
 
 /// This is the actual "linked list node" that is chained to the list
@@ -149,7 +183,7 @@ pub(crate) struct NodeHeader {
     pub(crate) key: &'static str,
     /// The current state of the node. THIS IS SAFETY LOAD BEARING whether
     /// we can access the `T` in the `Node<T>`
-    pub(crate) state: AtomicState,
+    pub(crate) state: AtomicU8,
     /// This is the type-erased serialize/deserialize `VTable` that is
     /// unique to each `T`, and will be used by the storage worker
     /// to access the `t` indirectly for loading and storing.
@@ -248,7 +282,7 @@ where
                 header: NodeHeader {
                     links: list::Links::new(),
                     key: path,
-                    state: AtomicState::new(State::Initial),
+                    state: AtomicU8::new(State::Initial.into_u8()),
                     vtable: VTable::for_ty::<T>(),
                 },
                 t: MaybeUninit::uninit(),
@@ -331,7 +365,8 @@ where
         let nodeptr: *mut Node<T> = self.inner.get();
         let noderef: &mut Node<T> = unsafe { &mut *nodeptr };
         // Are we in a state with a valid T?
-        match noderef.header.state.load(Ordering::SeqCst) {
+        // Note: We hold the lock, so use Relaxed ordering
+        match State::from_u8(noderef.header.state.load(Ordering::Relaxed)) {
             // This should never happen because it means we attached in
             // the middle of the read process, which implies that we AND
             // the read process have the list locked simultaneously.
@@ -347,7 +382,7 @@ where
                 noderef
                     .header
                     .state
-                    .store(State::DefaultUnwritten, Ordering::SeqCst);
+                    .store(State::DefaultUnwritten.into_u8(), Ordering::Relaxed); // we hold the lock -> Relaxed
             }
             // This state is set by this function if the node is non resident
             State::DefaultUnwritten => unreachable!("shouldn't observe this in attach"),
@@ -405,7 +440,9 @@ where
 
         let nodeptr: *mut Node<T> = self.inner.inner.get();
         let noderef = unsafe { &mut *nodeptr };
-        let state = noderef.header.state.load(Ordering::SeqCst);
+
+        // We DON'T hold a lock to the list, so use Acquire for load
+        let state = State::from_u8(noderef.header.state.load(Ordering::Acquire));
 
         // is T valid?
         match state {
@@ -430,7 +467,9 @@ where
 
         let nodeptr: *mut Node<T> = self.inner.inner.get();
         let noderef = unsafe { &mut *nodeptr };
-        let state = noderef.header.state.load(Ordering::SeqCst);
+
+        // We hold a lock to the list, so use Relaxed
+        let state = State::from_u8(noderef.header.state.load(Ordering::Relaxed));
 
         match state {
             // `Initial` and `NonResident` can not occur for the same reason as
@@ -448,10 +487,12 @@ where
             let mutref: &mut T = noderef.t.assume_init_mut();
             core::mem::swap(&mut t, mutref);
         }
+
+        // We hold a lock to the list, so use Relaxed
         noderef
             .header
             .state
-            .store(State::NeedsWrite, Ordering::SeqCst);
+            .store(State::NeedsWrite.into_u8(), Ordering::Relaxed);
 
         // Let the write task know we have work
         self.list.needs_write.wake();
@@ -480,11 +521,13 @@ where
 // ---- impl NodeHeader ----
 
 impl NodeHeader {
+    /// SAFETY: Caller must hold the lock to the list
     pub(crate) unsafe fn set_state(self: Pin<&mut Self>, state: State) {
         unsafe {
+            // Caller holds the lock, so use Relaxed ordering
             self.get_unchecked_mut()
                 .state
-                .store(state, Ordering::SeqCst);
+                .store(state.into_u8(), Ordering::Relaxed);
         }
     }
 }
@@ -620,8 +663,9 @@ where
     let len = len_with(&t, &mut ());
 
     // TODO(AJM): anything to do here?
+    // We require the caller to hold a lock to the list, so use Relaxed
     debug_assert!(matches!(
-        noderef.header.state.load(Ordering::SeqCst),
+        State::from_u8(noderef.header.state.load(Ordering::Relaxed)),
         State::Initial
     ));
     noderef.t = MaybeUninit::new(t);
