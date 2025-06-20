@@ -376,9 +376,7 @@ pub async fn worker_task_seq_sto<R: ScopedRawMutex + Sync>(
     let mut first_gc_done = false;
     loop {
         info!("worker_task waiting for needs_* signal");
-        match embassy_futures::select::select(list.needs_read(), list.needs_write())
-            .await
-        {
+        match embassy_futures::select::select(list.needs_read(), list.needs_write()).await {
             embassy_futures::select::Either::First(_) => {
                 info!("worker task got needs_read signal");
                 if let Err(e) = list.process_reads(&mut flash, &mut buf).await {
@@ -437,12 +435,7 @@ pub async fn worker_task_tst_sto_custom<R: ScopedRawMutex + Sync>(
         let mut first_gc_done = false;
         loop {
             info!("worker_task waiting for needs_* signal");
-            match embassy_futures::select::select(
-                list.needs_read(),
-                list.needs_write()
-            )
-            .await
-            {
+            match embassy_futures::select::select(list.needs_read(), list.needs_write()).await {
                 embassy_futures::select::Either::First(_) => {
                     info!("worker task got needs_read signal");
                     if let Err(e) = list.process_reads(&mut flash, &mut buf).await {

@@ -12,8 +12,8 @@ use core::{
     fmt::Debug,
     marker::PhantomPinned,
     mem::MaybeUninit,
-    pin::Pin,
-    ptr::{self, NonNull},
+    ptr::{self, NonNull, addr_of, addr_of_mut},
+    sync::atomic::{AtomicU8, Ordering},
 };
 use minicbor::{
     CborLen, Decode, Encode,
@@ -54,6 +54,15 @@ where
 /// This is used to determine how to unsafely interact with other pieces
 /// of the `Node<T>`!
 ///
+/// ## Safety
+/// The State is stored in the nodes as an AtomicU8 so that after initial
+/// hydration the configuration data stored in the node can be loaded without
+/// locking the list mutex (i.e., without delay).
+///
+/// This is sound because atomics can be shared and the "valid" (i.e. loadable)
+/// states are "latching" (the I/O worker NEVER modifies the content of node.t).
+/// See <https://github.com/tweedegolf/cfg-noodle/issues/34>
+///
 /// ## State transition diagram
 ///
 /// ```text
@@ -67,7 +76,7 @@ where
 ///                                  ▲                      │
 ///                                  └──────────────────────┘
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum State {
     /// The node has been created, but never "hydrated" with data from the
@@ -103,6 +112,33 @@ pub enum State {
     /// In this state, `t` IS valid, and may be read at any time (by the holder
     /// of the lock).
     NeedsWrite,
+}
+
+impl State {
+    /// Convert State to u8.
+    pub const fn into_u8(self) -> u8 {
+        match self {
+            State::Initial => 0,
+            State::NonResident => 1,
+            State::DefaultUnwritten => 2,
+            State::ValidNoWriteNeeded => 3,
+            State::NeedsWrite => 4,
+        }
+    }
+    /// Convert u8 to state.
+    ///
+    /// Panics if the u8 value does not have a matchin state as
+    /// returned by [`Self::into_u8`].
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            0 => State::Initial,
+            1 => State::NonResident,
+            2 => State::DefaultUnwritten,
+            3 => State::ValidNoWriteNeeded,
+            4 => State::NeedsWrite,
+            _ => panic!("Invalid state value"),
+        }
+    }
 }
 
 /// This is the actual "linked list node" that is chained to the list
@@ -146,7 +182,7 @@ pub(crate) struct NodeHeader {
     pub(crate) key: &'static str,
     /// The current state of the node. THIS IS SAFETY LOAD BEARING whether
     /// we can access the `T` in the `Node<T>`
-    pub(crate) state: State,
+    pub(crate) state: AtomicU8,
     /// This is the type-erased serialize/deserialize `VTable` that is
     /// unique to each `T`, and will be used by the storage worker
     /// to access the `t` indirectly for loading and storing.
@@ -245,7 +281,7 @@ where
                 header: NodeHeader {
                     links: list::Links::new(),
                     key: path,
-                    state: State::Initial,
+                    state: AtomicU8::new(State::Initial.into_u8()),
                     vtable: VTable::for_ty::<T>(),
                 },
                 t: MaybeUninit::uninit(),
@@ -288,6 +324,7 @@ where
         debug!("Attaching new node");
 
         // Add a scope so that the Lock on the List is dropped
+
         {
             let mut inner = list.inner.lock().await;
             debug!("attach() got Lock on list");
@@ -314,34 +351,61 @@ where
             debug!("attach() release Lock on list");
         }
 
-        // Wait until we have a value, or we know it is non-resident
         debug!("Waiting for reading_done");
-        list.reading_done
-            .wait()
-            .await
-            .expect("waitcell should never close");
 
-        // We need the lock to look at ourself!
-        let _inner = list.inner.lock().await;
-
-        // We have the lock, we can gaze into the UnsafeCell
+        // We know our node is now on the list. Create a ref to the header which
+        // we can use to observe state changes.
+        //
+        // SAFETY: we can always create a shared ref to the header
         let nodeptr: *mut Node<T> = self.inner.get();
-        let noderef: &mut Node<T> = unsafe { &mut *nodeptr };
+        let hdrref: &NodeHeader = unsafe { &*addr_of!((*nodeptr).header) };
+
+        // Wait for the state to reach any non-Initial value. This handles races
+        // where the I/O worker ALREADY loaded us between releasing the lock and
+        // now (would require interrupts/threads/multicore), and handles cases
+        // where we get a spurious wake BEFORE we've actually been loaded.
+        let state = list
+            .reading_done
+            .wait_for_value(|| {
+                // We do NOT hold the lock, use Acquire ordering.
+                let state = State::from_u8(hdrref.state.load(Ordering::Acquire));
+                if state != State::Initial {
+                    Some(state)
+                } else {
+                    None
+                }
+            })
+            .await
+            .expect("waitqueue never closes");
+
         // Are we in a state with a valid T?
-        match noderef.header.state {
-            // This should never happen because it means we attached in
-            // the middle of the read process, which implies that we AND
-            // the read process have the list locked simultaneously.
+        match state {
+            // This should never happen because `wait_for_value` explicitly does not yield
+            // until we've reached the Non-Initial state.
             State::Initial => unreachable!("shouldn't observe this in attach"),
             // Not found in flash, init with default value.
             State::NonResident => {
                 debug!(
                     "Node with key {:?} non resident. Init with default",
-                    noderef.header.key
+                    hdrref.key
                 );
                 // We are nonresident, we need to initialize
-                noderef.t = MaybeUninit::new(f());
-                noderef.header.state = State::DefaultUnwritten;
+                //
+                // SAFETY: We only create a mutref of body when we are in a state where we have
+                // exclusive access, the queue will NEVER attempt to perceive the body when
+                // we are in the NonResident state. Although we COULD safely just write ourselves
+                // now, we still take the lock so that we do not "magically" become DefaultUnwritten
+                // while the i/o worker is in the process of writing, which could cause us to be
+                // marked as written even though have not been, e.g. we showed up as "not eligible"
+                // when first checked in `write_to_flash`, but later in `process_writes` we WOULD
+                // have been, and marked as a completed write.
+                let _inner = list.inner.lock().await;
+                let body: &mut MaybeUninit<T> = unsafe { &mut *addr_of_mut!((*nodeptr).t) };
+                *body = MaybeUninit::new(f());
+                // We do NOT hold the lock, use Release ordering.
+                hdrref
+                    .state
+                    .store(State::DefaultUnwritten.into_u8(), Ordering::Release);
             }
             // This state is set by this function if the node is non resident
             State::DefaultUnwritten => unreachable!("shouldn't observe this in attach"),
@@ -382,47 +446,40 @@ where
     R: ScopedRawMutex + 'static,
 {
     /// Obtain the key of a node
-    pub async fn key(&self) -> &str {
-        // todo: this probably doesn't need to be async
-        //
-        // update to be non-async when we work on https://github.com/tweedegolf/cfg-noodle/issues/34
-        let _inner = self.list.inner.lock().await;
+    pub fn key(&self) -> &str {
+        // The node holds an `&'static str`, so we can access it without locking the list
         let nodeptr: *mut Node<T> = self.inner.inner.get();
         let noderef = unsafe { &*nodeptr };
         noderef.header.key
     }
+
     /// This is a `load` function that copies out the data
-    ///
-    /// Note that we *copy out*, instead of returning a ref, because we MUST hold
-    /// the guard as long as &T is live. For a blocking mutex, that's all kinds
-    /// of problematic, but even with the async mutex, holding a `MutexGuard<T>`
-    /// or similiar **will inhibit all other flash operations**, which is bad!
-    ///
-    /// So just hold the lock and copy out.
-    pub async fn load(&self) -> Result<T, Error> {
-        // Lock the list if we look at ourself
-        let _inner = self.list.inner.lock().await;
+    pub fn load(&self) -> T {
+        // No need to lock the list because if the state is proper, we can always
+        // read node.t. The I/O worker will never change node.t except at initial
+        // hydration. Later, only write() will change node.t, but it requires &self.
 
         let nodeptr: *mut Node<T> = self.inner.inner.get();
         let noderef = unsafe { &mut *nodeptr };
+
+        // We DON'T hold a lock to the list, so use Acquire for load
+        let state = State::from_u8(noderef.header.state.load(Ordering::Acquire));
+
         // is T valid?
-        match noderef.header.state {
+        match state {
             // All these states implicate that process_reads/_writes has not finished
             // but they hold a lock on the list, so we should never reach this piece
             // of code while holding a lock ourselves
             //
             // TODO @James: Again, if we are in an invalid state, should we rather panic?
             State::Initial | State::NonResident => {
-                return Err(Error::InvalidState(
-                    noderef.header.key,
-                    noderef.header.state,
-                ));
+                unreachable!("This state should not be observed")
             }
             // Handle all states here explicitly to avoid bugs with a catch-all
             State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
         }
         // yes!
-        Ok(unsafe { noderef.t.assume_init_ref().clone() })
+        unsafe { noderef.t.assume_init_ref().clone() }
     }
 
     /// Write data to the buffer, and mark the buffer as "needs to be flushed".
@@ -431,15 +488,15 @@ where
 
         let nodeptr: *mut Node<T> = self.inner.inner.get();
         let noderef = unsafe { &mut *nodeptr };
-        match noderef.header.state {
+
+        let state = State::from_u8(noderef.header.state.load(Ordering::Relaxed));
+
+        match state {
             // `Initial` and `NonResident` can not occur for the same reason as
             // outlined in load(). OldData should have been replaced with a Default value.
             State::Initial | State::NonResident => {
                 debug!("write() on invalid state: {:?}", noderef.header.state);
-                return Err(Error::InvalidState(
-                    noderef.header.key,
-                    noderef.header.state,
-                ));
+                return Err(Error::InvalidState(noderef.header.key, state));
             }
             State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
         }
@@ -450,7 +507,12 @@ where
             let mutref: &mut T = noderef.t.assume_init_mut();
             core::mem::swap(&mut t, mutref);
         }
-        noderef.header.state = State::NeedsWrite;
+
+        // We hold a lock to the list, so use Relaxed
+        noderef
+            .header
+            .state
+            .store(State::NeedsWrite.into_u8(), Ordering::Relaxed);
 
         // Let the write task know we have work
         self.list.needs_write.wake();
@@ -477,14 +539,6 @@ where
 // ---- impl State ----
 // ---- impl Node ----
 // ---- impl NodeHeader ----
-
-impl NodeHeader {
-    pub(crate) unsafe fn set_state(self: Pin<&mut Self>, state: State) {
-        unsafe {
-            self.get_unchecked_mut().state = state;
-        }
-    }
-}
 
 /// This is cordyceps' intrusive linked list trait. It's mostly how you
 /// shift around pointers semantically.
@@ -591,20 +645,18 @@ where
 /// # Safety
 /// The caller must ensure that:
 /// - The storage list mutex is held during the entire operation to prevent concurrent access
-/// - The `node` pointer is valid and points to a properly initialized `Node<T>`
-/// - If `drop_old` is `true`, the target `MaybeUninit<T>` contains a valid, initialized `T`
-/// - If `drop_old` is `false`, the target `MaybeUninit<T>` is uninitialized
-/// - The buffer contains valid CBOR data that can be decoded into type `T`
-///
-/// TODO @James: Please review these safety requirements. Are they correct and complete?
+/// - The `node` pointer is valid and points to a properly initialized `Node<T>` in the
+///   `State::Initial` state
 fn deserialize<T>(node: NonNull<Node<()>>, buf: &[u8]) -> Result<usize, ()>
 where
     T: 'static,
     T: CborLen<()>,
     for<'a> T: Decode<'a, ()>,
 {
-    let mut node: NonNull<Node<T>> = node.cast();
-    let noderef: &mut Node<T> = unsafe { node.as_mut() };
+    let node: NonNull<Node<T>> = node.cast();
+
+    // SAFETY: We can always make a shared pointer to the header
+    let hdrref: &NodeHeader = unsafe { &*addr_of!((*node.as_ptr()).header) };
 
     let res = minicbor::decode::<T>(buf);
 
@@ -616,9 +668,14 @@ where
 
     let len = len_with(&t, &mut ());
 
-    // TODO(AJM): anything to do here?
-    debug_assert!(matches!(noderef.header.state, State::Initial));
-    noderef.t = MaybeUninit::new(t);
+    // We require the caller to hold a lock to the list, so use Relaxed
+    debug_assert!(matches!(
+        State::from_u8(hdrref.state.load(Ordering::Relaxed)),
+        State::Initial
+    ));
+    // SAFETY: We only call deser with the lock held, and in the Initial state
+    let body: &mut MaybeUninit<T> = unsafe { &mut *addr_of_mut!((*node.as_ptr()).t) };
+    *body = MaybeUninit::new(t);
 
     Ok(len)
 }
