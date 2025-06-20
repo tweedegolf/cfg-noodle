@@ -59,7 +59,7 @@ async fn test_read_from_empty_flash() {
             let handle = NODE.attach(&LIST).await.unwrap();
 
             // Should return default value
-            let config = handle.load().unwrap();
+            let config = handle.load();
             let default_config = TestConfig::default();
             assert_eq!(
                 config, default_config,
@@ -127,7 +127,7 @@ async fn test_read_clean_state() {
 
             let handle2 = NODE2.attach(&LIST2).await.unwrap();
 
-            let loaded_config = handle2.load().unwrap();
+            let loaded_config = handle2.load();
             assert_eq!(
                 loaded_config, test_config,
                 "Loaded config should match test_config"
@@ -200,8 +200,8 @@ async fn test_read_clean_state_new_config() {
             let handle1 = NODE1.attach(&LIST2).await.unwrap();
             let handle2 = NODE2.attach(&LIST2).await.unwrap();
 
-            let loaded_config1 = handle1.load().unwrap();
-            let loaded_config2 = handle2.load().unwrap();
+            let loaded_config1 = handle1.load();
+            let loaded_config2 = handle2.load();
             assert_eq!(
                 loaded_config1, test_config,
                 "Loaded config should match the test_config"
@@ -327,8 +327,8 @@ async fn test_read_interrupted_write() {
             let handle1 = NODE1_2.attach(&LIST2).await.unwrap();
             let handle2 = NODE2_2.attach(&LIST2).await.unwrap();
 
-            let loaded_config1 = handle1.load().unwrap();
-            let loaded_config2 = handle2.load().unwrap();
+            let loaded_config1 = handle1.load();
+            let loaded_config2 = handle2.load();
             assert_eq!(
                 loaded_config1, test_config1,
                 "Loaded config1 should match test_config"

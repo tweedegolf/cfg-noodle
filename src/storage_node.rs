@@ -454,7 +454,7 @@ where
     }
 
     /// This is a `load` function that copies out the data
-    pub fn load(&self) -> Result<T, Error> {
+    pub fn load(&self) -> T {
         // No need to lock the list because if the state is proper, we can always
         // read node.t. The I/O worker will never change node.t except at initial
         // hydration. Later, only write() will change node.t, but it requires &self.
@@ -473,13 +473,13 @@ where
             //
             // TODO @James: Again, if we are in an invalid state, should we rather panic?
             State::Initial | State::NonResident => {
-                return Err(Error::InvalidState(noderef.header.key, state));
+                unreachable!("This state should not be observed")
             }
             // Handle all states here explicitly to avoid bugs with a catch-all
             State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
         }
         // yes!
-        Ok(unsafe { noderef.t.assume_init_ref().clone() })
+        unsafe { noderef.t.assume_init_ref().clone() }
     }
 
     /// Write data to the buffer, and mark the buffer as "needs to be flushed".
