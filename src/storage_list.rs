@@ -1197,7 +1197,6 @@ mod test {
                 // Load data for the first handle
                 let data: PositronConfig = config_handle
                     .load()
-                    .await
                     .expect("Loading config should not fail");
                 info!("T3 Got {data:?}");
 
@@ -1219,7 +1218,6 @@ mod test {
                 assert_eq!(
                     config_handle
                         .load()
-                        .await
                         .expect("Loading config should not fail"),
                     new_config
                 );
@@ -1261,7 +1259,6 @@ mod test {
                 // Load data for the first handle
                 let data: PositronConfig = config_handle
                     .load()
-                    .await
                     .expect("Loading config should not fail");
                 info!("T3 Got {data:?}");
 
@@ -1283,7 +1280,6 @@ mod test {
                 assert_eq!(
                     config_handle
                         .load()
-                        .await
                         .expect("Loading config should not fail"),
                     new_config
                 );
@@ -1343,7 +1339,6 @@ mod test {
                     custom_config,
                     expecting_already_present
                         .load()
-                        .await
                         .expect("Loading config should not fail"),
                     "Key should already be present"
                 );

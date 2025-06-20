@@ -112,9 +112,9 @@ async fn gc_handles_bad_contents_inner() {
     let node_b = NODE_B.attach(&LIST).await.unwrap();
     let node_c = NODE_C.attach(&LIST).await.unwrap();
 
-    assert_eq!(node_a.load().await.unwrap().data, 33);
-    assert_eq!(node_b.load().await.unwrap().data, 34);
-    assert_eq!(node_c.load().await.unwrap().data, 35);
+    assert_eq!(node_a.load().unwrap().data, 33);
+    assert_eq!(node_b.load().unwrap().data, 34);
+    assert_eq!(node_c.load().unwrap().data, 35);
 
     // yield to ensure initial gc has a chance to run
     yield_now().await;

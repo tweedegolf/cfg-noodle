@@ -423,17 +423,15 @@ where
     R: ScopedRawMutex + 'static,
 {
     /// Obtain the key of a node
-    pub async fn key(&self) -> &str {
-        // todo: this probably doesn't need to be async
-        //
-        // update to be non-async when we work on https://github.com/tweedegolf/cfg-noodle/issues/34
-        let _inner = self.list.inner.lock().await;
+    pub fn key(&self) -> &str {
+        // The node holds an `&'static str`, so we can access it without locking the list
         let nodeptr: *mut Node<T> = self.inner.inner.get();
         let noderef = unsafe { &*nodeptr };
         noderef.header.key
     }
+
     /// This is a `load` function that copies out the data
-    pub async fn load(&self) -> Result<T, Error> {
+    pub fn load(&self) -> Result<T, Error> {
         // No need to lock the list because if the state is proper, we can always
         // read node.t. The I/O worker will never change node.t except at initial
         // hydration. Later, only write() will change node.t, but it requires &self.

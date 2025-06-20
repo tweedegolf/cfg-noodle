@@ -130,7 +130,6 @@ where
         - sequential_storage::item_overhead_size::<T>() as usize;
 }
 
-
 // ---- impl FlashIter ----
 
 impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIter

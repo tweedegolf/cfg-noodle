@@ -38,9 +38,9 @@ async fn many_good_writes_inner() {
     let node_b = NODE_B.attach(&LIST).await.unwrap();
     let node_c = NODE_C.attach(&LIST).await.unwrap();
 
-    assert_eq!(node_a.load().await.unwrap(), SimpleConfig::default());
-    assert_eq!(node_b.load().await.unwrap(), SimpleConfig::default());
-    assert_eq!(node_c.load().await.unwrap(), SimpleConfig::default());
+    assert_eq!(node_a.load().unwrap(), SimpleConfig::default());
+    assert_eq!(node_b.load().unwrap(), SimpleConfig::default());
+    assert_eq!(node_c.load().unwrap(), SimpleConfig::default());
 
     // yield to ensure initial gc has a chance to run
     yield_now().await;
@@ -104,9 +104,9 @@ async fn many_good_writes_inner() {
     let node_b = NODE_B2.attach(&LIST2).await.unwrap();
     let node_c = NODE_C2.attach(&LIST2).await.unwrap();
 
-    assert_eq!(node_a.load().await.unwrap().data, 999);
-    assert_eq!(node_b.load().await.unwrap().data, 9990);
-    assert_eq!(node_c.load().await.unwrap().data, 99900);
+    assert_eq!(node_a.load().unwrap().data, 999);
+    assert_eq!(node_b.load().unwrap().data, 9990);
+    assert_eq!(node_c.load().unwrap().data, 99900);
 
     yield_now().await;
 
@@ -135,9 +135,9 @@ async fn many_good_writes_inner() {
     let node_b = NODE_B3.attach(&LIST3).await.unwrap();
     let node_c = NODE_C3.attach(&LIST3).await.unwrap();
 
-    assert_eq!(node_a.load().await.unwrap().data, 999);
-    assert_eq!(node_b.load().await.unwrap().data, 9990);
-    assert_eq!(node_c.load().await.unwrap().data, 99900);
+    assert_eq!(node_a.load().unwrap().data, 999);
+    assert_eq!(node_b.load().unwrap().data, 9990);
+    assert_eq!(node_c.load().unwrap().data, 99900);
 
     yield_now().await;
 
