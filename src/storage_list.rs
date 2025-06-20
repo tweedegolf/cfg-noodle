@@ -333,7 +333,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 State::NonResident => false,
                 // We DO update default unwritten nodes
                 State::DefaultUnwritten => true,
-                // technically we could update, but we will anyway
+                // technically we could skip updating (we're already in this state),
+                // but we will update anyway
                 State::ValidNoWriteNeeded => true,
                 // We DO update needs write nodes
                 State::NeedsWrite => true,
