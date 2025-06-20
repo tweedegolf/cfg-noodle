@@ -14,7 +14,12 @@ use crate::{
     storage_node::{Node, NodeHeader, State},
 };
 use cordyceps::{List, list::IterRaw};
-use core::{num::NonZeroU32, ops::RangeInclusive, ptr::NonNull, sync::atomic::Ordering};
+use core::{
+    num::NonZeroU32,
+    ops::RangeInclusive,
+    ptr::{NonNull, addr_of},
+    sync::atomic::Ordering,
+};
 use maitake_sync::{Mutex, WaitQueue};
 use minicbor::{
     encode::write::{Cursor, EndOfSlice},
@@ -318,13 +323,27 @@ impl<R: ScopedRawMutex> StorageList<R> {
         });
 
         // The write must have succeeded. So mark all nodes accordingly.
-        for hdrmut in inner.list.iter_mut() {
-            // Mark the store as complete, wake the node if it cares about state
-            // changes.
-            //
-            // SAFETY: We hold the lock to the list, so no other thread can modify
-            // the node while we are modifying it.
-            unsafe { hdrmut.set_state(State::ValidNoWriteNeeded) }
+        for hdrref in inner.list.iter() {
+            let state = hdrref.state.load(Ordering::Acquire);
+            let state = State::from_u8(state);
+            let update = match state {
+                // We DO NOT update any Initial nodes
+                State::Initial => false,
+                // We DO NOT update any NonResident nodes
+                State::NonResident => false,
+                // We DO update default unwritten nodes
+                State::DefaultUnwritten => true,
+                // technically we could update, but we will anyway
+                State::ValidNoWriteNeeded => true,
+                // We DO update needs write nodes
+                State::NeedsWrite => true,
+            };
+            if update {
+                // Mark the store as complete
+                hdrref
+                    .state
+                    .store(State::ValidNoWriteNeeded.into_u8(), Ordering::Release);
+            }
         }
 
         Ok(())
@@ -651,10 +670,9 @@ impl StorageListInner {
             // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
             // to the contents of the node. We COPY OUT the vtable for later use,
             // which is important because we might throw away our `node` ptr shortly.
-            // Also, when holding the lock, use Relaxed ordering.
             let header_meta = {
                 let node_header = unsafe { node_header.as_ref() };
-                match State::from_u8(node_header.state.load(Ordering::Relaxed)) {
+                match State::from_u8(node_header.state.load(Ordering::Acquire)) {
                     State::Initial => Some(node_header.vtable),
                     State::NonResident => None,
                     State::DefaultUnwritten => None,
@@ -678,7 +696,7 @@ impl StorageListInner {
                     // If it went okay, let the node know that it has been hydrated with data
                     hdrmut
                         .state
-                        .store(State::ValidNoWriteNeeded.into_u8(), Ordering::Relaxed);
+                        .store(State::ValidNoWriteNeeded.into_u8(), Ordering::Release);
                 } else {
                     // If there WAS a key, but the deser failed, this means that either the data
                     // was corrupted, or there was a breaking schema change. Either way, we can't
@@ -691,10 +709,9 @@ impl StorageListInner {
                         "Key {:?} exists and was wanted, but deserialization failed",
                         kvpair.key
                     );
-                    // We hold the lock, so use Relaxed
                     hdrmut
                         .state
-                        .store(State::NonResident.into_u8(), Ordering::Relaxed);
+                        .store(State::NonResident.into_u8(), Ordering::Release);
                 }
             }
         }
@@ -733,6 +750,24 @@ impl StorageListInner {
         let mut ctr = 0;
 
         for hdrptr in iter {
+            // First: is this a node that is VALID for serialization?
+            let state = {
+                let state_ref = unsafe { &*addr_of!((*hdrptr.ptr.as_ptr()).state) };
+                let state = state_ref.load(Ordering::Acquire);
+                State::from_u8(state)
+            };
+
+            match state {
+                // State is initial: we can't write this
+                State::Initial => continue,
+                // State is nonresident: we can't write this
+                State::NonResident => continue,
+                // all other states: we can write this
+                State::DefaultUnwritten => {}
+                State::ValidNoWriteNeeded => {}
+                State::NeedsWrite => {}
+            }
+
             // Attempt to serialize: split off first item to reserve space for element
             // discriminant
             let (_first, rest) = buf.split_first_mut().ok_or(Error::Serialization)?;
@@ -776,16 +811,15 @@ impl StorageListInner {
     /// Iterates over all nodes, and changes Initial nodes to NonResident
     fn mark_initial_nonresident(&mut self) {
         // Set nodes in initial states to non resident
-        for hdrmut in self.list.iter_mut() {
-            // We hold the lock, use Relaxed
+        for hdrref in self.list.iter() {
             if matches!(
-                State::from_u8(hdrmut.state.load(Ordering::Relaxed)),
+                State::from_u8(hdrref.state.load(Ordering::Acquire)),
                 State::Initial
             ) {
-                // SAFETY: Initial -> NonResident is always a safe transition for a node
-                unsafe {
-                    hdrmut.set_state(State::NonResident);
-                }
+                // Initial -> NonResident is always a safe transition for a node
+                hdrref
+                    .state
+                    .store(State::NonResident.into_u8(), Ordering::Release);
             }
         }
     }
@@ -796,11 +830,9 @@ impl StorageListInner {
 
         // Iterate over all list nodes and check if any node needs writing or
         // is in an invalid state.
-        for hdrptr in self.list.iter_raw() {
-            let header = unsafe { hdrptr.as_ref() };
-
-            // We hold the lock, use Relaxed
-            match State::from_u8(header.state.load(Ordering::Relaxed)) {
+        for header in self.list.iter() {
+            // The node may be spinning to populate itself right now, so use acquire ordering
+            match State::from_u8(header.state.load(Ordering::Acquire)) {
                 // If no write is needed, we obviously won't write.
                 State::ValidNoWriteNeeded => {}
                 // If the node hasn't been written to flash yet and we initialized it
