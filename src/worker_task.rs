@@ -9,7 +9,7 @@ use mutex_traits::ScopedRawMutex;
 use crate::{
     NdlDataStorage, StorageList,
     error::{Error, LoadStoreError},
-    logging::{error, info, warn},
+    logging::{debug, error, info, warn},
 };
 
 /// A default worker task that manages storage operations based on read/write signals.
@@ -62,35 +62,40 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
         loop {
             let read_fut = async {
                 // Wait for needs_read to be signaled once
+                debug!("worker_task waiting for needs_read signal");
                 list.needs_read().await;
 
                 // Run debounce loop that breaks when needs_read hasn't been signaled
                 // for more than 100ms
                 'debounce: loop {
                     // Make sure we go 100ms with no changes
+                    debug!("Debounce needs_read with 100ms timeout");
                     if embassy_time::with_timeout(Duration::from_millis(100), list.needs_read())
                         .await
                         .is_err()
                     {
                         // Error means timeout reached, so no more debouncing
+                        debug!("Timeout reached, stop debouncing needs_read");
                         break 'debounce;
                     }
                 }
             };
             let write_fut = async {
                 // Wait for needs_read to be signaled once
+                debug!("worker_task waiting for needs_write signal");
                 list.needs_write().await;
 
                 // Run debounce loop that breaks when needs_write hasn't been signaled
                 // for more than 100ms
                 'debounce: loop {
-                    list.needs_write().await;
+                    debug!("Debounce needs_write with 10s timeout");
                     // Make sure we go 10s with no changes
                     if embassy_time::with_timeout(Duration::from_secs(10), list.needs_write())
                         .await
                         .is_err()
                     {
                         // Error means timeout reached, so no more debouncing
+                        debug!("Timeout reached, stop debouncing needs_write");
                         break 'debounce;
                     }
                 }
@@ -125,7 +130,11 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
                 }
                 // needs_write signaled
                 Either3::Second(_) => {
-                    info!("worker task got needs_write signal, processing writes");
+                    info!("worker task got needs_write signal, first process_garbage then write");
+                    
+                    if let Err(e) = list.process_garbage(&mut flash, buf).await {
+                        error!("Error in process_garbage: {:?}", e);
+                    }
                     if let Err(e) = list.process_writes(&mut flash, buf).await {
                         error!("Error in process_writes: {:?}", e);
                     }
@@ -150,22 +159,25 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
     // stopper future finishes, we do a clean "shutdown" of the worker task.
     match select(waker_future, stopper).await {
         // One of the needs_* signals
-        Either::First(_) => (),
+        Either::First(_) => error!("waker_future completed, this should not happen"),
         // The stopper future
-        Either::Second(_) => match list.process_writes(&mut flash, buf).await {
-            Ok(()) => (),
-            Err(LoadStoreError::AppError(Error::NeedsGarbageCollect)) => {
-                if let Err(e) = list.process_garbage(&mut flash, buf).await {
-                    error!("Error in process_garbage: {:?}", e);
+        Either::Second(_) => {
+            info!("stopper future completed, stopping worker task");
+            match list.process_writes(&mut flash, buf).await {
+                Ok(()) => (),
+                Err(LoadStoreError::AppError(Error::NeedsGarbageCollect)) => {
+                    if let Err(e) = list.process_garbage(&mut flash, buf).await {
+                        error!("Error in process_garbage: {:?}", e);
+                    }
+                    if let Err(e) = list.process_writes(&mut flash, buf).await {
+                        error!("Error in process_writes: {:?}", e);
+                    }
                 }
-                if let Err(e) = list.process_writes(&mut flash, buf).await {
-                    error!("Error in process_writes: {:?}", e);
+                Err(LoadStoreError::AppError(Error::NeedsFirstRead)) => {
+                    warn!("closing worker without performing first read");
                 }
+                Err(e) => error!("Error in process_writes: {:?}", e),
             }
-            Err(LoadStoreError::AppError(Error::NeedsFirstRead)) => {
-                warn!("closing worker without performing first read");
-            }
-            Err(e) => error!("Error in process_writes: {:?}", e),
-        },
+        }
     }
 }
