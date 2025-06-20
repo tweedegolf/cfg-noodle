@@ -103,6 +103,7 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
 
             let gc_fut = async {
                 let delay = needs_gc.wait().await;
+                debug!("Got needs_gc signal. Continuing after delay of {}", delay);
                 embassy_time::Timer::after(delay).await;
             };
 
@@ -131,7 +132,7 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
                 // needs_write signaled
                 Either3::Second(_) => {
                     info!("worker task got needs_write signal, first process_garbage then write");
-                    
+
                     if let Err(e) = list.process_garbage(&mut flash, buf).await {
                         error!("Error in process_garbage: {:?}", e);
                     }
@@ -145,6 +146,7 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
                     }
                 }
                 Either3::Third(_) => {
+                    info!("worker task got needs_gc signal, run process_garbage");
                     if let Err(e) = list.process_garbage(&mut flash, buf).await {
                         error!("Error in process_garbage: {:?}", e);
                     } else {
@@ -180,4 +182,5 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
             }
         }
     }
+    info!("worker task stopped!");
 }
