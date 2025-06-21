@@ -495,7 +495,7 @@ where
             // `Initial` and `NonResident` can not occur for the same reason as
             // outlined in load(). OldData should have been replaced with a Default value.
             State::Initial | State::NonResident => {
-                debug!("write() on invalid state: {:?}", noderef.header.state);
+                debug!("write() on invalid state: {:?}", state);
                 return Err(Error::InvalidState(noderef.header.key, state));
             }
             State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
