@@ -476,7 +476,7 @@ where
 
     /// Write data to the buffer, and mark the buffer as "needs to be flushed".
     /// 
-    /// It will await a lock on the list because it modifies the contents of the
+    /// It will await a lock on the [StorageList] because it modifies the contents of the
     /// list node. This may add some delay if the worker task currently holds
     /// a lock on the list for reading from or writing to flash.
     pub async fn write(&self, t: &T) -> Result<(), Error> {
