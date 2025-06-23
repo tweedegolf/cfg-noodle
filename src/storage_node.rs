@@ -318,7 +318,7 @@ where
     /// # };
     /// ```
     pub async fn attach_with_default<R, F: FnOnce() -> T>(
-        &'static mut self,
+        &'static self,
         list: &'static StorageList<R>,
         f: F,
     ) -> Result<StorageListNodeHandle<T, R>, Error>
@@ -339,7 +339,8 @@ where
             // pointer, so when we cast back later, the pointer has the correct provenance!
             // 
             // TODO SAFETY: making this `mut` while we only take `&self` instead of `&mut self`
-            // is probably unsound. So I think we should be taking an `&mut self`
+            // is probably unsound. So I think we should be taking an `&mut self`. But passing static
+            // as mut doesn't work for the caller. How do we solve this?
             let mut hdrnn: NonNull<NodeHeader> = nodenn.cast();
 
             // Check if the key already exists in the list.
