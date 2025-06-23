@@ -23,6 +23,8 @@ pub enum Error {
     InvalidState(&'static str, State),
     /// The flash returned inconsistent data between iterations. This is likely fatal.
     InconsistentFlash,
+    /// The node already has a handle attached.
+    HandleAlreadyAttached,
 }
 
 #[derive(Debug)]

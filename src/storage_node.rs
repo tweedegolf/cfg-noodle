@@ -183,6 +183,9 @@ pub(crate) struct NodeHeader {
     /// The current state of the node. THIS IS SAFETY LOAD BEARING whether
     /// we can access the `T` in the `Node<T>`
     pub(crate) state: AtomicU8,
+    /// Mark that this node has a handle attached to it. So if this is true, a new call
+    /// to `attach` will fail. If this is false, a new handle can be obtained with attach.
+    pub(crate) handle_attached: bool,
     /// This is the type-erased serialize/deserialize `VTable` that is
     /// unique to each `T`, and will be used by the storage worker
     /// to access the `t` indirectly for loading and storing.
@@ -282,6 +285,7 @@ where
                     links: list::Links::new(),
                     key: path,
                     state: AtomicU8::new(State::Initial.into_u8()),
+                    handle_attached: false,
                     vtable: VTable::for_ty::<T>(),
                 },
                 t: MaybeUninit::uninit(),
@@ -335,13 +339,18 @@ where
             // pointer, so when we cast back later, the pointer has the correct provenance!
             let hdrnn: NonNull<NodeHeader> = nodenn.cast();
 
+            // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
+            // to the contents of the node.
+            if unsafe { nodenn.as_ref().header.handle_attached } {
+                return Err(Error::HandleAlreadyAttached);
+            }
             // Check if the key already exists in the list.
             // This also prevents attaching to the list more than once.
             // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
             // to the contents of the node.
             let key = unsafe { &nodenn.as_ref().header.key };
             if inner.find_node(key).is_some() {
-                error!("Key already in use: {:?}", key);
+                error!("Key already in use and attached to handle: {:?}", key);
                 return Err(Error::DuplicateKey);
             } else {
                 inner.list.push_front(hdrnn);
@@ -419,18 +428,19 @@ where
     }
 }
 
-impl<T: MaybeDefmtFormat> Drop for StorageListNode<T> {
+impl<T: MaybeDefmtFormat, R: ScopedRawMutex> Drop for StorageListNodeHandle<T, R> {
     fn drop(&mut self) {
-        // If we DO want to be able to drop, we probably want to unlink from the list.
+        // We require that `StorageListNode` is in a static so it should never actually be
+        // possible to drop a StorageListNode.
         //
-        // However, we more or less require that `StorageListNode` is in a static
-        // (or some kind of linked pointer), so it should never actually be possible
-        // to drop a StorageListNode.
-        //
-        // This could be problematic since we use an async mutex!
-        // TODO @James: You left a note here about this being a problem with the async mutex.
-        // Is there anything we could/should do here since we switched to an async mutex?
-        todo!("We probably don't actually need drop?")
+        // However, we want to allow the handle to be dropped and mark the node accordingly
+        // so it can be attached later on.
+        let nodeptr: *mut Node<T> = self.inner.inner.get();
+        let mut nodenn: NonNull<Node<T>> = unsafe { NonNull::new_unchecked(nodeptr) };
+
+        unsafe {
+            nodenn.as_mut().header.handle_attached = false;
+        }
     }
 }
 
