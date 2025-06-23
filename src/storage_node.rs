@@ -318,7 +318,7 @@ where
     /// # };
     /// ```
     pub async fn attach_with_default<R, F: FnOnce() -> T>(
-        &'static self,
+        &'static mut self,
         list: &'static StorageList<R>,
         f: F,
     ) -> Result<StorageListNodeHandle<T, R>, Error>
@@ -330,30 +330,35 @@ where
         // Add a scope so that the Lock on the List is dropped
 
         {
-            let mut inner = list.inner.lock().await;
+            let mut list_inner = list.inner.lock().await;
             debug!("attach() got Lock on list");
 
             let nodeptr: *mut Node<T> = self.inner.get();
             let nodenn: NonNull<Node<T>> = unsafe { NonNull::new_unchecked(nodeptr) };
             // NOTE: We EXPLICITLY cast the outer Node<T> ptr, instead of using the header
             // pointer, so when we cast back later, the pointer has the correct provenance!
-            let hdrnn: NonNull<NodeHeader> = nodenn.cast();
+            // 
+            // TODO SAFETY: making this `mut` while we only take `&self` instead of `&mut self`
+            // is probably unsound. So I think we should be taking an `&mut self`
+            let mut hdrnn: NonNull<NodeHeader> = nodenn.cast();
 
-            // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
-            // to the contents of the node.
-            if unsafe { nodenn.as_ref().header.handle_attached } {
-                return Err(Error::HandleAlreadyAttached);
-            }
             // Check if the key already exists in the list.
             // This also prevents attaching to the list more than once.
             // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
             // to the contents of the node.
             let key = unsafe { &nodenn.as_ref().header.key };
-            if inner.find_node(key).is_some() {
-                error!("Key already in use and attached to handle: {:?}", key);
-                return Err(Error::DuplicateKey);
-            } else {
-                inner.list.push_front(hdrnn);
+            match list_inner.find_node(key) {
+                Some(node) if unsafe { node.as_ref().handle_attached } => {
+                    error!("Key already in use and attached to handle: {:?}", key);
+                    return Err(Error::DuplicateKey);
+                }
+                _ => {
+                    // Mark node as handle attached and push it to the list
+                    unsafe {
+                        hdrnn.as_mut().handle_attached = true;
+                    }
+                    list_inner.list.push_front(hdrnn);
+                }
             }
             // Let read task know we have work
             list.needs_read.wake();
