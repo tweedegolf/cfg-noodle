@@ -483,7 +483,7 @@ where
     }
 
     /// Write data to the buffer, and mark the buffer as "needs to be flushed".
-    pub async fn write(&self, t: &T) -> Result<(), Error> {
+    pub async fn write(&mut self, t: &T) -> Result<(), Error> {
         let _inner = self.list.inner.lock().await;
 
         let nodeptr: *mut Node<T> = self.inner.inner.get();
