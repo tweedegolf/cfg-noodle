@@ -475,11 +475,11 @@ where
     }
 
     /// Write data to the buffer, and mark the buffer as "needs to be flushed".
-    /// 
+    ///
     /// It will await a lock on the [StorageList] because it modifies the contents of the
     /// list node. This may add some delay if the worker task currently holds
     /// a lock on the list for reading from or writing to flash.
-    pub async fn write(&self, t: &T) -> Result<(), Error> {
+    pub async fn write(&mut self, t: &T) -> Result<(), Error> {
         // Lock the list to get exclusive access to its contents and be allowed
         // to modify it.
         let _inner = self.list.inner.lock().await;

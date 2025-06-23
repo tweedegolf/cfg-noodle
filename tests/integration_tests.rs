@@ -91,7 +91,7 @@ async fn test_read_clean_state() {
             let worker =
                 tokio::task::spawn_local(test_utils::worker_task_tst_sto(&LIST, stopper.clone()));
 
-            let handle = NODE.attach(&LIST).await.unwrap();
+            let mut handle = NODE.attach(&LIST).await.unwrap();
 
             let test_config = TestConfig {
                 value: 42,
@@ -161,7 +161,7 @@ async fn test_read_clean_state_new_config() {
             let worker =
                 tokio::task::spawn_local(test_utils::worker_task_tst_sto(&LIST, stopper.clone()));
 
-            let handle = NODE.attach(&LIST).await.unwrap();
+            let mut handle = NODE.attach(&LIST).await.unwrap();
 
             let test_config = TestConfig {
                 value: 42,
@@ -246,8 +246,8 @@ async fn test_read_interrupted_write() {
             let worker =
                 tokio::task::spawn_local(test_utils::worker_task_tst_sto(&LIST, stopper.clone()));
 
-            let handle1 = NODE1.attach(&LIST).await.unwrap();
-            let handle2 = NODE2.attach(&LIST).await.unwrap();
+            let mut handle1 = NODE1.attach(&LIST).await.unwrap();
+            let mut handle2 = NODE2.attach(&LIST).await.unwrap();
             let test_config1 = TestConfig {
                 value: 1,
                 truth: false,

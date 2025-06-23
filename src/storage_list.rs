@@ -1213,7 +1213,7 @@ mod test {
                     tokio::task::spawn_local(worker_task_seq_sto(&GLOBAL_LIST, flash));
 
                 // Obtain a handle for the first config
-                let config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+                let mut config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
                     Ok(ch) => ch,
                     Err(_) => panic!("Could not attach config 1 to list"),
                 };
@@ -1268,7 +1268,7 @@ mod test {
                     tokio::task::spawn_local(worker_task_tst_sto(&GLOBAL_LIST, stopper.clone()));
 
                 // Obtain a handle for the first config
-                let config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+                let mut config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
                     Ok(ch) => ch,
                     Err(_) => panic!("Could not attach config 1 to list"),
                 };

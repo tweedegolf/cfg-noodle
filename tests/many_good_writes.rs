@@ -34,9 +34,9 @@ async fn many_good_writes_inner() {
     let stopper = Arc::new(WaitQueue::new());
     let hdl = tokio::task::spawn_local(worker_task_tst_sto(&LIST, stopper.clone()));
 
-    let node_a = NODE_A.attach(&LIST).await.unwrap();
-    let node_b = NODE_B.attach(&LIST).await.unwrap();
-    let node_c = NODE_C.attach(&LIST).await.unwrap();
+    let mut node_a = NODE_A.attach(&LIST).await.unwrap();
+    let mut node_b = NODE_B.attach(&LIST).await.unwrap();
+    let mut node_c = NODE_C.attach(&LIST).await.unwrap();
 
     assert_eq!(node_a.load(), SimpleConfig::default());
     assert_eq!(node_b.load(), SimpleConfig::default());
@@ -131,9 +131,9 @@ async fn many_good_writes_inner() {
         rpt.flash,
     ));
 
-    let node_a = NODE_A3.attach(&LIST3).await.unwrap();
-    let node_b = NODE_B3.attach(&LIST3).await.unwrap();
-    let node_c = NODE_C3.attach(&LIST3).await.unwrap();
+    let mut node_a = NODE_A3.attach(&LIST3).await.unwrap();
+    let mut node_b = NODE_B3.attach(&LIST3).await.unwrap();
+    let mut node_c = NODE_C3.attach(&LIST3).await.unwrap();
 
     assert_eq!(node_a.load().data, 999);
     assert_eq!(node_b.load().data, 9990);
