@@ -1217,7 +1217,7 @@ mod test {
                     tokio::task::spawn_local(worker_task_seq_sto(&GLOBAL_LIST, flash));
 
                 // Obtain a handle for the first config
-                let config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+                let mut config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
                     Ok(ch) => ch,
                     Err(_) => panic!("Could not attach config 1 to list"),
                 };
@@ -1228,8 +1228,7 @@ mod test {
                 }
 
                 // Load data for the first handle
-                let data: PositronConfig = config_handle
-                    .load();
+                let data: PositronConfig = config_handle.load();
                 info!("T3 Got {data:?}");
 
                 // Write a new config to first handle
@@ -1247,11 +1246,7 @@ mod test {
                 sleep(Duration::from_millis(100)).await;
 
                 // Assert that the loaded value equals the written value
-                assert_eq!(
-                    config_handle
-                        .load(),
-                    new_config
-                );
+                assert_eq!(config_handle.load(), new_config);
 
                 // Wait for the worker task to finish
                 let _ = tokio::time::timeout(Duration::from_millis(100), worker_task).await;
@@ -1277,7 +1272,7 @@ mod test {
                     tokio::task::spawn_local(worker_task_tst_sto(&GLOBAL_LIST, stopper.clone()));
 
                 // Obtain a handle for the first config
-                let config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+                let mut config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
                     Ok(ch) => ch,
                     Err(_) => panic!("Could not attach config 1 to list"),
                 };
@@ -1288,8 +1283,7 @@ mod test {
                 };
 
                 // Load data for the first handle
-                let data: PositronConfig = config_handle
-                    .load();
+                let data: PositronConfig = config_handle.load();
                 info!("T3 Got {data:?}");
 
                 // Write a new config to first handle
@@ -1307,11 +1301,7 @@ mod test {
                 sleep(Duration::from_millis(100)).await;
 
                 // Assert that the loaded value equals the written value
-                assert_eq!(
-                    config_handle
-                        .load(),
-                    new_config
-                );
+                assert_eq!(config_handle.load(), new_config);
 
                 // Wait for the worker task to finish
                 stopper.close();
@@ -1366,8 +1356,7 @@ mod test {
 
                 assert_eq!(
                     custom_config,
-                    expecting_already_present
-                        .load(),
+                    expecting_already_present.load(),
                     "Key should already be present"
                 );
 
