@@ -424,6 +424,16 @@ where
             State::NeedsWrite => unreachable!("shouldn't observe this in attach"),
         }
 
+        let _lock = list.inner.lock().await;
+        debug!("attach() got Lock on list");
+
+        let nodeptr: *mut Node<T> = self.inner.get();
+        let mut nodenn: NonNull<Node<T>> = unsafe { NonNull::new_unchecked(nodeptr) };
+
+        // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
+        // to the contents of the node.
+        unsafe { nodenn.as_mut().header.handle_attached = true };
+
         Ok(StorageListNodeHandle { list, inner: self })
     }
 }
