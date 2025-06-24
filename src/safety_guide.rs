@@ -49,7 +49,7 @@
 //! 1. The Node header is ALWAYS shared, EXCEPT at the time of attach, at which point we will hold a mut ref to link to the list, this requires we hold the mutex.
 //! 2. A Node must be attached to zero or one lists:
 //!     * We must guarantee a node is prevented from being added to a second list, if it already exists in one.
-//! 3. `attach()` MUST NOT complete/we MUST NOT create a StorageListNodeHdl UNTIL we are no longer in the Initial state.
-//! 4. DURING `Node::attach()`, we may ONLY take a mut ref to `t` IF we are in the NonResident state, AND we hold the mutex.
-//! 5. When calling `Hdl::write()`, we MUST hold the mutex.
-//! 6. When calling `Hdl::load()`, we DO NOT need the mutex, because we've already guaranteed we are not in Initial/NonResident state, and the list will never attempt to mutate `t`, but may also have a shared ref to `t`.
+//! 3. `attach()` MUST NOT complete/we MUST NOT create a StorageListNodeHandle UNTIL we are no longer in the Initial state.
+//! 4. DURING `StorageListNode::attach()`, we may ONLY take a mut ref to `t` IF we are in the NonResident state, AND we hold the mutex.
+//! 5. When calling `StorageListNodeHandle::write()`, we MUST hold the mutex.
+//! 6. When calling `StorageListNodeHandle::load()`, we DO NOT need the mutex, because we've already guaranteed we are not in Initial/NonResident state, and the list will never attempt to mutate `t`, but may also have a shared ref to `t`.
