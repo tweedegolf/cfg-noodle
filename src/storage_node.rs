@@ -50,7 +50,7 @@ where
     T: 'static + MaybeDefmtFormat,
     R: ScopedRawMutex + 'static,
 {
-    /// We PRETEND we have a &'static StorageList<R>, it's actually
+    /// We PRETEND we have a `&'static StorageList<R>`, it's actually
     /// stored in the inner->taken_for_list. It is important that we
     /// retain the `R` generic so that we can correctly interact with
     /// the pointer to the list, which has been erased in `taken_for_list`.
