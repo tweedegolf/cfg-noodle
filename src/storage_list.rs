@@ -6,6 +6,8 @@
 //! Users will typically create a [`StorageList`], and then primarily interact with
 //! [`StorageListNode`](crate::StorageListNode) and [`StorageListNodeHandle`](crate::StorageListNodeHandle)
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use crate::{
     Crc32, Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData, StepErr, StepResult,
     error::{Error, LoadStoreError},
@@ -467,7 +469,9 @@ impl StorageListInner {
     /// * `Some(NonNull<NodeHeader>)` - A non-null pointer to the matching node header
     /// * `None` - If no node with the given key exists in the list
     pub(crate) fn find_node(&mut self, key: &str) -> Option<NonNull<NodeHeader>> {
-        // SAFETY: We have exclusive access to the contents of the list.
+        // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
+        // StorageListInner is only usable with the mutex locked, preventing attach/detach
+        // of new nodes.
         //
         // NOTE: although we could use `iter` for the search, we need to return a pointer
         // with full node provenance, so we use iter_raw instead.
@@ -667,10 +671,10 @@ impl StorageListInner {
                 continue;
             };
 
-            // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
-            // to the contents of the node. We COPY OUT the vtable for later use,
-            // which is important because we might throw away our `node` ptr shortly.
             let header_meta = {
+                // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
+                // StorageListInner is only usable with the mutex locked, preventing attach/detach
+                // of new nodes.
                 let node_header = unsafe { node_header.as_ref() };
                 match State::from_u8(node_header.state.load(Ordering::Acquire)) {
                     State::Initial => Some(node_header.vtable),
@@ -682,18 +686,25 @@ impl StorageListInner {
             };
             if let Some(vtable) = header_meta {
                 // Make a node pointer from a header pointer.
-                let mut hdrptr: NonNull<NodeHeader> = node_header;
+                let hdrptr: NonNull<NodeHeader> = node_header;
                 let nodeptr: NonNull<Node<()>> = hdrptr.cast();
 
                 // Call the deserialization function
+                //
+                // SAFETY: StorageList Rule 3: We have the mutex locked, and we have checked the
+                // node is in the Initial state.
                 let res = (vtable.deserialize)(nodeptr, kvpair.body);
 
-                // SAFETY: We can re-magic a reference to the header, because the NonNull<Node<()>>
-                // does not have a live reference anymore
-                let hdrmut = unsafe { hdrptr.as_mut() };
+                // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
+                // StorageListInner is only usable with the mutex locked, preventing attach/detach
+                // of new nodes.
+                let hdrmut = unsafe { hdrptr.as_ref() };
 
+                // SAFETY: StorageList Rule 2: We are holding the mutex, we can change
+                // the state of the node.
                 if res.is_ok() {
                     // If it went okay, let the node know that it has been hydrated with data
+                    //
                     hdrmut
                         .state
                         .store(State::ValidNoWriteNeeded.into_u8(), Ordering::Release);
@@ -750,6 +761,9 @@ impl StorageListInner {
         for hdrptr in iter {
             // First: is this a node that is VALID for serialization?
             let state = {
+                // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
+                // StorageListInner is only usable with the mutex locked, preventing attach/detach
+                // of new nodes.
                 let state_ref = unsafe { &*addr_of!((*hdrptr.ptr.as_ptr()).state) };
                 let state = state_ref.load(Ordering::Acquire);
                 State::from_u8(state)
@@ -918,11 +932,12 @@ struct StaticRawIter<'a> {
     iter: IterRaw<'a, NodeHeader>,
 }
 
-/// ## Safety
-/// The contained IterRaw is only valid for the lifetime of the List it comes
-/// from, which can only be obtained by holding the mutex. This means that we
+/// SAFETY: The contained IterRaw is only valid for the lifetime of the List it
+/// comes from, which can only be obtained by holding the mutex. This means that we
 /// have exclusive access, and all nodes must be 'static. Therefore, it is
 /// sound to Send both the iterator, and the wrapped NonNulls it returns.
+///
+/// StorageList Rule 1: Nodes cannot be attached/detached while holding the mutex
 unsafe impl Send for StaticRawIter<'_> {}
 
 impl Iterator for StaticRawIter<'_> {
@@ -940,13 +955,16 @@ impl Iterator for StaticRawIter<'_> {
 /// yields `NonNull<T>`s, the iterated nodes are not Send. This adapter is
 /// sound because for as long as we have the IterRaw live, the mutex must remain
 /// locked.
-///
-/// ## Safety
-/// This must only be used when the List mutex is locked and Node and Anchor
-/// live &'static.
 struct SendPtr {
     ptr: NonNull<NodeHeader>,
 }
+
+/// SAFETY: The contained NodeHeader ptr is only valid for the lifetime of the List it
+/// comes from, which can only be obtained by holding the mutex. This means that we
+/// have exclusive access, and all nodes must be 'static. Therefore, it is
+/// sound to Send the wrapped NonNull.
+///
+/// StorageList Rule 1: Nodes cannot be attached/detached while holding the mutex
 unsafe impl Send for SendPtr {}
 
 struct KvPair<'a> {
@@ -996,6 +1014,9 @@ pub(crate) fn serialize_node(
     buf: &mut [u8],
 ) -> Result<usize, Error> {
     let (vtable, key) = {
+        // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
+        // StorageListInner is only usable with the mutex locked, preventing attach/detach
+        // of new nodes.
         let node = unsafe { headerptr.as_ref() };
         (node.vtable, node.key)
     };
@@ -1017,6 +1038,10 @@ pub(crate) fn serialize_node(
     let nodeptr: NonNull<Node<()>> = headerptr.cast();
 
     // Serialize payload into buffer
+    //
+    // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
+    // StorageListInner is only usable with the mutex locked, preventing attach/detach
+    // of new nodes.
     match (vtable.serialize)(nodeptr, remain) {
         Ok(len) => Ok(len + used),
         Err(_) => {
