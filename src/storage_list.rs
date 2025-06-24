@@ -698,14 +698,14 @@ impl StorageListInner {
                 // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
                 // StorageListInner is only usable with the mutex locked, preventing attach/detach
                 // of new nodes.
-                let hdrmut = unsafe { hdrptr.as_ref() };
+                let hdrref = unsafe { hdrptr.as_ref() };
 
                 // SAFETY: StorageList Rule 2: We are holding the mutex, we can change
                 // the state of the node.
                 if res.is_ok() {
                     // If it went okay, let the node know that it has been hydrated with data
                     //
-                    hdrmut
+                    hdrref
                         .state
                         .store(State::ValidNoWriteNeeded.into_u8(), Ordering::Release);
                 } else {
@@ -718,7 +718,7 @@ impl StorageListInner {
                         "Key {:?} exists and was wanted, but deserialization failed",
                         kvpair.key
                     );
-                    hdrmut
+                    hdrref
                         .state
                         .store(State::NonResident.into_u8(), Ordering::Release);
                 }
@@ -784,8 +784,9 @@ impl StorageListInner {
             // discriminant
             let (_first, rest) = buf.split_first_mut().ok_or(Error::Serialization)?;
 
-            // SAFETY: we know the node pointer is valid (and valid to read), and we
-            // know the mutex is head (StorageListInner access requires it).
+            // SAFETY: we know the node pointer is valid (and valid to read as it is NOT
+            // in the InitialNonResident state), and we know the mutex is held
+            // (StorageListInner access requires it).
             let used = unsafe { serialize_node(hdrptr.ptr, rest)? };
 
             let used = &mut buf[..(used + 1)];
@@ -1010,6 +1011,7 @@ fn extract(item: &[u8]) -> Result<KvPair<'_>, Error> {
 /// The caller must ensure that:
 ///
 /// - `headerptr` points to a valid NodeHeader
+/// - `headerptr` points to a node that is valid for reading (e.g. not Initial/NonResident)
 /// - The storage list mutex is held during the entire operation
 unsafe fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Result<usize, Error> {
     let (vtable, key) = {
