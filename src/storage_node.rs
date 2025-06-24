@@ -77,15 +77,19 @@ where
 /// ## State transition diagram
 ///
 /// ```text
-/// ┌─────────┐    ┌─────────────┐   ┌────────────────────┐
-/// │ Initial │─┬─▶│ NonResident │──▶│  DefaultUnwritten  │─┐
-/// └─────────┘ │  └─────────────┘   └────────────────────┘ │
-///             │                                           ▼
-///             │         ┌────────────────────┐     ┌────────────┐
-///             └────────▶│ ValidNoWriteNeeded │────▶│ NeedsWrite │
-///                       └────────────────────┘     └────────────┘
-///                                  ▲                      │
-///                                  └──────────────────────┘
+///             ─ ─ ─ ─ (6)
+///            │
+///            ▼
+///       ┌─────────┐   (1)    ┌─────────────┐
+///       │ Initial │─────────▶│ NonResident │
+///       └─────────┘          └─────────────┘
+///            │(2)                   │(3)
+///            ▼                      ▼
+/// ┌────────────────────┐ (4) ┌─────────────┐
+/// │ ValidNoWriteNeeded │◀────│ NeedsWrite  │
+/// └────────────────────┘     └─────────────┘
+///            │           (5)        ▲
+///            └──────────────────────┘
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -105,12 +109,6 @@ pub enum State {
     /// In this state, `t` is NOT valid, and is uninitialized. it MUST NOT be
     /// read.
     NonResident,
-    /// The value has been initialized using a default value (NOT from flash)
-    /// and needs to be written to flash.
-    ///
-    /// In this state, `t` IS valid, and may be read at any time (by the holder
-    /// of the lock).
-    DefaultUnwritten,
     /// The value has been initialized using a value from flash. No writes are
     /// pending.
     ///
@@ -118,7 +116,8 @@ pub enum State {
     /// of the lock).
     ValidNoWriteNeeded,
     /// The value has been written, but these changes have NOT been flushed back
-    /// to the flash.
+    /// to the flash. This includes the case where the node has "written back"
+    /// the a user-defined default value.
     ///
     /// In this state, `t` IS valid, and may be read at any time (by the holder
     /// of the lock).
@@ -131,9 +130,8 @@ impl State {
         match self {
             State::Initial => 0,
             State::NonResident => 1,
-            State::DefaultUnwritten => 2,
-            State::ValidNoWriteNeeded => 3,
-            State::NeedsWrite => 4,
+            State::ValidNoWriteNeeded => 2,
+            State::NeedsWrite => 3,
         }
     }
     /// Convert u8 to state.
@@ -144,9 +142,8 @@ impl State {
         match value {
             0 => State::Initial,
             1 => State::NonResident,
-            2 => State::DefaultUnwritten,
-            3 => State::ValidNoWriteNeeded,
-            4 => State::NeedsWrite,
+            2 => State::ValidNoWriteNeeded,
+            3 => State::NeedsWrite,
             _ => panic!("Invalid state value"),
         }
     }
@@ -470,14 +467,14 @@ where
                 // We do NOT hold the lock, use Release ordering.
                 hdrref
                     .state
-                    .store(State::DefaultUnwritten.into_u8(), Ordering::Release);
+                    .store(State::NeedsWrite.into_u8(), Ordering::Release);
             }
             // This state is set by this function if the node is non resident
-            State::DefaultUnwritten | State::NeedsWrite if !already_attached => {
+            State::NeedsWrite if !already_attached => {
                 unreachable!("shouldn't observe this in first attach")
             }
             // If this isn't our first attach, we might see already pending data
-            State::DefaultUnwritten | State::NeedsWrite => (),
+            State::NeedsWrite => (),
             // This is the usual case: key found in flash and node hydrated
             State::ValidNoWriteNeeded => (),
         }
@@ -566,7 +563,7 @@ where
                 // In these states, there is no data to drop
                 State::Initial | State::NonResident => {}
                 // In these states, there IS data to drop
-                State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {
+                State::ValidNoWriteNeeded | State::NeedsWrite => {
                     mut_ref.t.assume_init_drop();
                 }
             }
@@ -639,7 +636,7 @@ where
                 unreachable!("This state should not be observed")
             }
             // Handle all states here explicitly to avoid bugs with a catch-all
-            State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
+            State::ValidNoWriteNeeded | State::NeedsWrite => {}
         }
         // yes!
         //
@@ -673,7 +670,7 @@ where
                 debug!("write() on invalid state: {:?}", state);
                 return Err(Error::InvalidState(noderef.header.key, state));
             }
-            State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
+            State::ValidNoWriteNeeded | State::NeedsWrite => {}
         }
         // We do a swap instead of a write here, to ensure that we
         // call `drop` on the "old" contents of the buffer.

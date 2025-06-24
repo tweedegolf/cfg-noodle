@@ -331,8 +331,6 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 State::Initial => false,
                 // We DO NOT update any NonResident nodes
                 State::NonResident => false,
-                // We DO update default unwritten nodes
-                State::DefaultUnwritten => true,
                 // technically we could skip updating (we're already in this state),
                 // but we will update anyway
                 State::ValidNoWriteNeeded => true,
@@ -675,7 +673,6 @@ impl StorageListInner {
                 match State::from_u8(node_header.state.load(Ordering::Acquire)) {
                     State::Initial => Some(node_header.vtable),
                     State::NonResident => None,
-                    State::DefaultUnwritten => None,
                     State::ValidNoWriteNeeded => None,
                     State::NeedsWrite => None,
                 }
@@ -761,7 +758,6 @@ impl StorageListInner {
                 // State is nonresident: we can't write this
                 State::NonResident => continue,
                 // all other states: we can write this
-                State::DefaultUnwritten => {}
                 State::ValidNoWriteNeeded => {}
                 State::NeedsWrite => {}
             }
@@ -833,12 +829,12 @@ impl StorageListInner {
             match State::from_u8(header.state.load(Ordering::Acquire)) {
                 // If no write is needed, we obviously won't write.
                 State::ValidNoWriteNeeded => {}
-                // If the node hasn't been written to flash yet and we initialized it
-                // with a Default, we now write it to flash.
+                // The node has been changed (including default write-backs) but not
+                // written to flash yet.
                 //
                 // NOTE: We don't want to early return so we can detect nodes in invalid
                 // states
-                State::DefaultUnwritten | State::NeedsWrite => needs_writing = true,
+                State::NeedsWrite => needs_writing = true,
                 // A node may be in `Initial` state, if it has been attached but
                 // `process_reads` hasn't run, yet.
                 State::Initial => {
