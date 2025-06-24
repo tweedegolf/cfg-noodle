@@ -23,6 +23,10 @@ pub enum Error {
     InvalidState(&'static str, State),
     /// The flash returned inconsistent data between iterations. This is likely fatal.
     InconsistentFlash,
+    /// Tried to create a Node Handle when one already exists for a given node
+    AlreadyTaken,
+    /// Node exists in another list already and needs to be detached
+    NodeInOtherList,
 }
 
 #[derive(Debug)]

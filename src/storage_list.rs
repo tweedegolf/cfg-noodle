@@ -1400,4 +1400,149 @@ mod test {
             })
             .await;
     }
+
+    /// Test creating two handles from the same node fails
+    #[test(tokio::test)]
+    async fn test_duplicate_handle() {
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config");
+
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let stopper = Arc::new(WaitQueue::new());
+                info!("Spawn worker_task");
+                // We still need the worker task so we can fulfill reads
+                let _worker_task =
+                    tokio::task::spawn_local(worker_task_tst_sto(&GLOBAL_LIST, stopper.clone()));
+
+                // Obtain a handle for the config
+                let _config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+                    Ok(ch) => ch,
+                    Err(_) => panic!("Could not attach config 1 to list"),
+                };
+
+                // Try to re-obtain a handle for the same config.
+                let config_handle = POSITRON_CONFIG1.attach(&GLOBAL_LIST).await;
+                assert_eq!(
+                    config_handle.expect_err("Duplicate handle did not cause an error"),
+                    Error::AlreadyTaken,
+                );
+            })
+            .await;
+    }
+
+    /// Test reattaching a node fails before dropping the handle and works after dropping the handle
+    #[test(tokio::test)]
+    async fn test_reattach_handle() {
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config");
+
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let stopper = Arc::new(WaitQueue::new());
+                info!("Spawn worker_task");
+                // We still need the worker task so we can fulfill reads
+                let _worker_task =
+                    tokio::task::spawn_local(worker_task_tst_sto(&GLOBAL_LIST, stopper.clone()));
+
+                // Obtain a handle for the config
+                let _config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+                    Ok(ch) => ch,
+                    Err(_) => panic!("Could not attach config 1 to list"),
+                };
+
+                // Try to re-obtain a handle for the same config on the same list.
+                let config_handle = POSITRON_CONFIG1.attach(&GLOBAL_LIST).await;
+                assert_eq!(
+                    config_handle.expect_err("Duplicate handle did not cause an error"),
+                    Error::AlreadyTaken,
+                );
+
+                // explicitly drop handle
+                drop(_config_handle);
+
+                // Re-attach allowed
+                let _config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST).await {
+                    Ok(ch) => ch,
+                    Err(_) => panic!("Could not re-attach config 1 to list"),
+                };
+            })
+            .await;
+    }
+
+    /// Test creating two handles from the same node fails
+    #[test(tokio::test)]
+    async fn test_cant_reattach_without_detach_handle() {
+        static GLOBAL_LIST1: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static GLOBAL_LIST2: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
+            StorageListNode::new("positron/config");
+
+        let local = LocalSet::new();
+        local
+            .run_until(async move {
+                let stopper = Arc::new(WaitQueue::new());
+                info!("Spawn worker_task");
+                // We still need the worker task so we can fulfill reads
+                let _worker_task1 =
+                    tokio::task::spawn_local(worker_task_tst_sto(&GLOBAL_LIST1, stopper.clone()));
+                // We still need the worker task so we can fulfill reads
+                let _worker_task2 =
+                    tokio::task::spawn_local(worker_task_tst_sto(&GLOBAL_LIST2, stopper.clone()));
+
+                // Obtain a handle for the config
+                let _config_handle = match POSITRON_CONFIG1.attach(&GLOBAL_LIST1).await {
+                    Ok(ch) => ch,
+                    Err(_) => panic!("Could not attach config 1 to list"),
+                };
+
+                // Try to re-obtain a handle for the same config on the same list.
+                let config_handle = POSITRON_CONFIG1.attach(&GLOBAL_LIST1).await;
+                assert_eq!(
+                    config_handle.expect_err("Duplicate handle did not cause an error"),
+                    Error::AlreadyTaken,
+                );
+
+                // Try to attach to a different list
+                let config_handle = POSITRON_CONFIG1.attach(&GLOBAL_LIST2).await;
+                assert_eq!(
+                    config_handle.expect_err("Attach on second list shouldn't work"),
+                    Error::NodeInOtherList,
+                );
+
+                // explicitly drop handle
+                drop(_config_handle);
+
+                // Try to attach to a different list
+                let config_handle = POSITRON_CONFIG1.attach(&GLOBAL_LIST2).await;
+                assert_eq!(
+                    config_handle.expect_err("Attach on second list shouldn't work"),
+                    Error::NodeInOtherList,
+                );
+
+                // Detach from wrong list doesn't work
+                let res = POSITRON_CONFIG1.detach(&GLOBAL_LIST2).await;
+                assert_eq!(
+                    res.expect_err("Detach from wrong list shouldn't work"),
+                    Error::NodeInOtherList,
+                );
+
+                // Detach from list
+                let _: () = POSITRON_CONFIG1
+                    .detach(&GLOBAL_LIST1)
+                    .await
+                    .expect("Detach should succeed");
+
+                // Try to attach to a different list
+                let _config_handle = POSITRON_CONFIG1
+                    .attach(&GLOBAL_LIST2)
+                    .await
+                    .expect("Attach after detach should work");
+            })
+            .await;
+    }
 }
