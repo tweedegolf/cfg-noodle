@@ -3,7 +3,17 @@
 //! This is only relevant if you are working on (or curious about) the internals
 //! of `cfg-noodle` - as a user, all safety invariants are maintained internally.
 //!
+//! `cfg-noodle` contains a lot of unsafe code, so to make review and
+//! development easier, we maintain all of the "big picture" rules here so that
+//! they can be referenced in various `// SAFETY` comments or where these
+//! invariants are enforced.
+//!
 //! ## The Safety Rules
+//!
+//! ### Node States
+//!
+//! See the docs of [`State`](crate::storage_node::State) for the rules in each
+//! state that a Node may occupy.
 //!
 //! ### State Transitions
 //!
