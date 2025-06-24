@@ -619,13 +619,16 @@ where
     pub fn load(&self) -> T {
         // No need to lock the list because if the state is proper, we can always
         // read node.t. The I/O worker will never change node.t except at initial
-        // hydration. Later, only write() will change node.t, but it requires &self.
-
+        // hydration. Later, only write() will change node.t, but it requires &mut self.
         let nodeptr: *mut Node<T> = self.inner.inner.get();
-        let noderef = unsafe { &mut *nodeptr };
 
-        // We DON'T hold a lock to the list, so use Acquire for load
-        let state = State::from_u8(noderef.header.state.load(Ordering::Acquire));
+        // SAFETY: StorageListNodeHandle Rule 1 - Header is always shared
+        let state = unsafe {
+            let hdrptr: *const NodeHeader = addr_of!((*nodeptr).header);
+            let hdr_ref: &NodeHeader = &*hdrptr;
+            // We DON'T hold a lock to the list, so use Acquire for load
+            State::from_u8(hdr_ref.state.load(Ordering::Acquire))
+        };
 
         // is T valid?
         match state {
@@ -639,7 +642,13 @@ where
             State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {}
         }
         // yes!
-        unsafe { noderef.t.assume_init_ref().clone() }
+        //
+        // SAFETY: StorageListNodeHandle Rule 7 - Shared access to T is allowed without
+        // locking the mutex
+        unsafe {
+            let tptr: *const MaybeUninit<T> = addr_of!((*nodeptr).t);
+            (*tptr).assume_init_ref().clone()
+        }
     }
 
     /// Write data to the buffer, and mark the buffer as "needs to be flushed".
