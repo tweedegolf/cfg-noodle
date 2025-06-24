@@ -1,7 +1,7 @@
 //! # Implementor's safety guide
 //!
 //! This is only relevant if you are working on (or curious about) the internals of
-//! `cfg-noodle` - as a user, all safety variants are maintained internally.
+//! `cfg-noodle` - as a user, all safety invariants are maintained internally.
 //!
 //! ## The Safety Rules
 //!
