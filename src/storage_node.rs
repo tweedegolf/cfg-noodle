@@ -117,7 +117,7 @@ pub enum State {
     ValidNoWriteNeeded,
     /// The value has been written, but these changes have NOT been flushed back
     /// to the flash. This includes the case where the node has "written back"
-    /// the default value.
+    /// the a user-defined default value.
     ///
     /// In this state, `t` IS valid, and may be read at any time (by the holder
     /// of the lock).

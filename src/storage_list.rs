@@ -829,8 +829,8 @@ impl StorageListInner {
             match State::from_u8(header.state.load(Ordering::Acquire)) {
                 // If no write is needed, we obviously won't write.
                 State::ValidNoWriteNeeded => {}
-                // If the node hasn't been written to flash yet and we initialized it
-                // with a Default, we now write it to flash.
+                // The node has been changed (including default write-backs) but not
+                // written to flash yet.
                 //
                 // NOTE: We don't want to early return so we can detect nodes in invalid
                 // states
