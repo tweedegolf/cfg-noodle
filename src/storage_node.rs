@@ -601,6 +601,9 @@ where
 
     fn list(&self) -> &'static StorageList<R> {
         let ptr: *mut () = self.inner.taken_for_list.load(Ordering::Acquire);
+        debug_assert!(!ptr.is_null(), "handle should not be null");
+        debug_assert_eq!((ptr as usize) & 1, 1, "'is taken' bit should be set");
+
         // SAFETY: the existence of a StorageListNodeHandle ensures that the taken_for_list
         // field is set one byte past the start of a StorageList. We can safely decrement
         // this and use it as a static reference.
@@ -710,6 +713,7 @@ where
                 .taken_for_list
                 .fetch_update(Ordering::Release, Ordering::Acquire, |old| {
                     debug_assert!(!old.is_null());
+                    debug_assert_eq!((old as usize) & 1, 1, "'is taken' bit should be set");
                     Some(unsafe { old.byte_sub(1) })
                 });
         debug_assert!(res.is_ok());
