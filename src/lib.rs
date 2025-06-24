@@ -7,6 +7,7 @@
 pub mod error;
 pub mod flash;
 pub mod worker_task;
+pub mod safety_guide;
 
 pub use mutex_traits;
 
