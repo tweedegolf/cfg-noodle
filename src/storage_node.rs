@@ -344,7 +344,7 @@ where
                 assert!(align > 1, "bithacking requires alignment greater than 1");
             };
 
-            // Check: Is this node eligible to take? A node is elligible to take
+            // Check: Is this node eligible to take? A node is eligible to take
             // if EITHER it is linked to the current list already, but no handle
             // exists, OR if the node is not attached to any list.
             let list_ptr: *const StorageList<R> = list;

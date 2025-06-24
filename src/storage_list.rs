@@ -1433,7 +1433,7 @@ mod test {
             .await;
     }
 
-    /// Test creating two handles from the same node fails
+    /// Test reattaching a node fails before dropping the handle and works after dropping the handle
     #[test(tokio::test)]
     async fn test_reattach_handle() {
         static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
@@ -1527,7 +1527,7 @@ mod test {
                 // Detach from wrong list doesn't work
                 let res = POSITRON_CONFIG1.detach(&GLOBAL_LIST2).await;
                 assert_eq!(
-                    res.expect_err("Attach on second list shouldn't work"),
+                    res.expect_err("Detach from wrong list shouldn't work"),
                     Error::NodeInOtherList,
                 );
 
