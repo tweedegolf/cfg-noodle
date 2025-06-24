@@ -10,10 +10,10 @@ use cordyceps::{Linked, list};
 use core::{
     cell::UnsafeCell,
     fmt::Debug,
-    marker::PhantomPinned,
+    marker::{PhantomData, PhantomPinned},
     mem::MaybeUninit,
-    ptr::{self, NonNull, addr_of, addr_of_mut},
-    sync::atomic::{AtomicU8, Ordering},
+    ptr::{self, NonNull, addr_of, addr_of_mut, null_mut},
+    sync::atomic::{AtomicPtr, AtomicU8, Ordering},
 };
 use minicbor::{
     CborLen, Decode, Encode,
@@ -31,6 +31,14 @@ pub struct StorageListNode<T: 'static + MaybeDefmtFormat> {
     /// an [`UnsafeCell`], because it might be mutated "spookily" either through the
     /// `StorageListNode`, or via the linked list.
     inner: UnsafeCell<Node<T>>,
+    /// A field that stores the list we have been taken for. This is a null pointer
+    /// on initial creation.
+    ///
+    /// The UPPERMOST bits (except the lowest) is used to store a pointer to the list
+    /// that this node is attached to. The LOWERMOST bit is used to track whether
+    /// a handle for this node is currently live. See `attach_with_default` for
+    /// further explanation.
+    taken_for_list: AtomicPtr<()>,
 }
 
 /// Handle for a `StorageListNode` that has been loaded and thus contains valid data
@@ -42,8 +50,11 @@ where
     T: 'static + MaybeDefmtFormat,
     R: ScopedRawMutex + 'static,
 {
-    /// `StorageList` to which this node has been attached
-    list: &'static StorageList<R>,
+    /// We PRETEND we have a &'static StorageList<R>, it's actually
+    /// stored in the inner->taken_for_list. It is important that we
+    /// retain the `R` generic so that we can correctly interact with
+    /// the pointer to the list, which has been erased in `taken_for_list`.
+    list_ty: PhantomData<&'static StorageList<R>>,
 
     /// Store the StorageListNode for this handle
     inner: &'static StorageListNode<T>,
@@ -281,6 +292,7 @@ where
                 t: MaybeUninit::uninit(),
                 _pin: PhantomPinned,
             }),
+            taken_for_list: AtomicPtr::new(null_mut()),
         }
     }
 
@@ -316,32 +328,91 @@ where
         R: ScopedRawMutex + 'static,
     {
         debug!("Attaching new node");
+        let already_attached;
 
         // Add a scope so that the Lock on the List is dropped
-
         {
             let mut inner = list.inner.lock().await;
             debug!("attach() got Lock on list");
 
-            let nodeptr: *mut Node<T> = self.inner.get();
-            let nodenn: NonNull<Node<T>> = unsafe { NonNull::new_unchecked(nodeptr) };
-            // NOTE: We EXPLICITLY cast the outer Node<T> ptr, instead of using the header
-            // pointer, so when we cast back later, the pointer has the correct provenance!
-            let hdrnn: NonNull<NodeHeader> = nodenn.cast();
+            // We're about to do bit-hacks. Use the least significant bit of the
+            // pointer to store whether a handle exists or not. This requires that
+            // the alignment of the pointer is > 1, so we can ensure that the lowest
+            // bit should always be 0.
+            let _: () = const {
+                let align = align_of::<StorageList<R>>();
+                assert!(align > 1, "bithacking requires alignment greater than 1");
+            };
 
-            // Check if the key already exists in the list.
-            // This also prevents attaching to the list more than once.
-            // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
-            // to the contents of the node.
-            let key = unsafe { &nodenn.as_ref().header.key };
-            if inner.find_node(key).is_some() {
-                error!("Key already in use: {:?}", key);
-                return Err(Error::DuplicateKey);
-            } else {
-                inner.list.push_front(hdrnn);
+            // Check: Is this node eligible to take? A node is elligible to take
+            // if EITHER it is linked to the current list already, but no handle
+            // exists, OR if the node is not attached to any list.
+            let list_ptr: *const StorageList<R> = list;
+            let list_ptr: *mut StorageList<R> = list_ptr.cast_mut();
+            let list_ptr: *mut () = list_ptr.cast();
+            let list_ptr_taken: *mut () = unsafe { list_ptr.byte_add(1) };
+
+            // Attempt to swap the contents with a pointer to the current list
+            let old =
+                self.taken_for_list
+                    .fetch_update(Ordering::Release, Ordering::Acquire, |old| {
+                        // If the old value was null (no list, not attached), OR
+                        // if the old value was for THIS list (not attached), then
+                        // swap for THIS list + attached
+                        if old.is_null() || old == list_ptr {
+                            Some(list_ptr_taken)
+                        } else {
+                            None
+                        }
+                    });
+
+            match old {
+                Ok(ptr) if ptr.is_null() => {
+                    already_attached = false;
+                    debug!("Taking node for first time");
+                }
+                Ok(_ptr) => {
+                    already_attached = true;
+                    debug!("Retaking node");
+                }
+                Err(ptr) if ptr == list_ptr_taken => {
+                    error!("Node already taken");
+                    return Err(Error::AlreadyTaken);
+                }
+                Err(_ptr) => {
+                    error!("Node already exists in other list");
+                    return Err(Error::NodeInOtherList);
+                }
             }
-            // Let read task know we have work
+
+            // Check: passed! If we are already attached to this list, we do not need
+            // (or want!) to run the re-attach logic. If
+            if !already_attached {
+                let nodeptr: *mut Node<T> = self.inner.get();
+                let nodenn: NonNull<Node<T>> = unsafe { NonNull::new_unchecked(nodeptr) };
+                // NOTE: We EXPLICITLY cast the outer Node<T> ptr, instead of using the header
+                // pointer, so when we cast back later, the pointer has the correct provenance!
+                let hdrnn: NonNull<NodeHeader> = nodenn.cast();
+
+                // Check if the key already exists in the list.
+                // This also prevents attaching to the list more than once.
+                // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
+                // to the contents of the node.
+                let key = unsafe { &nodenn.as_ref().header.key };
+                if inner.find_node(key).is_some() {
+                    error!("Key already in use: {:?}", key);
+                    self.taken_for_list.store(null_mut(), Ordering::Release);
+                    return Err(Error::DuplicateKey);
+                } else {
+                    inner.list.push_front(hdrnn);
+                }
+            }
+
+            // Let read task know we MAY have work. This may not be true if we
+            // are re-attaching, but `process_reads` is smart enough to skip
+            // a read if no nodes actually are in a state where they need data.
             list.needs_read.wake();
+
             debug!("attach() release Lock on list");
         }
 
@@ -402,29 +473,110 @@ where
                     .store(State::DefaultUnwritten.into_u8(), Ordering::Release);
             }
             // This state is set by this function if the node is non resident
-            State::DefaultUnwritten => unreachable!("shouldn't observe this in attach"),
+            State::DefaultUnwritten | State::NeedsWrite if !already_attached => {
+                unreachable!("shouldn't observe this in first attach")
+            }
+            // If this isn't our first attach, we might see already pending data
+            State::DefaultUnwritten | State::NeedsWrite => (),
             // This is the usual case: key found in flash and node hydrated
             State::ValidNoWriteNeeded => (),
-            // NeedsWrite indicates that this handle has done a write, which is not possible until after attach has completed
-            State::NeedsWrite => unreachable!("shouldn't observe this in attach"),
         }
 
-        Ok(StorageListNodeHandle { list, inner: self })
+        Ok(StorageListNodeHandle {
+            list_ty: PhantomData,
+            inner: self,
+        })
     }
-}
 
-impl<T: MaybeDefmtFormat> Drop for StorageListNode<T> {
-    fn drop(&mut self) {
-        // If we DO want to be able to drop, we probably want to unlink from the list.
-        //
-        // However, we more or less require that `StorageListNode` is in a static
-        // (or some kind of linked pointer), so it should never actually be possible
-        // to drop a StorageListNode.
-        //
-        // This could be problematic since we use an async mutex!
-        // TODO @James: You left a note here about this being a problem with the async mutex.
-        // Is there anything we could/should do here since we switched to an async mutex?
-        todo!("We probably don't actually need drop?")
+    /// Detach a node from a given list
+    ///
+    /// This is generally never needed: in most cases nodes live on the same StorageList
+    /// for their entire lifetime. This only exists to answer the theoretical "well technically"
+    /// state where you could want to attach a node to a different list. Usage is strongly
+    /// discouraged.
+    ///
+    /// This function returns an error if:
+    ///
+    /// * a [`StorageListNodeHandle`] exists for this node
+    /// * the `list` does not match the [`StorageList`] used for the last attach
+    ///
+    /// This function succeeds if:
+    ///
+    /// * This node is not currently (or was never) attached to a list
+    /// * No [`StorageListNodeHandle`] is live AND the `list` matches the currently attached list
+    ///
+    /// On success, this node is reset to the Initial state, and if the node contains any data,
+    /// it is dropped.
+    ///
+    /// This node will no longer participate in any future reads/writes/garbage collection
+    /// of the list it is detached from.
+    pub async fn detach<R>(&'static self, list: &'static StorageList<R>) -> Result<(), Error>
+    where
+        R: ScopedRawMutex + 'static,
+    {
+        debug!("Detaching node");
+
+        // Again: we are doing bit-hacks. See `attach_with_default` for an explanation.
+        let list_ptr: *const StorageList<R> = list;
+        let list_ptr: *mut StorageList<R> = list_ptr.cast_mut();
+        let list_ptr: *mut () = list_ptr.cast();
+        let list_ptr_taken: *mut () = unsafe { list_ptr.byte_add(1) };
+
+        // First, take the mutex for this list.
+        let mut inner = list.inner.lock().await;
+
+        // Attempt to move from ATTACHED but NOT TAKEN for this list to
+        // Not Attached and Not Taken
+        let old = self.taken_for_list.compare_exchange(
+            list_ptr,
+            null_mut(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+
+        match old {
+            Ok(_ptr) => {
+                debug!("Attached and not taken")
+            }
+            Err(ptr) if ptr == list_ptr_taken => {
+                error!("Node still taken, can't release");
+                return Err(Error::AlreadyTaken);
+            }
+            Err(ptr) if ptr.is_null() => {
+                error!("Node not attached to anything, already detached");
+                return Ok(());
+            }
+            Err(_ptr) => {
+                error!("Node exists in some other list: can't detach");
+                return Err(Error::NodeInOtherList);
+            }
+        }
+
+        // while still holding the lock, detach this node from this list.
+        // on detach, we also reset the node to it's initial state.
+        unsafe {
+            let hdr: NonNull<NodeHeader> =
+                NonNull::new_unchecked(addr_of_mut!((*self.inner.get()).header));
+            let res = inner.list.remove(hdr);
+            debug_assert!(res.is_some());
+
+            // We know we have exclusive access to the node.
+            let mut_ref: &mut Node<T> = &mut *self.inner.get();
+            match State::from_u8(mut_ref.header.state.load(Ordering::Acquire)) {
+                // In these states, there is no data to drop
+                State::Initial | State::NonResident => {}
+                // In these states, there IS data to drop
+                State::DefaultUnwritten | State::ValidNoWriteNeeded | State::NeedsWrite => {
+                    mut_ref.t.assume_init_drop();
+                }
+            }
+            mut_ref
+                .header
+                .state
+                .store(State::Initial.into_u8(), Ordering::Release);
+        }
+
+        Ok(())
     }
 }
 
@@ -445,6 +597,19 @@ where
         let nodeptr: *mut Node<T> = self.inner.inner.get();
         let noderef = unsafe { &*nodeptr };
         noderef.header.key
+    }
+
+    fn list(&self) -> &'static StorageList<R> {
+        let ptr: *mut () = self.inner.taken_for_list.load(Ordering::Acquire);
+        // SAFETY: the existence of a StorageListNodeHandle ensures that the taken_for_list
+        // field is set one byte past the start of a StorageList. We can safely decrement
+        // this and use it as a static reference.
+        unsafe {
+            let ptr: *mut () = ptr.byte_sub(1);
+            let ptr: *const () = ptr.cast_const();
+            let ptr: *const StorageList<R> = ptr.cast();
+            &*ptr
+        }
     }
 
     /// This is a `load` function that copies out the data
@@ -482,7 +647,7 @@ where
     pub async fn write(&mut self, t: &T) -> Result<(), Error> {
         // Lock the list to get exclusive access to its contents and be allowed
         // to modify it.
-        let _inner = self.list.inner.lock().await;
+        let _inner = self.list().inner.lock().await;
 
         let nodeptr: *mut Node<T> = self.inner.inner.get();
         let noderef = unsafe { &mut *nodeptr };
@@ -513,7 +678,7 @@ where
             .store(State::NeedsWrite.into_u8(), Ordering::Relaxed);
 
         // Let the write task know we have work
-        self.list.needs_write.wake();
+        self.list().needs_write.wake();
 
         // old T is dropped
         Ok(())
@@ -531,6 +696,23 @@ where
             .field("list", &"StorageList<R>")
             .field("inner", &"StorageListNode<T>")
             .finish()
+    }
+}
+
+impl<T, R> Drop for StorageListNodeHandle<T, R>
+where
+    T: 'static + MaybeDefmtFormat,
+    R: ScopedRawMutex + 'static,
+{
+    fn drop(&mut self) {
+        let res =
+            self.inner
+                .taken_for_list
+                .fetch_update(Ordering::Release, Ordering::Acquire, |old| {
+                    debug_assert!(!old.is_null());
+                    Some(unsafe { old.byte_sub(1) })
+                });
+        debug_assert!(res.is_ok());
     }
 }
 
