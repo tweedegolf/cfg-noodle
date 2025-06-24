@@ -386,7 +386,7 @@ where
             }
 
             // Check: passed! If we are already attached to this list, we do not need
-            // (or want!) to run the re-attach logic. If
+            // (or want!) to re-run the attach logic.
             if !already_attached {
                 let nodeptr: *mut Node<T> = self.inner.get();
                 let nodenn: NonNull<Node<T>> = unsafe { NonNull::new_unchecked(nodeptr) };
