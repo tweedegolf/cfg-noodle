@@ -693,7 +693,7 @@ impl StorageListInner {
                 //
                 // SAFETY: StorageList Rule 3: We have the mutex locked, and we have checked the
                 // node is in the Initial state.
-                let res = (vtable.deserialize)(nodeptr, kvpair.body);
+                let res = unsafe { (vtable.deserialize)(nodeptr, kvpair.body) };
 
                 // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
                 // StorageListInner is only usable with the mutex locked, preventing attach/detach
@@ -784,7 +784,9 @@ impl StorageListInner {
             // discriminant
             let (_first, rest) = buf.split_first_mut().ok_or(Error::Serialization)?;
 
-            let used = serialize_node(hdrptr.ptr, rest)?;
+            // SAFETY: we know the node pointer is valid (and valid to read), and we
+            // know the mutex is head (StorageListInner access requires it).
+            let used = unsafe { serialize_node(hdrptr.ptr, rest)? };
 
             let used = &mut buf[..(used + 1)];
 
@@ -1006,13 +1008,10 @@ fn extract(item: &[u8]) -> Result<KvPair<'_>, Error> {
 /// # Safety
 ///
 /// The caller must ensure that:
+///
 /// - `headerptr` points to a valid NodeHeader
 /// - The storage list mutex is held during the entire operation
-/// - The buffer is large enough to hold the serialized data
-pub(crate) fn serialize_node(
-    headerptr: NonNull<NodeHeader>,
-    buf: &mut [u8],
-) -> Result<usize, Error> {
+unsafe fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Result<usize, Error> {
     let (vtable, key) = {
         // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
         // StorageListInner is only usable with the mutex locked, preventing attach/detach
@@ -1042,7 +1041,9 @@ pub(crate) fn serialize_node(
     // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
     // StorageListInner is only usable with the mutex locked, preventing attach/detach
     // of new nodes.
-    match (vtable.serialize)(nodeptr, remain) {
+    let res = unsafe { (vtable.serialize)(nodeptr, remain) };
+
+    match res {
         Ok(len) => Ok(len + used),
         Err(_) => {
             error!("Node key+payload too large for serializing into the buffer.");

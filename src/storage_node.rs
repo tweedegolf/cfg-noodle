@@ -218,13 +218,13 @@ pub(crate) struct VTable {
 /// proper `T` is serialized to the buffer.
 ///
 /// If successful, returns the number of byte written to the buffer.
-type SerFn = fn(NonNull<Node<()>>, &mut [u8]) -> Result<usize, ()>;
+type SerFn = unsafe fn(NonNull<Node<()>>, &mut [u8]) -> Result<usize, ()>;
 
 /// A function where the type-erased node pointer goes in, and we attempt
 /// to deserialize a T from the buffer.
 ///
 /// If successful, returns the number of bytes read from the buffer.
-type DeserFn = fn(NonNull<Node<()>>, &[u8]) -> Result<usize, ()>;
+type DeserFn = unsafe fn(NonNull<Node<()>>, &[u8]) -> Result<usize, ()>;
 
 // ---- impl StorageListNode ----
 impl<T> StorageListNode<T>
@@ -786,7 +786,7 @@ impl VTable {
 /// `node.t` MUST be in a valid state before calling this function, AND
 /// the mutex must be held the whole time we are here, because we are reading
 /// from `t`!
-fn serialize<T>(node: NonNull<Node<()>>, buf: &mut [u8]) -> Result<usize, ()>
+unsafe fn serialize<T>(node: NonNull<Node<()>>, buf: &mut [u8]) -> Result<usize, ()>
 where
     T: 'static,
     T: Encode<()>,
@@ -840,7 +840,7 @@ where
 /// - The storage list mutex is held during the entire operation to prevent concurrent access
 /// - The `node` pointer is valid and points to a properly initialized `Node<T>` in the
 ///   `State::Initial` state
-fn deserialize<T>(node: NonNull<Node<()>>, buf: &[u8]) -> Result<usize, ()>
+unsafe fn deserialize<T>(node: NonNull<Node<()>>, buf: &[u8]) -> Result<usize, ()>
 where
     T: 'static,
     T: CborLen<()>,
