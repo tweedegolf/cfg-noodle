@@ -160,12 +160,6 @@ pub(crate) struct Node<T> {
 
     // We generally want this to be in the tail position, because the size of T varies
     // and the pointer to the `NodeHeader` must not change as described above.
-    //
-    // TODO @James: This is very difficult to access from tests but maybe we would
-    // want to have an (test-)interface that lets us create a node with a specific payload
-    // such that we can directly de-/serialize nodes and compare the results in a
-    // unit test. Do you think that makes sense? Or is there a better way to
-    // have unit tests for this?
     t: MaybeUninit<T>,
 }
 
@@ -470,8 +464,6 @@ where
             // All these states implicate that process_reads/_writes has not finished
             // but they hold a lock on the list, so we should never reach this piece
             // of code while holding a lock ourselves
-            //
-            // TODO @James: Again, if we are in an invalid state, should we rather panic?
             State::Initial | State::NonResident => {
                 unreachable!("This state should not be observed")
             }
@@ -483,7 +475,13 @@ where
     }
 
     /// Write data to the buffer, and mark the buffer as "needs to be flushed".
+    ///
+    /// It will await a lock on the [StorageList] because it modifies the contents of the
+    /// list node. This may add some delay if the worker task currently holds
+    /// a lock on the list for reading from or writing to flash.
     pub async fn write(&mut self, t: &T) -> Result<(), Error> {
+        // Lock the list to get exclusive access to its contents and be allowed
+        // to modify it.
         let _inner = self.list.inner.lock().await;
 
         let nodeptr: *mut Node<T> = self.inner.inner.get();

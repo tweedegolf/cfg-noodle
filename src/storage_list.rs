@@ -549,7 +549,6 @@ impl StorageListInner {
                     if seq != seq_no {
                         continue;
                     }
-                    // todo: real crc
                     if calc_crc != check_crc {
                         continue;
                     }
@@ -704,8 +703,6 @@ impl StorageListInner {
                     // particularly recover from this. We might want to log this, but exposing
                     // the difference between this and "no data found" to the node probably won't
                     // actually be useful.
-                    //
-                    // todo: add logs? some kind of asserts?
                     warn!(
                         "Key {:?} exists and was wanted, but deserialization failed",
                         kvpair.key
@@ -842,9 +839,8 @@ impl StorageListInner {
                 // NOTE: We don't want to early return so we can detect nodes in invalid
                 // states
                 State::DefaultUnwritten | State::NeedsWrite => needs_writing = true,
-                // TODO: A node may be in `Initial` state, if it has been attached but
-                // `process_reads` hasn't run, yet. Should we return early here and trigger
-                // another process_reads?
+                // A node may be in `Initial` state, if it has been attached but
+                // `process_reads` hasn't run, yet.
                 State::Initial => {
                     return Err(Error::NeedsFirstRead);
                 }
