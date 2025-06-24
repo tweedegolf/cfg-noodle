@@ -100,12 +100,11 @@ pub async fn blinker(
     // whenever writes occur. The I/O worker can only "see" attached nodes.
     //
     // This function only returns an error if there is a duplicate key in the list.
-    let hdl = storage.attach(&LIST).await.unwrap();
+    let mut hdl = storage.attach(&LIST).await.unwrap();
 
-    // In the future, getting the key and val will not require async/failable functions,
-    // see https://github.com/tweedegolf/cfg-noodle/issues/34 tracking this improvement
-    let key = hdl.key().await;
-    let mut val = hdl.load().await.unwrap();
+    // Get the key for this node
+    let key = hdl.key();
+    let mut val = hdl.load();
     defmt::info!("Attached node w/ key: {=str}, val: {:?}", key, val);
 
     // Remember: data loaded from flash is still "untrusted" data! We should
