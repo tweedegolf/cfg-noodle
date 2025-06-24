@@ -82,8 +82,8 @@
 //!    UNTIL we are no longer in the Initial state.
 //! 5. DURING `StorageListNode::attach()`, we may ONLY take a mut ref to `t` IF
 //!    we are in the NonResident state, AND we hold the mutex.
-//! 6. When calling `StorageListNodeHandle::write()`, we MUST hold the mutex.
-//! 7. When calling `StorageListNodeHandle::load()`, we DO NOT need the mutex,
+//! 6. During `StorageListNodeHandle::write()`, we MUST hold the mutex for the whole operation.
+//! 7. During `StorageListNodeHandle::load()`, we DO NOT need the mutex,
 //!    because we've already guaranteed we are not in Initial/NonResident state,
 //!    and the list will never attempt to mutate `t`, but may also have a shared
 //!    ref to `t`.
