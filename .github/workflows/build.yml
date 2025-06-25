@@ -11,6 +11,9 @@ jobs:
   miri:
     name: "Check"
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./crates/cfg-noodle
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@cargo-hack
