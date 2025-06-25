@@ -339,6 +339,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
             };
             if update {
                 // Mark the store as complete
+                // Rule 4.1.3: We can move from NeedsWrite -> ValidNoWriteNeeded because we hold the lock
                 hdrref
                     .state
                     .store(State::ValidNoWriteNeeded.into_u8(), Ordering::Release);
@@ -465,9 +466,9 @@ impl StorageListInner {
     /// * `Some(NonNull<NodeHeader>)` - A non-null pointer to the matching node header
     /// * `None` - If no node with the given key exists in the list
     pub(crate) fn find_node(&mut self, key: &str) -> Option<NonNull<NodeHeader>> {
-        // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
-        // StorageListInner is only usable with the mutex locked, preventing attach/detach
-        // of new nodes.
+        // SAFETY:
+        // - Rule 1: NodeHeader access is ALWAYS shared
+        // - Rule 8: StorageListInner is only usable with the mutex locked
         //
         // NOTE: although we could use `iter` for the search, we need to return a pointer
         // with full node provenance, so we use iter_raw instead.
@@ -668,9 +669,7 @@ impl StorageListInner {
             };
 
             let header_meta = {
-                // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
-                // StorageListInner is only usable with the mutex locked, preventing attach/detach
-                // of new nodes.
+                // SAFETY: Rule 1: NodeHeader access is ALWAYS shared
                 let node_header = unsafe { node_header.as_ref() };
                 match State::from_u8(node_header.state.load(Ordering::Acquire)) {
                     State::Initial => Some(node_header.vtable),
@@ -686,17 +685,18 @@ impl StorageListInner {
 
                 // Call the deserialization function
                 //
-                // SAFETY: StorageList Rule 3: We have the mutex locked, and we have checked the
-                // node is in the Initial state.
+                // SAFETY:
+                // - Rule 3.1: The node is part of this list
+                // - Rule 3.1.1: The mutex is locked
+                // - Rule 3.1.2.1: We checked the node is in the Initial state
                 let res = unsafe { (vtable.deserialize)(nodeptr, kvpair.body) };
 
-                // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
-                // StorageListInner is only usable with the mutex locked, preventing attach/detach
-                // of new nodes.
+                // SAFETY: Rule 1: NodeHeader access is ALWAYS shared
                 let hdrref = unsafe { hdrptr.as_ref() };
 
-                // SAFETY: StorageList Rule 2: We are holding the mutex, we can change
-                // the state of the node.
+                // SAFETY:
+                // - Rule 4.1: We are holding the mutex
+                // - Rule 4.1.1 or Rule 4.1.2: We are moving from Initial to ValidNoWriteNeeded/NonResident
                 if res.is_ok() {
                     // If it went okay, let the node know that it has been hydrated with data
                     //
@@ -743,6 +743,7 @@ impl StorageListInner {
         storage: &mut S,
         seq_no: NonZeroU32,
     ) -> Result<WriteReport, LoadStoreError<S::Error>> {
+        // SAFETY: Rule 8: We can traverse the list with the mutex locked
         let iter = StaticRawIter {
             iter: self.list.iter_raw(),
         };
@@ -756,9 +757,7 @@ impl StorageListInner {
         for hdrptr in iter {
             // First: is this a node that is VALID for serialization?
             let state = {
-                // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
-                // StorageListInner is only usable with the mutex locked, preventing attach/detach
-                // of new nodes.
+                // SAFETY: Rule 1: NodeHeader access is ALWAYS shared
                 let state_ref = unsafe { &*addr_of!((*hdrptr.ptr.as_ptr()).state) };
                 let state = state_ref.load(Ordering::Acquire);
                 State::from_u8(state)
@@ -778,9 +777,9 @@ impl StorageListInner {
             // discriminant
             let (_first, rest) = buf.split_first_mut().ok_or(Error::Serialization)?;
 
-            // SAFETY: we know the node pointer is valid (and valid to read as it is NOT
-            // in the InitialNonResident state), and we know the mutex is held
-            // (StorageListInner access requires it).
+            // SAFETY:
+            // - Rule 7.2.1: Node is not in Initial/NonResident state
+            // - Rule 7.2.2: the mutex is held
             let used = unsafe { serialize_node(hdrptr.ptr, rest)? };
 
             let used = &mut buf[..(used + 1)];
@@ -934,7 +933,8 @@ struct StaticRawIter<'a> {
 /// have exclusive access, and all nodes must be 'static. Therefore, it is
 /// sound to Send both the iterator, and the wrapped NonNulls it returns.
 ///
-/// StorageList Rule 1: Nodes cannot be attached/detached while holding the mutex
+/// - Rule 1: Nodes are always shared
+/// - Rule 5: The nodes may not be attached/detached while we hold the mutex
 unsafe impl Send for StaticRawIter<'_> {}
 
 impl Iterator for StaticRawIter<'_> {
@@ -961,7 +961,8 @@ struct SendPtr {
 /// have exclusive access, and all nodes must be 'static. Therefore, it is
 /// sound to Send the wrapped NonNull.
 ///
-/// StorageList Rule 1: Nodes cannot be attached/detached while holding the mutex
+/// - Rule 1: Nodes are always shared
+/// - Rule 5: The nodes may not be attached/detached while we hold the mutex
 unsafe impl Send for SendPtr {}
 
 struct KvPair<'a> {
@@ -1005,13 +1006,11 @@ fn extract(item: &[u8]) -> Result<KvPair<'_>, Error> {
 /// The caller must ensure that:
 ///
 /// - `headerptr` points to a valid NodeHeader
-/// - `headerptr` points to a node that is valid for reading (e.g. not Initial/NonResident)
-/// - The storage list mutex is held during the entire operation
+/// - Rule 7.2.1 :The Node is NOT in the Initial/NonResident state
+/// - Rule 7.2.2: The mutex MUST be held for the duration of this operation
 unsafe fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Result<usize, Error> {
     let (vtable, key) = {
-        // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
-        // StorageListInner is only usable with the mutex locked, preventing attach/detach
-        // of new nodes.
+        // SAFETY: Rule 1: NodeHeader access is ALWAYS shared
         let node = unsafe { headerptr.as_ref() };
         (node.vtable, node.key)
     };
@@ -1034,9 +1033,9 @@ unsafe fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Resu
 
     // Serialize payload into buffer
     //
-    // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
-    // StorageListInner is only usable with the mutex locked, preventing attach/detach
-    // of new nodes.
+    // SAFETY: Caller has guaranteed compliance with:
+    // - Rule 7.2.1 :The Node is NOT in the Initial/NonResident state
+    // - Rule 7.2.2: The mutex MUST be held for the duration of this operation
     let res = unsafe { (vtable.serialize)(nodeptr, remain) };
 
     match res {
@@ -1065,10 +1064,6 @@ unsafe fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Resu
 /// * `Err(LoadError::WriteVerificationFailed)` - If any node doesn't match its flash entry
 /// * `Err(LoadError::FlashRead)` - If reading from flash fails
 ///
-/// # Safety
-///
-/// The caller must hold the storage list mutex (enforced by the `MutexGuard` parameter)
-/// to ensure exclusive access during verification.
 async fn verify_list_in_flash<S: NdlDataStorage>(
     storage: &mut S,
     rpt: WriteReport,

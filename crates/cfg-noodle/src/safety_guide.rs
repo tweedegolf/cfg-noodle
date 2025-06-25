@@ -56,34 +56,58 @@
 //!     * NODE ONLY TRANSITION
 //!     * during `detach()` call
 //!
-//! ### `StorageList` Rules
+//! ### Rules List
 //!
-//! 1. When attaching (or detaching) nodes, we MUST be holding the mutex.
-//! 2. When changing the state of a node, we MUST be holding the mutex (for the
-//!    full operation, e.g. also when writing to T in transition #2).
-//! 3. The ONLY time the list may take a mut ref to the `t`, is while IN the
-//!    Initial state, AND while holding the mutex
+//! 1. `StorageListNode`, `Node<T>`, and `NodeHeader`s (collectively, "the Node") are ALWAYS
+//!    shared. Nodes have four fields that utilize inner-mutability with certain rules:
+//!     1. The "List Pointer": `StorageListNode->taken_for_list`
+//!         * The "List Pointer" is used to track which list (if any) the Node is attached to
+//!         * The "List Pointer" is used to track whether a `StorageListNodeHandle` is live or not
+//!     2. The "Data Item": `Node->t`
+//!     3. The "State": `NodeHeader->state`
+//!     4. The "Linked List": `NodeHeader->links`
+//! 2. The Node "List Pointer" may be modified IFF:
+//!     1. When attaching a Node to a List, the list's mutex is locked AND:
+//!         1. The "List Pointer" is currently null, OR
+//!         2. The "List Pointer" points to the list we are attaching to, and we are re-attaching
+//!     2. When dropping a `StorageListNodeHandle`:
+//!         1. The lowest bit of the "List Pointer" is changed from `0b1` to `0b0`
+//!     3. When detaching a Node from a List:
+//!         1. No `StorageListNodeHandle` is live for this Node, AND
+//!         2. The mutex for the List that the "List Pointer" points to is locked,
+//!         3. The "List Pointer" is set to null when the detach is complete.
+//! 3. The Node "Data Item" may be modified IFF:
+//!     1. The Node is attached to a List, AND:
+//!         1. The mutex for the List is locked
+//!         2. Any of the following are true:
+//!             1. If updated by `process_reads()`: The Node is in the "Initial" state, OR
+//!             2. If updated by `attach()`: The Node is in the "NonResident" state, OR
+//!             3. If updated by `Handle::write()` (no additional requirements).
+//!     2. The Node is NOT attached to a List, and the "Data Item" is being reset during `detach()`.
+//! 4. The Node "State" may be be modified IFF:
+//!     1. If updated by the List, the List's mutex is locked, AND:
+//!         1. The List is moving the "State" from Initial to NonResident, OR
+//!         2. The List is moving the "State" from Initial to ValidNoWriteNeeded, OR
+//!         3. The List is moving the "State" from NeedsWrite to ValidNoWriteNeeded
+//!     2. If updated by the Node:
+//!         1. The list's mutex is locked AND the Node is moving the "State" from NonResident -> NeedsWrite
+//!         2. The list's mutex is locked AND the Node is moving the "State" from ValidNoWriteNeeded -> NeedsWrite
+//!         3. The node is detached from any lists AND the Node is moving from any "State" to Initial.
+//! 5. The Node "Linked List" may be modified IFF:
+//!     1. When attaching to a list:
+//!         1. The Node must not already be attached to a List, AND
+//!         2. The mutex for the list the node is being attached to is locked
+//!     2. When detaching from a list:
+//!         1. No `StorageListNodeHandle` is live for this Node, AND
+//!         2. The mutex for the list the node is being detached from is locked
+//! 6. A `StorageListNodeHandle` may only be created IFF:
+//!     1. The Node is attached to a list
+//!     2. No other `StorageListNodeHandle` is live for this Node
+//!     3. The Node is NOT in the Initial or NonResident states.
+//! 7. Shared access to the "Data Item" is allowed IFF:
+//!     1. If accessed via the `StorageListNodeHandle`
+//!     2. If accessed via the List:
+//!         1. The Node is NOT in the Initial or NonResident state
+//!         2. The mutex for the List is locked
+//! 8. The List may traverse the linked list of nodes IFF the mutex for the list is locked
 //!
-//! ### `StorageListNode`/`StorageListNodeHandle` Rules
-//!
-//! 1. The Node header is ALWAYS shared, EXCEPT at the time of attach or detach,
-//!    at which point we will hold a mut ref to (un)link to the list, this
-//!    requires we hold the mutex.
-//! 2. A Node must be attached to zero or one lists at one time:
-//!     * We must guarantee a node is prevented from being added to a second
-//!       list, if it already exists in one.
-//!     * Users MUST detach the node from the list it is in before attaching it
-//!       to a new list.
-//! 3. A Node must have zero or one handles live at one time:
-//!     * We must guarantee a handle is prevented from being created if the node
-//!       already has a handle live
-//!     * The previous handle MUST be dropped before we create a new handle
-//! 4. `attach()` MUST NOT complete/we MUST NOT create a StorageListNodeHandle
-//!    UNTIL we are no longer in the Initial state.
-//! 5. DURING `StorageListNode::attach()`, we may ONLY take a mut ref to `t` IF
-//!    we are in the NonResident state, AND we hold the mutex.
-//! 6. During `StorageListNodeHandle::write()`, we MUST hold the mutex for the whole operation.
-//! 7. During `StorageListNodeHandle::load()`, we DO NOT need the mutex,
-//!    because we've already guaranteed we are not in Initial/NonResident state,
-//!    and the list will never attempt to mutate `t`, but may also have a shared
-//!    ref to `t`.
