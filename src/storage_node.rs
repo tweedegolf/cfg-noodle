@@ -338,9 +338,14 @@ where
             // pointer to store whether a handle exists or not. This requires that
             // the alignment of the pointer is > 1, so we can ensure that the lowest
             // bit should always be 0.
+            // Also, byte_add requires that the computed offset stays in bounds of the
+            // allocated object, so that must be at least 2 bytes.
             let _: () = const {
                 let align = align_of::<StorageList<R>>();
                 assert!(align > 1, "bithacking requires alignment greater than 1");
+
+                let size_bytes = size_of::<StorageList<R>>();
+                assert!(size_bytes >= 2, "bithacking requires size bytes >=2");
             };
 
             // SAFETY: StorageListNode Rule 2: Node must be attached to zero or one
@@ -352,6 +357,7 @@ where
             let list_ptr: *const StorageList<R> = list;
             let list_ptr: *mut StorageList<R> = list_ptr.cast_mut();
             let list_ptr: *mut () = list_ptr.cast();
+            // SAFETY: the const asserts above ensure that this is safe to do.
             let list_ptr_taken: *mut () = unsafe { list_ptr.byte_add(1) };
 
             // Attempt to swap the contents with a pointer to the current list
@@ -425,7 +431,7 @@ where
         // We know our node is now on the list. Create a ref to the header which
         // we can use to observe state changes.
         let nodeptr: *mut Node<T> = self.inner.get();
-        // ???SAFE???: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
+        // ?SAFE?: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
         // StorageListInner is only usable with the mutex locked, preventing attach/detach
         // of new nodes.
         let hdrref: &NodeHeader = unsafe { &*addr_of!((*nodeptr).header) };
@@ -520,6 +526,10 @@ where
         let list_ptr: *const StorageList<R> = list;
         let list_ptr: *mut StorageList<R> = list_ptr.cast_mut();
         let list_ptr: *mut () = list_ptr.cast();
+        // SAFETY: Byte offset fits into an `isize` and list_ptr is derived from an
+        // allocated object. Also, the resulting pointer is in bounds of the allocated object
+        // because StorageList is at least 2 bytes. This is ensured with const asserts in
+        // attach().
         let list_ptr_taken: *mut () = unsafe { list_ptr.byte_add(1) };
 
         // First, take the mutex for this list.
@@ -552,8 +562,15 @@ where
             }
         }
 
-        // while still holding the lock, detach this node from this list.
-        // on detach, we also reset the node to it's initial state.
+        // While still holding the lock, detach this node from this list.
+        // On detach, we also reset the node to it's initial state.
+        //
+        // SAFETY:
+        // StorageList Rule 1: When detaching, we must be holding the mutex.
+        // StorageList Rule 2: When changing the state of a Node, we must be
+        //  holding the mutex.
+        // StorageListNode Rule 1: When detaching, we must hold the mutex so we
+        //  are allowed to unlink from the list.
         unsafe {
             let hdr: NonNull<NodeHeader> =
                 NonNull::new_unchecked(addr_of_mut!((*self.inner.get()).header));
@@ -624,7 +641,7 @@ where
         // hydration. Later, only write() will change node.t, but it requires &mut self.
         let nodeptr: *mut Node<T> = self.inner.inner.get();
 
-        // SAFETY: StorageListNodeHandle Rule 1 - Header is always shared
+        // SAFETY: StorageListNodeHandle Rule 1: Header is always shared
         let state = unsafe {
             let hdrptr: *const NodeHeader = addr_of!((*nodeptr).header);
             let hdr_ref: &NodeHeader = &*hdrptr;
@@ -636,7 +653,7 @@ where
         match state {
             // All these states implicate that process_reads/_writes has not finished
             // but they hold a lock on the list, so we should never reach this piece
-            // of code while holding a lock ourselves
+            // of code while holding a lock ourselves.
             State::Initial | State::NonResident => {
                 unreachable!("This state should not be observed")
             }
@@ -664,32 +681,47 @@ where
         let _inner = self.list().inner.lock().await;
 
         let nodeptr: *mut Node<T> = self.inner.inner.get();
-        let noderef = unsafe { &mut *nodeptr };
 
-        let state = State::from_u8(noderef.header.state.load(Ordering::Relaxed));
+        // SAFETY: StorageListNodeHandle Rule 1: Header is always shared
+        let (key, state) = unsafe {
+            let hdrptr: *const NodeHeader = addr_of!((*nodeptr).header);
+            let hdr_ref: &NodeHeader = &*hdrptr;
+            // We DON'T hold a lock to the list, so use Acquire for load
+            (
+                hdr_ref.key,
+                State::from_u8(hdr_ref.state.load(Ordering::Acquire)),
+            )
+        };
 
         match state {
             // `Initial` and `NonResident` can not occur for the same reason as
             // outlined in load(). OldData should have been replaced with a Default value.
             State::Initial | State::NonResident => {
                 debug!("write() on invalid state: {:?}", state);
-                return Err(Error::InvalidState(noderef.header.key, state));
+                return Err(Error::InvalidState(key, state));
             }
             State::ValidNoWriteNeeded | State::NeedsWrite => {}
         }
         // We do a swap instead of a write here, to ensure that we
         // call `drop` on the "old" contents of the buffer.
         let mut t: T = t.clone();
+        // SAFETY:
+        // StorageListNode Rule 6: we must hold the mutex for the entire
+        //  write operation.
+        // StorageList Rule 2: When changing the state of a node, we must
+        //  lock the mutex.
         unsafe {
+            let noderef = &mut *nodeptr;
+
             let mutref: &mut T = noderef.t.assume_init_mut();
             core::mem::swap(&mut t, mutref);
-        }
 
-        // We hold a lock to the list, so use Relaxed
-        noderef
-            .header
-            .state
-            .store(State::NeedsWrite.into_u8(), Ordering::Relaxed);
+            // We hold a lock to the list, so use Relaxed
+            noderef
+                .header
+                .state
+                .store(State::NeedsWrite.into_u8(), Ordering::Relaxed);
+        }
 
         // Let the write task know we have work
         self.list().needs_write.wake();
@@ -725,6 +757,10 @@ where
                 .fetch_update(Ordering::Release, Ordering::Acquire, |old| {
                     debug_assert!(!old.is_null());
                     debug_assert_eq!((old as usize) & 1, 1, "'is taken' bit should be set");
+                    
+                    // SAFETY: the existence of a StorageListNodeHandle ensures that the taken_for_list
+                    // field is set one byte past the start of a StorageList. We can safely decrement
+                    // this and use it as a static reference.
                     Some(unsafe { old.byte_sub(1) })
                 });
         debug_assert!(res.is_ok());
@@ -737,6 +773,14 @@ where
 
 /// This is cordyceps' intrusive linked list trait. It's mostly how you
 /// shift around pointers semantically.
+/// 
+/// SAFETY: Requirements from the trait definition are followed:
+///
+/// - Implementation ensures that implementors are pinned in memory while they are
+///   in the intrusive collection. They nodes are required to be static, so they
+///   are never dropped or moved in memory.
+/// - The type implementing this trait must not implement [Unpin].
+///   -> Ensured by PhantomPinned in Node
 unsafe impl Linked<list::Links<NodeHeader>> for NodeHeader {
     type Handle = NonNull<NodeHeader>;
 
@@ -749,9 +793,11 @@ unsafe impl Linked<list::Links<NodeHeader>> for NodeHeader {
     }
 
     unsafe fn links(target: NonNull<Self>) -> NonNull<list::Links<NodeHeader>> {
-        // Safety: using `ptr::addr_of!` avoids creating a temporary
+        // SAFETY: using `ptr::addr_of!` avoids creating a temporary
         // reference, which stacked borrows dislikes.
         let node = unsafe { ptr::addr_of_mut!((*target.as_ptr()).links) };
+        // SAFETY: caller has to ensure that it the pointer points to a
+        // valid instance of Self
         unsafe { NonNull::new_unchecked(node) }
     }
 }
@@ -778,7 +824,7 @@ impl VTable {
     }
 }
 
-/// Tricky monomorphizing serialization function.
+/// Tricky monomorphizing serialization function
 ///
 /// Casts a type-erased node pointer into the "right" type, so that we can do
 /// serialization with it.
@@ -796,8 +842,10 @@ where
     T: MaybeDefmtFormat,
 {
     let node: NonNull<Node<T>> = node.cast();
+    // SAFETY: Caller ensures that node.t is in a valid state
     let noderef: &Node<T> = unsafe { node.as_ref() };
     let tref: &MaybeUninit<T> = &noderef.t;
+    // SAFETY: Caller ensures that node.t is in a valid state
     let tref: &T = unsafe { tref.assume_init_ref() };
 
     let mut cursor = Cursor::new(buf);
@@ -822,11 +870,11 @@ where
     }
 }
 
-/// Tricky monomorphizing deserialization function.
+/// Tricky monomorphizing deserialization function
 ///
 /// This function performs type-erased deserialization by casting a generic node pointer
 /// to the correct concrete type, then deserializing CBOR data from a buffer into that
-/// type. Deserialization only ever occurs once
+/// type. Deserialization only ever occurs once.
 ///
 /// # Arguments
 ///
@@ -850,7 +898,9 @@ where
 {
     let node: NonNull<Node<T>> = node.cast();
 
-    // SAFETY: We can always make a shared pointer to the header
+    // SAFETY: StorageListNode Rule 1: access to node header is always shared
+    // except for when the mutex is locked during attach. But the caller is
+    // required to hold the mutex.
     let hdrref: &NodeHeader = unsafe { &*addr_of!((*node.as_ptr()).header) };
 
     let res = minicbor::decode::<T>(buf);
