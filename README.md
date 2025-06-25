@@ -20,20 +20,20 @@ A persistent configuration management library for embedded Rust applications.
 
 ## Quick Start
 
-TODO: Add a code example? Or link the noodle-demo
+TODO: Add a code example or link the noodle-demo
 
 ## Architecture
 
-The library is built around three main components:
+The library is built around a `StorageList` consisting of `StorageListNodes`, where
 
-- **[`StorageList`]**: The central coordinator that manages all configuration items
-- **[`StorageListNode`]**: Individual configuration items that can be attached to a list  
-- **[`StorageListNodeHandle`]**: A handle for reading and writing configuration data
+- **`StorageList`** is the central coordinator that manages all configuration items
+- **`StorageListNode`** is the individual configuration item that can be attached to a list  
+- **`StorageListNodeHandle`** is a handle for reading and writing configuration data
 
-A background worker task handles all flash I/O operations including:
-- Loading configuration data from flash on startup
-- Writing changed configuration data to flash
-- Garbage collection to reclaim space from old data
+and a background worker task that handles all flash I/O operations including:
+- **Loading** configuration data from flash on startup
+- **Writing** changed configuration data to flash
+- **Garbage collection** to reclaim space from old data
 
 ## Documentation
 
@@ -44,7 +44,7 @@ A background worker task handles all flash I/O operations including:
 
 ## Storage Backends
 
-The library supports different storage backends through the [`NdlDataStorage`] trait:
+The library supports different storage backends through the `NdlDataStorage` trait:
 
 - **Sequential Storage**: Built-in support for [`sequential-storage`](https://github.com/tweedegolf/sequential-storage) crate
 - **Test Storage**: In-memory storage for testing and development
