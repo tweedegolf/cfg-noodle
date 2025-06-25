@@ -6,8 +6,6 @@
 //! Users will typically create a [`StorageList`], and then primarily interact with
 //! [`StorageListNode`](crate::StorageListNode) and [`StorageListNodeHandle`](crate::StorageListNodeHandle)
 
-#![deny(clippy::undocumented_unsafe_blocks)]
-
 use crate::{
     Crc32, Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData, StepErr, StepResult,
     error::{Error, LoadStoreError},

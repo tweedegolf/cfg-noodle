@@ -2,6 +2,7 @@
 #![cfg_attr(not(any(test, doctest, feature = "std")), no_std)]
 #![warn(missing_docs)]
 #![deny(clippy::unwrap_used)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 #![allow(async_fn_in_trait)]
 
 pub mod error;
