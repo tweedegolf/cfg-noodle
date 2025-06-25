@@ -290,7 +290,7 @@ where
         }
     }
 
-    /// Attaches the `StorageListNode` to a `StorageList` and waits for hydration.
+    /// Attaches the [`StorageListNode`] to a [`StorageList`] and waits for hydration.
     /// If the value is not found in flash, use the default value provided by the closure `f`.
     ///
     /// After some safety checks, this function will notify the worker tasks that it has added
