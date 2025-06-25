@@ -466,10 +466,10 @@ where
                 // - Rule 3.1.2.2: The node is in the NonResident state
                 let body: &mut MaybeUninit<T> = unsafe { &mut *body };
                 *body = MaybeUninit::new(f());
-                // We do hold the lock, use Relaxed ordering.
+                // We do NOT hold the lock, use Relaxed ordering.
                 hdrref
                     .state
-                    .store(State::NeedsWrite.into_u8(), Ordering::Relaxed);
+                    .store(State::NeedsWrite.into_u8(), Ordering::Release);
             }
             // This state is set by this function if the node is non resident
             State::NeedsWrite if !already_attached => {
