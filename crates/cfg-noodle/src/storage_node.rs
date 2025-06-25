@@ -678,8 +678,8 @@ where
         // to modify it.
         let _inner = self.list().inner.lock().await;
         let key: &'static str = self.key();
-        // We DON'T hold a lock to the list, so use Relaxed for load
-        let state = State::from_u8(self.inner.inner.header.state.load(Ordering::Relaxed));
+        // We DON'T hold a lock to the list, so use Acquire for load
+        let state = State::from_u8(self.inner.inner.header.state.load(Ordering::Acquire));
 
         match state {
             // `Initial` and `NonResident` can not occur for the same reason as
