@@ -36,15 +36,15 @@ pub struct StorageListNode<T: 'static + MaybeDefmtFormat> {
     ///
     /// The UPPERMOST bits (except the lowest) is used to store a pointer to the list
     /// that this node is attached to. The LOWERMOST bit is used to track whether
-    /// a handle for this node is currently live. See `attach_with_default` for
-    /// further explanation.
+    /// a handle for this node is currently live.
+    /// See [`attach_with_default`](Self::attach_with_default) for further explanation.
     taken_for_list: AtomicPtr<()>,
 }
 
 /// Handle for a `StorageListNode` that has been loaded and thus contains valid data
 ///
-/// "end users" will interact with the `StorageListNodeHandle` to retrieve and store changes
-/// to the configuration they care about.
+/// "end users" will interact with the `StorageListNodeHandle` to retrieve stored
+/// configuration and store changes and store changes to the configuration they care about.
 pub struct StorageListNodeHandle<T, R>
 where
     T: 'static + MaybeDefmtFormat,
@@ -60,7 +60,7 @@ where
     inner: &'static StorageListNode<T>,
 }
 
-/// State of the [`StorageListNode<T>`].
+/// State of the [`StorageListNode<T>`]
 ///
 /// This is used to determine how to unsafely interact with other pieces
 /// of the `Node<T>`!
@@ -99,28 +99,26 @@ pub enum State {
     /// be filled with data from flash, or whether we will need to initialize
     /// using a default value or something.
     ///
-    /// In this state, `t` is NOT valid, and is uninitialized. it MUST NOT be
+    /// In this state, `t` is NOT valid, and is uninitialized. It MUST NOT be
     /// read.
     Initial,
     /// We attempted to load from flash, but as far as we know, the data does
     /// not exist in flash. The owner of the Node will need to initialize
     /// this data, usually in the wait loop of `attach`.
     ///
-    /// In this state, `t` is NOT valid, and is uninitialized. it MUST NOT be
+    /// In this state, `t` is NOT valid, and is uninitialized. It MUST NOT be
     /// read.
     NonResident,
     /// The value has been initialized using a value from flash. No writes are
     /// pending.
     ///
-    /// In this state, `t` IS valid, and may be read at any time (by the holder
-    /// of the lock).
+    /// In this state, `t` IS valid, and may be read at any time using the handle.
     ValidNoWriteNeeded,
     /// The value has been written, but these changes have NOT been flushed back
     /// to the flash. This includes the case where the node has "written back"
-    /// the a user-defined default value.
+    /// a user-defined default value.
     ///
-    /// In this state, `t` IS valid, and may be read at any time (by the holder
-    /// of the lock).
+    /// In this state, `t` IS valid, and may be read at any time using the handle.
     NeedsWrite,
 }
 
@@ -134,9 +132,9 @@ impl State {
             State::NeedsWrite => 3,
         }
     }
-    /// Convert u8 to state.
+    /// Convert u8 to State.
     ///
-    /// Panics if the u8 value does not have a matchin state as
+    /// Panics if the u8 value does not have a matching state as
     /// returned by [`Self::into_u8`].
     pub const fn from_u8(value: u8) -> Self {
         match value {
@@ -171,10 +169,10 @@ pub(crate) struct Node<T> {
     t: MaybeUninit<T>,
 }
 
-/// The non-typed parts of a [`Node<T>`].
+/// The non-typed parts of a [`Node<T>`]
 ///
 /// The `NodeHeader` serves as the actual type that is linked together in
-/// the linked list, and is the primary interface the storage worker will
+/// the linked list, and is the primary interface the worker task will
 /// use. It MUST be the first field of a `Node<T>`, so it is safe to
 /// type-pun a `NodeHeader` ptr into a `Node<T>` ptr and back.
 pub(crate) struct NodeHeader {
@@ -183,19 +181,19 @@ pub(crate) struct NodeHeader {
     /// The "key" of our "key:value" store. Must be unique across the list.
     pub(crate) key: &'static str,
     /// The current state of the node. THIS IS SAFETY LOAD BEARING whether
-    /// we can access the `T` in the `Node<T>`
+    /// we can access the `T` in the `Node<T>`.
     pub(crate) state: AtomicU8,
     /// This is the type-erased serialize/deserialize `VTable` that is
-    /// unique to each `T`, and will be used by the storage worker
+    /// unique to each `T`, and will be used by the worker task
     /// to access the `t` indirectly for loading and storing.
     pub(crate) vtable: VTable,
 }
 
-/// Function table for type-erased serialization and deserialization operations.
+/// Function table for type-erased serialization and deserialization operations
 ///
 /// The `VTable` contains function pointers that allow the storage system to serialize
 /// and deserialize nodes without knowing their concrete types at compile time. Each
-/// node type `T` gets its own vtable instance created via [`VTable::for_ty`], which
+/// node type `T` gets its own `VTable` instance created via [`VTable::for_ty`], which
 /// stores monomorphized function pointers for that specific type.
 ///
 /// This enables the storage worker to operate on a heterogeneous linked list of
@@ -217,8 +215,8 @@ pub(crate) struct VTable {
 /// If successful, returns the number of byte written to the buffer.
 type SerFn = unsafe fn(NonNull<Node<()>>, &mut [u8]) -> Result<usize, ()>;
 
-/// A function where the type-erased node pointer goes in, and we attempt
-/// to deserialize a T from the buffer.
+/// A function where the type-erased node pointer goes in, and a `T` is
+/// deserialized from the buffer.
 ///
 /// If successful, returns the number of bytes read from the buffer.
 type DeserFn = unsafe fn(NonNull<Node<()>>, &[u8]) -> Result<usize, ()>;
@@ -234,12 +232,11 @@ where
     T: Default,
     T: MaybeDefmtFormat,
 {
-    /// Attaches node to a list and waits for hydration.
-    /// If the value is not found in flash, a default value is used.
+    /// Attaches the `StorageListNode` to a `StorageList` and waits for hydration.
     ///
-    /// # Error
-    /// This function will return an [`Error::DuplicateKey`] if a node
-    /// with the same key already exists in the list.
+    /// This function is a wrapper around [`attach_with_default`](Self::attach_with_default) using
+    /// `T`'s `Default::default()` value. See [`attach_with_default`](Self::attach_with_default)
+    /// for details and possbile errors.
     ///
     /// # Example
     /// ```
@@ -276,7 +273,7 @@ where
     T: Clone,
     T: MaybeDefmtFormat,
 {
-    /// Make a new StorageListNode, initially empty and unattached
+    /// Make a new `StorageListNode`, initially empty and unattached
     pub const fn new(path: &'static str) -> Self {
         Self {
             inner: UnsafeCell::new(Node {
@@ -293,8 +290,13 @@ where
         }
     }
 
-    /// Attaches node to a list and waits for hydration.
-    /// If the value is not found in flash, use the default value provided by the closure `f`
+    /// Attaches the `StorageListNode` to a `StorageList` and waits for hydration.
+    /// If the value is not found in flash, use the default value provided by the closure `f`.
+    ///
+    /// After some safety checks, this function will notify the worker tasks that it has added
+    /// a node to the list and needs hydration from flash.
+    /// When the worker task is done and no data for this node's key has been found in flash,
+    /// it will initialize with the provided default.
     ///
     /// # Error
     /// This function will return an [`Error::DuplicateKey`] if a node
@@ -327,7 +329,7 @@ where
         debug!("Attaching new node");
         let already_attached;
 
-        // Add a scope so that the Lock on the List is dropped
+        // Add a scope so that the list mutex is unlocked afterwards
         {
             let mut inner = list.inner.lock().await;
             debug!("attach() got Lock on list");
@@ -341,6 +343,9 @@ where
                 assert!(align > 1, "bithacking requires alignment greater than 1");
             };
 
+            // SAFETY: StorageListNode Rule 2: Node must be attached to zero or one
+            // lists at a time.
+            //
             // Check: Is this node eligible to take? A node is eligible to take
             // if EITHER it is linked to the current list already, but no handle
             // exists, OR if the node is not attached to any list.
@@ -386,6 +391,7 @@ where
             // (or want!) to re-run the attach logic.
             if !already_attached {
                 let nodeptr: *mut Node<T> = self.inner.get();
+                // SAFETY: nodeptr is not null because `self` is still valid.
                 let nodenn: NonNull<Node<T>> = unsafe { NonNull::new_unchecked(nodeptr) };
                 // NOTE: We EXPLICITLY cast the outer Node<T> ptr, instead of using the header
                 // pointer, so when we cast back later, the pointer has the correct provenance!
@@ -393,8 +399,9 @@ where
 
                 // Check if the key already exists in the list.
                 // This also prevents attaching to the list more than once.
-                // SAFETY: We hold the lock, we are allowed to gain exclusive mut access
-                // to the contents of the node.
+                // SAFETY: StorageListNode Rule 1: NodeHeader access is ALWAYS shared except at
+                // the time of attach or detach. This is where we are, so we are allowed to hold
+                // a mut ref to link to the list. We must also lock the mutex, which we did above.
                 let key = unsafe { &nodenn.as_ref().header.key };
                 if inner.find_node(key).is_some() {
                     error!("Key already in use: {:?}", key);
@@ -417,15 +424,18 @@ where
 
         // We know our node is now on the list. Create a ref to the header which
         // we can use to observe state changes.
-        //
-        // SAFETY: we can always create a shared ref to the header
         let nodeptr: *mut Node<T> = self.inner.get();
+        // ???SAFE???: StorageListNode Rule 1: NodeHeader access is ALWAYS shared,
+        // StorageListInner is only usable with the mutex locked, preventing attach/detach
+        // of new nodes.
         let hdrref: &NodeHeader = unsafe { &*addr_of!((*nodeptr).header) };
 
         // Wait for the state to reach any non-Initial value. This handles races
         // where the I/O worker ALREADY loaded us between releasing the lock and
         // now (would require interrupts/threads/multicore), and handles cases
         // where we get a spurious wake BEFORE we've actually been loaded.
+        // SAFETY: StorageListNode Rule 4: we must only return a handle if we are
+        // no longer in the Initial state.
         let state = list
             .reading_done
             .wait_for_value(|| {
@@ -451,23 +461,16 @@ where
                     "Node with key {:?} non resident. Init with default",
                     hdrref.key
                 );
-                // We are nonresident, we need to initialize
-                //
-                // SAFETY: We only create a mutref of body when we are in a state where we have
-                // exclusive access, the queue will NEVER attempt to perceive the body when
-                // we are in the NonResident state. Although we COULD safely just write ourselves
-                // now, we still take the lock so that we do not "magically" become DefaultUnwritten
-                // while the i/o worker is in the process of writing, which could cause us to be
-                // marked as written even though have not been, e.g. we showed up as "not eligible"
-                // when first checked in `write_to_flash`, but later in `process_writes` we WOULD
-                // have been, and marked as a completed write.
                 let _inner = list.inner.lock().await;
+                // SAFETY: StorageListNode Rule 5:
+                // We must only take a mut ref to `t` IF we are in the `NonResident` state
+                // and we locked the mutex, which we just did.
                 let body: &mut MaybeUninit<T> = unsafe { &mut *addr_of_mut!((*nodeptr).t) };
                 *body = MaybeUninit::new(f());
-                // We do NOT hold the lock, use Release ordering.
+                // We do hold the lock, use Relaxed ordering.
                 hdrref
                     .state
-                    .store(State::NeedsWrite.into_u8(), Ordering::Release);
+                    .store(State::NeedsWrite.into_u8(), Ordering::Relaxed);
             }
             // This state is set by this function if the node is non resident
             State::NeedsWrite if !already_attached => {
@@ -577,8 +580,8 @@ where
     }
 }
 
-/// I think this is safe? If we can move data into the node, its
-/// Sync-safety is guaranteed by the StorageList mutex.
+/// SAFETY: Sync-safety is guaranteed by adhering to the rules in the [`crate::safety_guide`]
+/// and the StorageList mutex.
 unsafe impl<T> Sync for StorageListNode<T> where T: Send + 'static + MaybeDefmtFormat {}
 
 // ---- impl StorageListNodeHandle ----
@@ -590,10 +593,12 @@ where
 {
     /// Obtain the key of a node
     pub fn key(&self) -> &str {
-        // The node holds an `&'static str`, so we can access it without locking the list
         let nodeptr: *mut Node<T> = self.inner.inner.get();
-        let noderef = unsafe { &*nodeptr };
-        noderef.header.key
+        // SAFETY: `self` is still valid so we can create a pointer
+        let nodenn: NonNull<Node<T>> = unsafe { NonNull::new_unchecked(nodeptr) };
+        let hdrnn: NonNull<NodeHeader> = nodenn.cast();
+        // SAFETY: StorageListNode Rule 1: the Node header is always shared
+        unsafe { hdrnn.as_ref().key }
     }
 
     fn list(&self) -> &'static StorageList<R> {
