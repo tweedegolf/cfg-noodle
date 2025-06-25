@@ -15,6 +15,9 @@ jobs:
   miri:
     name: "Miri"
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./crates/cfg-noodle
     steps:
       - uses: actions/checkout@v4
       - name: Install Miri
