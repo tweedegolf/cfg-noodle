@@ -483,7 +483,7 @@ where
 
         // SAFETY:
         // - Rule 6.1: The node is attached to a list
-        // - Rule 6.2: No other nodes exist
+        // - Rule 6.2: No other handles exist
         // - Rule 6.3: We marked a handle as live
         // - Rule 6.4: We have passed the Initial/NonResident state
         Ok(StorageListNodeHandle {
@@ -661,7 +661,7 @@ where
         }
         // yes!
         //
-        // SAFETY: Rule 7.1: We can always obtained shared access to t
+        // SAFETY: Rule 7.1: We can always obtain shared access to t
         unsafe {
             let tptr: *mut MaybeUninit<T> = self.inner.inner.t.get();
             (*tptr).assume_init_ref().clone()
@@ -796,7 +796,7 @@ unsafe impl Linked<list::Links<NodeHeader>> for NodeHeader {
 
         // SAFETY: caller has to ensure that it the pointer points to a
         // valid instance of Self. The returned links may only be used for
-        // attaching/detaching if the mutex is held.
+        // attaching/detaching if the mutex is held (Rules 5.1.2 and 5.2.2).
         unsafe { NonNull::new_unchecked(linksptr) }
     }
 }

@@ -339,7 +339,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
             };
             if update {
                 // Mark the store as complete
-                // Rule 4.1.3: We can move from NeedsWrite -> ValidNoWriteNeeded
+                // Rule 4.1.3: We can move from NeedsWrite -> ValidNoWriteNeeded because we hold the lock
                 hdrref
                     .state
                     .store(State::ValidNoWriteNeeded.into_u8(), Ordering::Release);
