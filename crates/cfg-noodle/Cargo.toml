@@ -6,7 +6,7 @@ authors = [
     "Julian Dickert <julian@systemscape.de>",
 ]
 edition = "2024"
-readme = "README.md"
+readme = "../../README.md"
 repository = "https://github.com/tweedegolf/cfg-noodle"
 description = "A nonvolatile configuration storage service"
 license = "MIT"
@@ -67,10 +67,9 @@ simple_logger   = { version = "5.0.0", optional = true }
 tokio           = { version = "1.45.1", optional = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
-approx = "0.5.1"
-futures-test = "0.3.31"
-
-test-log = "0.2.17"
+approx          = "0.5.1"
+futures-test    = "0.3.31"
+test-log        = "0.2.17"
 
 futures = { version = "0.3.31", features = ["executor"] }
 mutex   = { version = "1.0.0",  features = ["impl-critical-section"] }
