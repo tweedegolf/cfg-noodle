@@ -273,7 +273,7 @@ where
     T: Clone,
     T: MaybeDefmtFormat,
 {
-    /// Make a new `StorageListNode`, initially empty and unattached
+    /// Make a new [`StorageListNode`], initially empty and unattached
     pub const fn new(path: &'static str) -> Self {
         Self {
             inner: UnsafeCell::new(Node {
