@@ -100,11 +100,10 @@
 //!     2. When detaching from a list:
 //!         1. No `StorageListNodeHandle` is live for this Node, AND
 //!         2. The mutex for the list the node is being detached from is locked
-//! 6. A `StorageListNodeHandle` may NOT be created unless:
+//! 6. A `StorageListNodeHandle` may only be created IFF:
 //!     1. The Node is attached to a list
 //!     2. No other `StorageListNodeHandle` is live for this Node
-//!     3. The Node's "List Pointer"'s lowest bit is set to `0b1` to denote a handle is live
-//!     4. The Node is NOT in the Initial or NonResident states.
+//!     3. The Node is NOT in the Initial or NonResident states.
 //! 7. Shared access to the "Data Item" is allowed IFF:
 //!     1. If accessed via the `StorageListNodeHandle`
 //!     2. If accessed via the List:

@@ -432,7 +432,7 @@ where
         // now (would require interrupts/threads/multicore), and handles cases
         // where we get a spurious wake BEFORE we've actually been loaded.
         //
-        // SAFETY: Rule 6.4: waiting to pass through the Initial state
+        // SAFETY: Rule 6.3: waiting to pass through the Initial state
         let state = list
             .reading_done
             .wait_for_value(|| {
@@ -484,8 +484,7 @@ where
         // SAFETY:
         // - Rule 6.1: The node is attached to a list
         // - Rule 6.2: No other handles exist
-        // - Rule 6.3: We marked a handle as live
-        // - Rule 6.4: We have passed the Initial/NonResident state
+        // - Rule 6.3: We have passed the Initial/NonResident state
         Ok(StorageListNodeHandle {
             list_ty: PhantomData,
             inner: self,
