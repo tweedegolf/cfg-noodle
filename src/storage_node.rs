@@ -132,7 +132,7 @@ impl State {
             State::NeedsWrite => 3,
         }
     }
-    /// Convert u8 to State.
+    /// Convert u8 to a [`State`].
     ///
     /// Panics if the u8 value does not have a matching state as
     /// returned by [`Self::into_u8`].
