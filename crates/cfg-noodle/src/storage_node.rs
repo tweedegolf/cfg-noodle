@@ -12,7 +12,7 @@ use core::{
     fmt::Debug,
     marker::{PhantomData, PhantomPinned},
     mem::MaybeUninit,
-    ptr::{self, NonNull, dangling_mut, null_mut},
+    ptr::{self, NonNull, null_mut},
     sync::atomic::{AtomicPtr, AtomicU8, Ordering},
 };
 use minicbor::{
