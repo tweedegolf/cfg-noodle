@@ -1,6 +1,6 @@
 # Noodle Demo
 
-This is a minimal example application using the `cfg-noodle` crate (`/crates/cfg-noodle`).
+This is a minimal example application using the [`cfg-noodle` crate](./../crates/cfg-noodle).
 
 For a video of operation, [see here](https://www.youtube.com/watch?v=GUDZICfzQWM).
 
