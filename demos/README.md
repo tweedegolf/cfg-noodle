@@ -1,6 +1,6 @@
 # Noodle Demo
 
-This is a minimal example application using the [`cfg-noodle`](https://github.com/tweedegolf/cfg-noodle) crate.
+This is a minimal example application using the [`cfg-noodle` crate](./../crates/cfg-noodle).
 
 For a video of operation, [see here](https://www.youtube.com/watch?v=GUDZICfzQWM).
 
@@ -15,7 +15,7 @@ Pressing the button doubles the time between on/off, or halves the blinking spee
 * 1.25hz (400ms on, 400ms off)
 * 0.625hz (800ms on, 800ms off)
 
-Each time the speed is changed via button press, the value is stored back to the node. These changes are then flushed back to the external flash. If you power cycle the device, the LEDs should resume blinking at the same speed they were at power-off.
+Each time the speed is changed via button press, the value is stored back to the node. These changes are then flushed back to the external flash. If you power cycle the device, the LEDs should resume blinking at the same speed they were at power-off, unless power was lost before the flash-write completed.
 
 The I/O worker performs basic debouncing of writes: if you press the button multiple times, a write to flash does NOT occur for every press. Only when a timeout has been exceeded between write events, is the data actually written back to flash.
 

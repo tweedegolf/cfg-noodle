@@ -20,11 +20,12 @@ A persistent configuration management library for embedded Rust applications.
 
 ## Quick Start
 
-TODO: Add a code example or link the noodle-demo
+In the [`demos`](/demos) folder you can find an example for the nRF52840-DK that stores the blinking frequencies of the four
+board LEDs on flash and loads them after reboot.
 
 ## Architecture
 
-The library is built around a `StorageList` consisting of `StorageListNodes`, where
+The library is built around a [`StorageList`](https://docs.rs/cfg-noodle/latest/cfg_noodle/struct.StorageList.html) consisting of `StorageListNode`s, where
 
 - **`StorageList`** is the central coordinator that manages all configuration items
 - **`StorageListNode`** is the individual configuration item that can be attached to a list  
