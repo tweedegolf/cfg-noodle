@@ -20,7 +20,7 @@ A persistent configuration management library for embedded Rust applications.
 
 ## Quick Start
 
-In the [`/demos`](/demos) folder you can find an example for the nRF52840-DK that stores the blinking frequencies of the four
+In the [`demos`](/demos) folder you can find an example for the nRF52840-DK that stores the blinking frequencies of the four
 board LEDs on flash and loads them after reboot.
 
 ## Architecture
