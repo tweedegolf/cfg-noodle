@@ -25,7 +25,7 @@ board LEDs on flash and loads them after reboot.
 
 ## Architecture
 
-The library is built around a `StorageList` consisting of `StorageListNodes`, where
+The library is built around a [`StorageList`](https://docs.rs/cfg-noodle/latest/cfg_noodle/struct.StorageList.html) consisting of `StorageListNode`s, where
 
 - **`StorageList`** is the central coordinator that manages all configuration items
 - **`StorageListNode`** is the individual configuration item that can be attached to a list  
