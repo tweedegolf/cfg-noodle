@@ -16,5 +16,7 @@ jobs:
         working-directory: ./demos/nrf52840
     steps:
       - uses: actions/checkout@v4
+      - name: Install thumbv7em-none-eabihf target
+        run: rustup target add thumbv7em-none-eabihf
       - name: Build nrf52840 demo
         run: cargo check
