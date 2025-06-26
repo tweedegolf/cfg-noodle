@@ -4,16 +4,19 @@
 //! of LEDs, with speed changable via user button press. The blinking speed of the
 //! LEDs is persistently stored in the cfg-noodle storage in external flash.
 
-use cfg_noodle::{flash::Flash, StorageList, StorageListNode};
+use cfg_noodle::{
+    flash::Flash,
+    minicbor::{self, CborLen, Decode, Encode},
+    mutex::raw_impls::cs::CriticalSectionRawMutex,
+    sequential_storage::cache::PagePointerCache,
+    StorageList, StorageListNode,
+};
 use defmt::{error, info};
 use embassy_executor::task;
 use embassy_futures::select::{select, Either};
 use embassy_nrf::gpio::{Input, Output};
 use embassy_time::{Duration, Instant, Timer, WithTimeout};
-use minicbor::{CborLen, Decode, Encode};
-use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use mx25r::address::SECTOR_SIZE;
-use sequential_storage::cache::PagePointerCache;
 use static_cell::ConstStaticCell;
 
 use crate::DkMX25R;
