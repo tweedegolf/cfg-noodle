@@ -10,7 +10,11 @@ pub mod flash;
 pub mod safety_guide;
 pub mod worker_task;
 
+// re-export some dependencies
+pub use minicbor;
+pub use mutex;
 pub use mutex_traits;
+pub use sequential_storage;
 
 #[cfg(any(test, feature = "std"))]
 #[doc(hidden)]

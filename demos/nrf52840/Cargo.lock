@@ -743,12 +743,9 @@ dependencies = [
  "embassy-nrf",
  "embassy-sync 0.6.2",
  "embassy-time",
- "minicbor",
- "mutex",
  "mx25r",
  "panic-probe",
  "portable-atomic",
- "sequential-storage",
  "static_cell",
 ]
 
