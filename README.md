@@ -20,7 +20,7 @@ A persistent configuration management library for embedded Rust applications.
 
 ## Quick Start
 
-In the [`demos`](/demos) folder you can find an example for the nRF52840-DK that stores the blinking frequencies of the four
+In the [`demos`](https://github.com/tweedegolf/cfg-noodle/tree/main/demos) folder you can find an example for the nRF52840-DK that stores the blinking frequencies of the four
 board LEDs on flash and loads them after reboot.
 
 ## Architecture
@@ -40,7 +40,7 @@ and a background worker task that handles all flash I/O operations including:
 
 - **[API Documentation](https://docs.rs/cfg-noodle)** - docs.rs API reference
 - **[Safety Guide](https://docs.rs/cfg-noodle/latest/cfg_noodle/safety_guide/)** - Important safety considerations for contributors
-- **[Examples](examples/)** - Complete working examples
+- **[Demos](https://github.com/tweedegolf/cfg-noodle/tree/main/demos)** - Complete working demo example
 - **[Worker Task](https://docs.rs/cfg-noodle/latest/cfg_noodle/worker_task/)** - Default worker task implementation that can serve as a template to build your own
 
 ## Storage Backends
@@ -64,4 +64,4 @@ The public API, however, is safe to use.
 
 ## Contributing
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+We welcome contributions! Please see our [Contributing Guide](https://github.com/tweedegolf/cfg-noodle/tree/main/CONTRIBUTING.md) for details.
