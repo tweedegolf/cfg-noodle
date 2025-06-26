@@ -1,0 +1,20 @@
+name: Build Demo
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  miri:
+    name: "Check"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./demos/nrf52840
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build nrf52840 demo
+        run: cargo check
