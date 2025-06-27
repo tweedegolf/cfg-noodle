@@ -124,7 +124,6 @@ where
         )
         .await?;
 
-        Ok(size_with_overhead::<T>(used.len()))
     }
 
     const MAX_ELEM_SIZE: usize = const {
