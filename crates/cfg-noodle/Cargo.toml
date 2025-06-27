@@ -49,9 +49,12 @@ defmt = [
     "sequential-storage/defmt-03",
 ]
 
-# disable cache padding for maitake-sync, this drastically reduces the size
-# for targets that are not worried about cache alignment
+# disable cache padding for cordyceps + maitake-sync, this drastically reduces the size
+# for targets that are not worried about cache alignment.
+#
+# See: https://docs.rs/cordyceps/latest/cordyceps/#features
 disable-cache-padding = [
+    "cordyceps/no-cache-pad",
     "maitake-sync/no-cache-pad",
 ]
 
