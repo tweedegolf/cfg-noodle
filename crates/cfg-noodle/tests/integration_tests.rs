@@ -295,12 +295,12 @@ async fn test_read_interrupted_write() {
             let mut iter = flash.items.iter_mut();
             loop {
                 let item = iter.next().unwrap();
-                if matches!(item.elem, Some(TestElem::Start { seq_no }) if seq_no == NonZeroU32::new(2).unwrap()) {
+                if matches!(item.elem, TestElem::Start { seq_no } if seq_no == NonZeroU32::new(2).unwrap()) {
                     break;
                 }
             }
             let item = iter.next().unwrap();
-            let Some(TestElem::Data { data }) = &mut item.elem else {
+            let TestElem::Data { data } = &mut item.elem else {
                 panic!();
             };
             *data.get_mut(3).unwrap() = 0xFF;

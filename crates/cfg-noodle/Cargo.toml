@@ -23,7 +23,9 @@ name = "integration_tests"
 required-features = ["std"]
 
 [features]
-default = []
+default = [
+    "disable-cache-padding",
+]
 std = [
     "embassy-sync/std",
     "embassy-time/std",
@@ -45,6 +47,12 @@ defmt = [
     "embassy-sync/defmt",
     "embassy-time/defmt",
     "sequential-storage/defmt-03",
+]
+
+# disable cache padding for maitake-sync, this drastically reduces the size
+# for targets that are not worried about cache alignment
+disable-cache-padding = [
+    "maitake-sync/no-cache-pad",
 ]
 
 [dependencies]
