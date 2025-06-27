@@ -113,8 +113,9 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
                 Either3::First(_) => {
                     info!("worker task got needs_read signal, processing reads");
 
-                    if let Err(e) = list.process_reads(&mut flash, buf).await {
-                        error!("Error in process_reads: {:?}", e);
+                    match list.process_reads(&mut flash, buf).await {
+                        Ok(rpt) => info!("process_reads success: {:?}", rpt),
+                        Err(e) => error!("Error in process_reads: {:?}", e),
                     }
 
                     // On the first run (i.e., after starup) we want to run garbage collection once to
@@ -133,24 +134,29 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
                 Either3::Second(_) => {
                     info!("worker task got needs_write signal, first process_garbage then write");
 
-                    if let Err(e) = list.process_garbage(&mut flash, buf).await {
-                        error!("Error in process_garbage: {:?}", e);
+                    match list.process_garbage(&mut flash, buf).await {
+                        Ok(rpt) => info!("process_garbage success: {:?}", rpt),
+                        Err(e) => error!("Error in process_garbage: {:?}", e),
                     }
-                    if let Err(e) = list.process_writes(&mut flash, buf).await {
-                        error!("Error in process_writes: {:?}", e);
+                    match list.process_writes(&mut flash, buf).await {
+                        Ok(rpt) => info!("process_writes success: {:?}", rpt),
+                        Err(e) => error!("Error in process_writes: {:?}", e),
                     }
 
                     info!("worker task finished process_writes, triggering process_garbage");
-                    if let Err(e) = list.process_garbage(&mut flash, buf).await {
-                        error!("Error in process_garbage: {:?}", e);
+                    match list.process_garbage(&mut flash, buf).await {
+                        Ok(rpt) => info!("process_garbage success: {:?}", rpt),
+                        Err(e) => error!("Error in process_garbage: {:?}", e),
                     }
                 }
                 Either3::Third(_) => {
                     info!("worker task got needs_gc signal, run process_garbage");
-                    if let Err(e) = list.process_garbage(&mut flash, buf).await {
-                        error!("Error in process_garbage: {:?}", e);
-                    } else {
-                        first_gc_done = true;
+                    match list.process_garbage(&mut flash, buf).await {
+                        Ok(rpt) => {
+                            info!("process_garbage success: {:?}", rpt);
+                            first_gc_done = true;
+                        }
+                        Err(e) => error!("Error in process_garbage: {:?}", e),
                     }
                 }
             };
@@ -159,28 +165,28 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
 
     // Top-level select that awaits the waker future and the stopper future so that whenever the
     // stopper future finishes, we do a clean "shutdown" of the worker task.
-    match select(waker_future, stopper).await {
-        // One of the needs_* signals
-        Either::First(_) => error!("waker_future completed, this should not happen"),
-        // The stopper future
-        Either::Second(_) => {
-            info!("stopper future completed, stopping worker task");
+    //
+    // The waker future diverges, so it can never occur.
+    let Either::Second(_) = select(waker_future, stopper).await;
+
+    info!("stopper future completed, stopping worker task");
+    match list.process_writes(&mut flash, buf).await {
+        Ok(rpt) => info!("process_writes success: {:?}", rpt),
+        Err(LoadStoreError::AppError(Error::NeedsGarbageCollect)) => {
+            match list.process_garbage(&mut flash, buf).await {
+                Ok(rpt) => info!("process_garbage success: {:?}", rpt),
+                Err(e) => error!("Error in process_garbage: {:?}", e),
+            }
             match list.process_writes(&mut flash, buf).await {
-                Ok(()) => (),
-                Err(LoadStoreError::AppError(Error::NeedsGarbageCollect)) => {
-                    if let Err(e) = list.process_garbage(&mut flash, buf).await {
-                        error!("Error in process_garbage: {:?}", e);
-                    }
-                    if let Err(e) = list.process_writes(&mut flash, buf).await {
-                        error!("Error in process_writes: {:?}", e);
-                    }
-                }
-                Err(LoadStoreError::AppError(Error::NeedsFirstRead)) => {
-                    warn!("closing worker without performing first read");
-                }
+                Ok(rpt) => info!("process_writes success: {:?}", rpt),
                 Err(e) => error!("Error in process_writes: {:?}", e),
             }
         }
+        Err(LoadStoreError::AppError(Error::NeedsFirstRead)) => {
+            warn!("closing worker without performing first read");
+        }
+        Err(e) => error!("Error in process_writes: {:?}", e),
     }
+
     info!("worker task stopped!");
 }

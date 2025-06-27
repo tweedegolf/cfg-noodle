@@ -314,8 +314,9 @@ pub async fn worker(flash: DkMX25R) {
                 // Perform the read
                 info!("worker task got needs_read signal");
                 let start = Instant::now();
-                if let Err(e) = LIST.process_reads(&mut flash, buf).await {
-                    error!("Error in process_reads: {:?}", e);
+                match LIST.process_reads(&mut flash, buf).await {
+                    Ok(rpt) => info!("process_reads success: {:?}", rpt),
+                    Err(e) => error!("Error in process_reads: {:?}", e),
                 }
                 info!("read completed in {:?}", start.elapsed());
 
@@ -334,10 +335,12 @@ pub async fn worker(flash: DkMX25R) {
                 // `StorageList::process_garbage`'s documentation for more details.
                 if !first_gc_done {
                     let start = Instant::now();
-                    if let Err(e) = LIST.process_garbage(&mut flash, buf).await {
-                        error!("Error in process_garbage: {:?}", e);
-                    } else {
-                        first_gc_done = true;
+                    match LIST.process_garbage(&mut flash, buf).await {
+                        Ok(rpt) => {
+                            info!("process_garbage success: {:?}", rpt);
+                            first_gc_done = true;
+                        }
+                        Err(e) => error!("Error in process_garbage: {:?}", e),
                     }
                     info!("(first) gc completed in {:?}", start.elapsed());
                 }
@@ -346,8 +349,9 @@ pub async fn worker(flash: DkMX25R) {
                 // Perform the write
                 info!("worker task got needs_write signal");
                 let start = Instant::now();
-                if let Err(e) = LIST.process_writes(&mut flash, buf).await {
-                    error!("Error in process_writes: {:?}", e);
+                match LIST.process_writes(&mut flash, buf).await {
+                    Ok(rpt) => info!("process_writes success: {:?}", rpt),
+                    Err(e) => error!("Error in process_writes: {:?}", e),
                 }
                 info!("write completed in {:?}", start.elapsed());
 
@@ -355,8 +359,9 @@ pub async fn worker(flash: DkMX25R) {
                 // before the next write will succeed. In this example, we just always perform
                 // garbage collection after writing. See above for more on garbage collection.
                 let start = Instant::now();
-                if let Err(e) = LIST.process_garbage(&mut flash, buf).await {
-                    error!("Error in process_garbage: {:?}", e);
+                match LIST.process_garbage(&mut flash, buf).await {
+                    Ok(rpt) => info!("process_garbage success: {:?}", rpt),
+                    Err(e) => error!("Error in process_garbage: {:?}", e),
                 }
                 info!("gc completed in {:?}", start.elapsed());
             }
