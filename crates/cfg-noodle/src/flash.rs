@@ -124,14 +124,7 @@ where
         )
         .await?;
 
-        // Items pushed to the queue have overhead
-        let baseline_overhead = sequential_storage::item_overhead_size::<T>() as usize;
-        // Items pushed to the queue require some alignment padding
-        let len_roundup = used
-            .len()
-            .next_multiple_of(crate::max(T::WRITE_SIZE, T::READ_SIZE));
-
-        Ok(baseline_overhead + len_roundup)
+        Ok(size_with_overhead::<T>(used.len()))
     }
 
     const MAX_ELEM_SIZE: usize = const {
