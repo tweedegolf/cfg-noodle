@@ -124,12 +124,29 @@ where
         )
         .await?;
 
-        Ok(used.len())
+        // Items pushed to the queue have overhead
+        let baseline_overhead = sequential_storage::item_overhead_size::<T>() as usize;
+        // Items pushed to the queue require some alignment padding
+        let len_roundup = used
+            .len()
+            .next_multiple_of(crate::max(T::WRITE_SIZE, T::READ_SIZE));
+
+        Ok(baseline_overhead + len_roundup)
     }
 
-    const MAX_ELEM_SIZE: usize = T::ERASE_SIZE
-        - 2 * crate::max(T::WRITE_SIZE, T::READ_SIZE)
-        - sequential_storage::item_overhead_size::<T>() as usize;
+    const MAX_ELEM_SIZE: usize = const {
+        // We start from the max erase size
+        let baseline = T::ERASE_SIZE;
+
+        // Each sector has some metadata: two words
+        let sector_metadata = 2 * crate::max(T::WRITE_SIZE, T::READ_SIZE);
+
+        // Each pushed item has some metadata
+        let item_metadata = sequential_storage::item_overhead_size::<T>() as usize;
+
+        // The max size is the baseline minus any overhead.
+        baseline - sector_metadata - item_metadata
+    };
 }
 
 // ---- impl FlashIter ----
