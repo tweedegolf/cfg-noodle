@@ -95,7 +95,7 @@ where
         })
     }
 
-    async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::Error> {
+    async fn push(&mut self, data: &Elem<'_>) -> Result<usize, Self::Error> {
         // scratch buffer used if this is start/end
         let mut buf = [0u8; 9];
         let used = match data {
@@ -122,7 +122,9 @@ where
             used,
             false,
         )
-        .await
+        .await?;
+
+        Ok(used.len())
     }
 
     const MAX_ELEM_SIZE: usize = T::ERASE_SIZE
@@ -188,6 +190,11 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> NdlElemIterNode for FlashNode<'_, '_, 
     async fn invalidate(self) -> Result<(), Self::Error> {
         self.qit.pop().await?;
         Ok(())
+    }
+
+    fn len(&self) -> usize {
+        // TODO: Also add in s-s's item overhead!
+        self.qit.deref().len()
     }
 }
 

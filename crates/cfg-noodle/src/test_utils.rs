@@ -52,7 +52,7 @@ pub struct TestStorageItemNode<'a> {
 #[derive(Clone, PartialEq, Debug)]
 pub struct TestItem {
     pub ctr: u64,
-    pub elem: Option<TestElem>,
+    pub elem: TestElem,
 }
 
 /// The test owned/heapful version of [`Elem`].
@@ -131,7 +131,7 @@ impl TestStorage {
         let ctr = self.next_ctr();
         self.items.push(TestItem {
             ctr,
-            elem: Some(TestElem::Start { seq_no }),
+            elem: TestElem::Start { seq_no },
         });
         RecordWriter {
             seq: seq_no,
@@ -179,7 +179,7 @@ impl TestStorage {
         }
         self.items.push(TestItem {
             ctr,
-            elem: Some(TestElem::Data { data: buffer }),
+            elem: TestElem::Data { data: buffer },
         });
     }
 
@@ -194,7 +194,7 @@ impl TestStorage {
         let ctr = self.next_ctr();
         self.items.push(TestItem {
             ctr,
-            elem: Some(TestElem::End { seq_no, calc_crc }),
+            elem: TestElem::End { seq_no, calc_crc },
         });
     }
 }
@@ -218,15 +218,23 @@ impl NdlDataStorage for TestStorage {
         })
     }
 
-    async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::Error> {
+    async fn push(&mut self, data: &Elem<'_>) -> Result<usize, Self::Error> {
         info!("Pushing {data:?}");
         let ctr = self.next_ctr();
         let item: TestElem = data.into();
-        self.items.push(TestItem {
-            ctr,
-            elem: Some(item),
-        });
-        Ok(())
+
+        let used = match &item {
+            // 1 byte discriminant + 4 byte seq
+            TestElem::Start { .. } => 5,
+            // 1 byte discriminant + len
+            TestElem::Data { data } => 1 + data.len(),
+            // 1 byte discriminant + 4 byte seq + 4 byte crc32
+            TestElem::End { .. } => 9,
+        };
+
+        self.items.push(TestItem { ctr, elem: item });
+
+        Ok(used)
     }
 
     // No actual limit on the test storage, use some reasonable value.
@@ -270,7 +278,7 @@ impl<'a> NdlElemIterNode for TestStorageItemNode<'a> {
     type Error = ();
 
     fn data(&self) -> Option<Elem<'_>> {
-        let elem = self.item.elem.as_ref()?;
+        let elem = &self.item.elem;
         Some(match elem {
             TestElem::Start { seq_no } => Elem::Start { seq_no: *seq_no },
             TestElem::Data { data } => Elem::Data {
@@ -289,6 +297,17 @@ impl<'a> NdlElemIterNode for TestStorageItemNode<'a> {
         // todo: find + remove might be faster, but whatever, test code
         self.sto.items.retain(|i| i.ctr != item_ctr);
         Ok(())
+    }
+
+    fn len(&self) -> usize {
+        match &self.item.elem {
+            // 1 byte discriminant + 4 byte seq
+            TestElem::Start { .. } => 5,
+            // 1 byte discriminant + len
+            TestElem::Data { data } => 1 + data.len(),
+            // 1 byte discriminant + 4 byte seq + 4 byte crc32
+            TestElem::End { .. } => 9,
+        }
     }
 }
 
