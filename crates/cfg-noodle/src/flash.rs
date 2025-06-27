@@ -124,14 +124,7 @@ where
         )
         .await?;
 
-        // Items pushed to the queue have overhead
-        let baseline_overhead = sequential_storage::item_overhead_size::<T>() as usize;
-        // Items pushed to the queue require some alignment padding
-        let len_roundup = used
-            .len()
-            .next_multiple_of(crate::max(T::WRITE_SIZE, T::READ_SIZE));
-
-        Ok(baseline_overhead + len_roundup)
+        Ok(size_with_overhead::<T>(used.len()))
     }
 
     const MAX_ELEM_SIZE: usize = const {
@@ -210,8 +203,7 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> NdlElemIterNode for FlashNode<'_, '_, 
     }
 
     fn len(&self) -> usize {
-        // TODO: Also add in s-s's item overhead!
-        self.qit.deref().len()
+        size_with_overhead::<T>(self.qit.deref().len())
     }
 }
 
@@ -254,4 +246,20 @@ impl HalfElem {
             _ => None,
         }
     }
+}
+
+// Helper functions
+
+/// Calculate the size this item would take for the given flash in a sequential-storage queue
+#[inline]
+fn size_with_overhead<T>(len: usize) -> usize
+where
+    T: MultiwriteNorFlash,
+{
+    // Items pushed to the queue have overhead
+    let baseline_overhead = sequential_storage::item_overhead_size::<T>() as usize;
+    // Items pushed to the queue require some alignment padding
+    let len_roundup = len.next_multiple_of(crate::max(T::WRITE_SIZE, T::READ_SIZE));
+
+    baseline_overhead + len_roundup
 }
