@@ -46,7 +46,7 @@ pub static INITS: [fn() -> AlphaConfig; 10] = [
     || AlphaConfig { data_a: [100; 32], data_b: [101; 16], data_c: [102; 8], data_d: [103; 8]  },
 ];
 
-#[task]
+#[task(pool_size = 10)]
 pub async fn alpha_worker(
     node: &'static StorageListNode<AlphaConfig>,
     init: fn() -> AlphaConfig,
@@ -71,6 +71,7 @@ pub async fn alpha_worker(
                 *byte = byte.wrapping_add(1);
             }
 
+            defmt::debug!("{=str} writing...", hdl.key());
             hdl.write(&val).await.unwrap();
         }
     };

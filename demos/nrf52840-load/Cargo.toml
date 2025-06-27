@@ -17,7 +17,7 @@ mutex                   = { version = "1.0.0", features = ["impl-critical-sectio
 panic-probe             = { version = "1.0.0",   features = ["print-defmt"] }
 portable-atomic         = { version = "1.11.1", features = ["critical-section"] }
 
-mx25r                   = { git = "https://github.com/jamesmunns/mx25r-rs",   rev = "e45629f497cdc6b917c6a08cb9df0fac3ba33b0a", features = ["defmt"] }
+mx25r                   = { git = "https://github.com/xgroleau/mx25r-rs",   rev = "7fb07f92f33a33f369c3d9dc86795c2e61963312", features = ["defmt"] }
 
 cortex-m-rt             = "0.7.5"
 defmt                   = "1.0.1"
