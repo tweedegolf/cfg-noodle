@@ -23,7 +23,9 @@ name = "integration_tests"
 required-features = ["std"]
 
 [features]
-default = []
+default = [
+    "disable-cache-padding",
+]
 std = [
     "embassy-sync/std",
     "embassy-time/std",
@@ -45,6 +47,15 @@ defmt = [
     "embassy-sync/defmt",
     "embassy-time/defmt",
     "sequential-storage/defmt-03",
+]
+
+# disable cache padding for cordyceps + maitake-sync, this drastically reduces the size
+# for targets that are not worried about cache alignment.
+#
+# See: https://docs.rs/cordyceps/latest/cordyceps/#features
+disable-cache-padding = [
+    "cordyceps/no-cache-pad",
+    "maitake-sync/no-cache-pad",
 ]
 
 [dependencies]
