@@ -7,17 +7,20 @@
 #![no_std]
 #![no_main]
 
+use cortex_m::asm::bkpt;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_nrf::{
     bind_interrupts,
     config::{Config as NrfConfig, HfclkSource},
-    gpio::{Input, Level, Output, OutputDrive, Pull},
+    gpio::{Level, Output, OutputDrive},
     spim::{self, Spim},
 };
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, mutex::Mutex};
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer, WithTimeout};
+use maitake_sync::WaitQueue;
 use mx25r::asynchronous::AsyncMX25R6435F;
+use noodle::{alpha, beta, delta, gamma};
 use static_cell::StaticCell;
 
 bind_interrupts!(pub struct Irqs {
@@ -38,10 +41,13 @@ pub type DkMX25R = AsyncMX25R6435F<SpiDev>;
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     // SYSTEM INIT
-    info!("Start");
     let mut config = NrfConfig::default();
     config.hfclk_source = HfclkSource::ExternalXtal;
     let p = embassy_nrf::init(Default::default());
+
+    // Let the debugger attach...
+    Timer::after_secs(1).await;
+    info!("Starting!");
 
     // External flash init
     //
@@ -91,34 +97,70 @@ async fn main(spawner: Spawner) {
     // flash.wait_wip().await.unwrap();
     // defmt::warn!("Chip erase complete!");
 
-    // Spawn each of the four worker tasks. They are all the same async function,
-    // but are given their own LEDs and buttons that correspond with each other
-    // on the nRF52840-dk (e.g. the top left button will correspond to the top left
-    // LED). All buttons and LEDs are active-low.
-    spawner.must_spawn(noodle::blinker(
-        &noodle::LED_ONE_INTERVAL,
-        Output::new(p.P0_13, Level::High, OutputDrive::Standard),
-        Input::new(p.P0_11, Pull::Up),
-    ));
-    spawner.must_spawn(noodle::blinker(
-        &noodle::LED_TWO_INTERVAL,
-        Output::new(p.P0_14, Level::High, OutputDrive::Standard),
-        Input::new(p.P0_12, Pull::Up),
-    ));
-    spawner.must_spawn(noodle::blinker(
-        &noodle::LED_THREE_INTERVAL,
-        Output::new(p.P0_15, Level::High, OutputDrive::Standard),
-        Input::new(p.P0_24, Pull::Up),
-    ));
-    spawner.must_spawn(noodle::blinker(
-        &noodle::LED_FOUR_INTERVAL,
-        Output::new(p.P0_16, Level::High, OutputDrive::Standard),
-        Input::new(p.P0_25, Pull::Up),
-    ));
+    static STOPPER: WaitQueue = WaitQueue::new();
+    let mut interval = Duration::from_millis(500);
 
-    // Spawn the I/O worker task that serves requests from the nodes to
-    // read, write, and garbage collect old data.
-    spawner.must_spawn(noodle::worker(flash));
+    // Spawn all the workers at scattered intervals
+    for (node, init) in alpha::NODES.iter().zip(alpha::INITS.iter()) {
+        spawner.must_spawn(alpha::alpha_worker(node, *init, interval, &STOPPER));
+        interval += Duration::from_millis(49);
+    }
+    for (node, init) in beta::NODES.iter().zip(beta::INITS.iter()) {
+        spawner.must_spawn(beta::beta_worker(node, *init, interval, &STOPPER));
+        interval += Duration::from_millis(49);
+    }
+    for (node, init) in delta::NODES.iter().zip(delta::INITS.iter()) {
+        spawner.must_spawn(delta::delta_worker(node, *init, interval, &STOPPER));
+        interval += Duration::from_millis(49);
+    }
+    for (node, init) in gamma::NODES.iter().zip(gamma::INITS.iter()) {
+        spawner.must_spawn(gamma::gamma_worker(node, *init, interval, &STOPPER));
+        interval += Duration::from_millis(49);
+    }
+    // WITHOUT epsilon, the write size is JUST under the 4KiB block size. WITH epsilon,
+    // it is just over. Uncomment this if you want to see the relative cost of being
+    // under/over a single page.
+    //
+    // for (node, init) in noodle::epsilon::NODES.iter().zip(epsilon::INITS.iter()) {
+    //     spawner.must_spawn(epsilon::epsilon_worker(node, *init, interval, &STOPPER));
+    //     interval += Duration::from_millis(49);
+    // }
 
-    // Tasks continue running after main returns.
+    let mut total_reads = 0;
+    let mut total_writes = 0;
+    let mut total_garbage = 0;
+    let mut total_read_time = Duration::from_ticks(0);
+    let mut total_write_time = Duration::from_ticks(0);
+    let mut total_garbage_time = Duration::from_ticks(0);
+
+    let test_duration = Duration::from_secs(60 * 3);
+    let write_interval = Duration::from_secs(15);
+
+    let worker_fut = noodle::worker(
+        flash,
+        write_interval,
+        &mut total_reads,
+        &mut total_writes,
+        &mut total_garbage,
+        &mut total_read_time,
+        &mut total_write_time,
+        &mut total_garbage_time,
+    );
+
+    let _ = worker_fut.with_timeout(test_duration).await;
+    STOPPER.close();
+
+    // Wait for all the tasks to stop.
+    Timer::after_millis(2000).await;
+
+    defmt::warn!("TEST COMPLETE");
+    defmt::warn!("total_reads: {:?}", total_reads);
+    defmt::warn!("total_writes: {:?}", total_writes);
+    defmt::warn!("total_garbage: {:?}", total_garbage);
+    defmt::warn!("total_read_time: {:?}ms", total_read_time.as_millis());
+    defmt::warn!("total_write_time: {:?}ms", total_write_time.as_millis());
+    defmt::warn!("total_garbage_time: {:?}ms", total_garbage_time.as_millis());
+
+    // Exit the program, print a breakpoint
+    bkpt();
 }

@@ -5,7 +5,7 @@ runner = "probe-rs run --chip nrf52840_xxAA --protocol swd"
 target = "thumbv7em-none-eabihf"
 
 [env]
-DEFMT_LOG = "debug"
+DEFMT_LOG = "info"
 
 [unstable]
 build-std = ["core"]

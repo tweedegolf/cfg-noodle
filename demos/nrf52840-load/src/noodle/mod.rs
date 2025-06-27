@@ -4,13 +4,12 @@
 //! of LEDs, with speed changable via user button press. The blinking speed of the
 //! LEDs is persistently stored in the cfg-noodle storage in external flash.
 
-use cfg_noodle::{flash::Flash, StorageList};
+use cfg_noodle::{flash::Flash, NdlDataStorage, StorageList};
 use defmt::{error, info};
-use embassy_executor::task;
 use embassy_futures::select::{select, Either};
-use embassy_time::{Duration, Instant, WithTimeout};
+use embassy_time::{Duration, Instant, Timer, WithTimeout};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
-use mx25r::address::SECTOR_SIZE;
+use mx25r::SECTOR_SIZE;
 use sequential_storage::cache::PagePointerCache;
 use static_cell::ConstStaticCell;
 
@@ -47,7 +46,8 @@ pub static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
 // We put our scratch buffer in a `ConstStaticCell` to avoid ever creating it on the stack.
 //
 // It acts as a static singleton that we can then hold by reference in our I/O worker task.
-static BUF: ConstStaticCell<[u8; 4096]> = ConstStaticCell::new([0u8; 4096]);
+const BUF_SZ: usize = Flash::<DkMX25R, PagePointerCache<PAGE_COUNT>>::MAX_ELEM_SIZE;
+static BUF: ConstStaticCell<[u8; BUF_SZ]> = ConstStaticCell::new([0u8; BUF_SZ]);
 
 // This is the I/O worker task. Most users can use the default worker
 // task provided by cfg-noodle, but in many cases, users will want
@@ -58,8 +58,16 @@ static BUF: ConstStaticCell<[u8; 4096]> = ConstStaticCell::new([0u8; 4096]);
 //
 // Basically: we demonstrate here that you CAN fully control when
 // I/O operations occur, depending on your use case.
-#[task]
-pub async fn worker(flash: DkMX25R) {
+pub async fn worker(
+    flash: DkMX25R,
+    write_debounce_time: Duration,
+    total_reads: &mut usize,
+    total_writes: &mut usize,
+    total_garbage: &mut usize,
+    total_read_time: &mut Duration,
+    total_write_time: &mut Duration,
+    total_garbage_time: &mut Duration,
+) {
     // Take the scratch buffer singleton. This is a static cell to avoid
     // putting large data on the stack inside of a future.
     let buf = BUF.take().as_mut_slice();
@@ -110,7 +118,7 @@ pub async fn worker(flash: DkMX25R) {
 
         // Similarly, this is a helper function that debounces requests to
         // write to flash. Once a node calls `write`, we will be notified,
-        // and then see if more nodes request writes within a 1s window.
+        // and then see if more nodes request writes within a 30s window.
         //
         // This debouncing avoids cases where many writes are made to one node,
         // or when many nodes are updated around the same time.
@@ -127,17 +135,8 @@ pub async fn worker(flash: DkMX25R) {
         // demo so that you can see writes occur.
         let write_fut = async {
             LIST.needs_write().await;
-
-            loop {
-                // Make sure we go 1s with no changes
-                let res = LIST
-                    .needs_write()
-                    .with_timeout(Duration::from_millis(1_000))
-                    .await;
-                if res.is_err() {
-                    break;
-                }
-            }
+            // Debounce
+            Timer::after(write_debounce_time).await;
         };
         info!("worker_task waiting for needs_* signal");
 
@@ -152,7 +151,10 @@ pub async fn worker(flash: DkMX25R) {
                     Ok(rpt) => info!("process_reads success: {:?}", rpt),
                     Err(e) => error!("Error in process_reads: {:?}", e),
                 }
-                info!("read completed in {:?}", start.elapsed());
+                let elapsed = start.elapsed();
+                *total_reads += 1;
+                *total_read_time += elapsed;
+                info!("read completed in {:?}ms", elapsed.as_millis());
 
                 // If this was the FIRST read, we need to perform garbage collection at
                 // before handling our first write. This demo schedules this immediately
@@ -176,7 +178,10 @@ pub async fn worker(flash: DkMX25R) {
                         }
                         Err(e) => error!("Error in process_garbage: {:?}", e),
                     }
-                    info!("(first) gc completed in {:?}", start.elapsed());
+                    let elapsed = start.elapsed();
+                    *total_garbage += 1;
+                    *total_garbage_time += elapsed;
+                    info!("(first) gc completed in {:?}ms", elapsed.as_millis());
                 }
             }
             Either::Second(_) => {
@@ -187,7 +192,10 @@ pub async fn worker(flash: DkMX25R) {
                     Ok(rpt) => info!("process_writes success: {:?}", rpt),
                     Err(e) => error!("Error in process_writes: {:?}", e),
                 }
-                info!("write completed in {:?}", start.elapsed());
+                let elapsed = start.elapsed();
+                *total_writes += 1;
+                *total_write_time += elapsed;
+                info!("write completed in {:?}ms", elapsed.as_millis());
 
                 // In general, whenever we write, we may need to perform garbage collection
                 // before the next write will succeed. In this example, we just always perform
@@ -197,7 +205,10 @@ pub async fn worker(flash: DkMX25R) {
                     Ok(rpt) => info!("process_garbage success: {:?}", rpt),
                     Err(e) => error!("Error in process_garbage: {:?}", e),
                 }
-                info!("gc completed in {:?}", start.elapsed());
+                let elapsed = start.elapsed();
+                *total_garbage += 1;
+                *total_garbage_time += elapsed;
+                info!("gc completed in {:?}ms", elapsed.as_millis());
             }
         }
     }

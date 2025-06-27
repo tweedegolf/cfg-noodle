@@ -697,14 +697,15 @@ checksum = "fd54cb762feb1788c74f5d3387983864d2365ca1819043d2addb76db80169102"
 
 [[package]]
 name = "mx25r"
-version = "0.1.0"
-source = "git+https://github.com/jamesmunns/mx25r-rs?rev=e45629f497cdc6b917c6a08cb9df0fac3ba33b0a#e45629f497cdc6b917c6a08cb9df0fac3ba33b0a"
+version = "1.0.0"
+source = "git+https://github.com/xgroleau/mx25r-rs?rev=7fb07f92f33a33f369c3d9dc86795c2e61963312#7fb07f92f33a33f369c3d9dc86795c2e61963312"
 dependencies = [
  "bit",
- "defmt 0.3.100",
+ "defmt 1.0.1",
  "embassy-futures",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
+ "embedded-storage",
  "embedded-storage-async",
 ]
 
