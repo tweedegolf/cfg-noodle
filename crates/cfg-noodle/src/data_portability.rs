@@ -1,15 +1,29 @@
 //! # Data Portability Guide
 //!
+//! ## Adding Fields
 //! Fields may be added to existing configuration data if every new field is either
 //! - an [`Option<T>`] or
 //! - marked with [`#[cbor(default)]`](https://docs.rs/minicbor-derive/0.17.0/minicbor_derive/index.html#cbordefault)
 //!
 //! so that it can be deserialized from an old version of the config.
 //!
+//! ## Removing Fields
 //! Removing fields is not a problem because minicbor just skips unknown fields.
-//! For details see the minicbor documentation: <https://docs.rs/minicbor-derive/0.17.0/minicbor_derive/index.html>
 //!
-//! If deserialization fails, cfg-noodle will initialize the entire config with the default.
+//! ## General Notes
+//! The `#[n(...)]` annotation **MUST NOT CHANGE** even if you are removing fields.
+//! They must remain numerically stable!
+//!
+//! If deserialization fails, cfg-noodle will initialize the config with the default.
+//!
+//! From [minicbor's documentation:](https://docs.rs/minicbor-derive/0.17.0/minicbor_derive/index.html)
+//! > \[The\] encoding has the following characteristics:
+//! >
+//! >    1. The encoding does not contain any names, i.e. no field names, type names or variant names. Instead, every field and every constructor needs to be annotated with an index number, e.g. #[n(1)].
+//! >    2. Unknown fields are ignored during decoding.1
+//! >    3. Optional types default to None if their value is not present during decoding.
+//! >    4. Optional enums default to None if an unknown variant is encountered during decoding.
+//!
 //!
 //! ## Example
 //! The following example demonstrates how (not) to extend the struct `ConfigV1` with
@@ -24,14 +38,12 @@
 //! ```
 //! # use core::time::Duration;
 //! # use std::sync::Arc;
-//! 
 //! # use log::info;
 //! # use maitake_sync::WaitQueue;
 //! # use minicbor::{CborLen, Decode, Encode};
 //! # use mutex::raw_impls::cs::CriticalSectionRawMutex;
 //! # use tokio::{task::LocalSet, time::sleep};
-//! 
-//! use cfg_noodle::{StorageList, StorageListNode, test_utils::worker_task_tst_sto}; 
+//! use cfg_noodle::{StorageList, StorageListNode, test_utils::worker_task_tst_sto};
 //!
 //! #[derive(Debug, Default, Clone, Decode, Encode, CborLen)]
 //! struct ConfigV1 {
@@ -84,10 +96,8 @@
 //!
 //! # let local = LocalSet::new();
 //! # local.run_until(async move {
-//! let stopper = Arc::new(WaitQueue::new());
-//!
-//! info!("Spawn worker_task");
-//!
+//! # let stopper = Arc::new(WaitQueue::new());
+//! #
 //! let worker_task =
 //!     tokio::task::spawn_local(worker_task_tst_sto(&GLOBAL_LIST, stopper.clone()));
 //!
@@ -181,13 +191,13 @@
 //!         "Vibration should be default"
 //!     );
 //! }
-//! // Wait for the worker task to finish
-//! stopper.close();
-//! let report = tokio::time::timeout(Duration::from_secs(2), worker_task)
-//!     .await
-//!     .expect("shouldn't happen")
-//!     .expect("shouldn't happen");
-//! report.assert_no_errs();
+//! # // Wait for the worker task to finish
+//! # stopper.close();
+//! # let report = tokio::time::timeout(Duration::from_secs(2), worker_task)
+//! #   .await
+//! #   .expect("shouldn't happen")
+//! #   .expect("shouldn't happen");
+//! # report.assert_no_errs();
 //! # }).await;
 //! # })
 //! ```
