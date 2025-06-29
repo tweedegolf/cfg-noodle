@@ -17,7 +17,7 @@ A **write record** is a linear, uninterrupted sequence of "elements", that speci
 The **data storage backend** of **noodle** is made up of a first-in, first-out (FIFO) queue of **element**s, organized as **write record**s.
 
 ## In-Flash Data Representation
-This document describes how cfg-noodle data is represented in flash in different situations.
+This document describes how cfg-noodle data is represented in flash in different situations **specifically** with the sequential-storage backend.
 
 ### "Happy path writing", including initial boot
 

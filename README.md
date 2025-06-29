@@ -71,6 +71,11 @@ The `StorageList` has three functions that need to be executed by a worker task:
 - `process_writes`: serialize data from the nodes into flash
 - `process_garbage`: delete old data (but keep a few as a backup)
 
+The worker task is separate to allow users to control exactly when read/write/garbage processing takes place,
+enabling control over flash durability consumption, power consumption, efficient batching, and other specific requirements.
+
+However, cfg-noodle provides a basic default worker task implementation that is sufficient for many cases.
+
 ### Reading
 
 When attaching a `StorageListNode` to a `StorageList`, the following happens:
