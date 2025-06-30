@@ -1,8 +1,4 @@
 //! cfg-noodle exercising code
-//!
-//! This implements a basic firmware that allows for configurable blinking speed
-//! of LEDs, with speed changable via user button press. The blinking speed of the
-//! LEDs is persistently stored in the cfg-noodle storage in external flash.
 
 use cfg_noodle::{flash::Flash, NdlDataStorage, StorageList};
 use defmt::{error, info};
@@ -156,7 +152,7 @@ pub async fn worker(
                 *total_read_time += elapsed;
                 info!("read completed in {:?}ms", elapsed.as_millis());
 
-                // If this was the FIRST read, we need to perform garbage collection at
+                // If this was the FIRST read, we need to perform garbage collection
                 // before handling our first write. This demo schedules this immediately
                 // after the first read, though you may choose to defer this later if
                 // desired.

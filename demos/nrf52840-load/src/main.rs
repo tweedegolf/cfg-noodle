@@ -161,6 +161,9 @@ async fn main(spawner: Spawner) {
     defmt::warn!("total_write_time: {:?}ms", total_write_time.as_millis());
     defmt::warn!("total_garbage_time: {:?}ms", total_garbage_time.as_millis());
 
+    // Wait for defmt logs to arrive at the host
+    Timer::after_millis(2000).await;
+
     // Exit the program, print a breakpoint
     bkpt();
 }
