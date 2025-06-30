@@ -40,6 +40,7 @@ and a background worker task that handles all flash I/O operations including:
 
 - **[API Documentation](https://docs.rs/cfg-noodle)** - docs.rs API reference
 - **[Safety Guide](https://docs.rs/cfg-noodle/latest/cfg_noodle/safety_guide/)** - Important safety considerations for contributors
+- **[Data Portability Guide](https://docs.rs/cfg-noodle/latest/cfg_noodle/data_portability/)** - Configuration node data evolution guide
 - **[Demos](https://github.com/tweedegolf/cfg-noodle/tree/main/demos)** - Complete working demo example
 - **[Worker Task](https://docs.rs/cfg-noodle/latest/cfg_noodle/worker_task/)** - Default worker task implementation that can serve as a template to build your own
 

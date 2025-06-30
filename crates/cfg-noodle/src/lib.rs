@@ -7,6 +7,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![allow(async_fn_in_trait)]
 
+pub mod data_portability;
 pub mod error;
 pub mod flash;
 pub mod safety_guide;
