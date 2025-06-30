@@ -9,7 +9,7 @@ on:
 
 jobs:
   demo:
-    name: "Check"
+    name: "Check demo"
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -19,4 +19,17 @@ jobs:
       - name: Install thumbv7em-none-eabihf target
         run: rustup target add thumbv7em-none-eabihf
       - name: Build nrf52840 demo
+        run: cargo check
+
+  demo-load:
+    name: "Check load test demo"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./demos/nrf52840-load
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install thumbv7em-none-eabihf target
+        run: rustup target add thumbv7em-none-eabihf
+      - name: Build nrf52840 load test demo
         run: cargo check
