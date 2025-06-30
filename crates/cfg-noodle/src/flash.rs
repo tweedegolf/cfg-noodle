@@ -53,6 +53,15 @@ enum HalfElem {
     End { seq_no: NonZeroU32, calc_crc: u32 },
 }
 
+/// We only support v0 start
+const V0_START: u8 = consts::ELEM_VERSION_V0 | consts::ELEM_DISCRIMINANT_START;
+
+/// We only support v0 data
+const V0_DATA: u8 = consts::ELEM_VERSION_V0 | consts::ELEM_DISCRIMINANT_DATA;
+
+/// We only support v0 end
+const V0_END: u8 = consts::ELEM_VERSION_V0 | consts::ELEM_DISCRIMINANT_END;
+
 // ---- impl Flash ----
 
 impl<T: MultiwriteNorFlash, C: CacheImpl> Flash<T, C> {
@@ -101,13 +110,13 @@ where
         let used = match data {
             Elem::Start { seq_no } => {
                 let buf = &mut buf[..5];
-                buf[0] = consts::ELEM_VERSION_V0 | consts::ELEM_DISCRIMINANT_START;
+                buf[0] = V0_START;
                 buf[1..5].copy_from_slice(&seq_no.get().to_le_bytes());
                 buf
             }
             Elem::Data { data } => data.hdr_key_val,
             Elem::End { seq_no, calc_crc } => {
-                buf[0] = consts::ELEM_VERSION_V0 | consts::ELEM_DISCRIMINANT_END;
+                buf[0] = V0_END;
                 buf[1..5].copy_from_slice(&seq_no.get().to_le_bytes());
                 buf[5..9].copy_from_slice(&calc_crc.to_le_bytes());
                 buf.as_slice()
@@ -211,13 +220,9 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> NdlElemIterNode for FlashNode<'_, '_, 
 
 impl HalfElem {
     fn from_bytes(data: &[u8]) -> Option<Self> {
-        const START: u8 = consts::ELEM_VERSION_V0 | consts::ELEM_DISCRIMINANT_START;
-        const DATA: u8 = consts::ELEM_VERSION_V0 | consts::ELEM_DISCRIMINANT_DATA;
-        const END: u8 = consts::ELEM_VERSION_V0 | consts::ELEM_DISCRIMINANT_END;
-
         let (first, rest) = data.split_first()?;
         match *first {
-            START => {
+            V0_START => {
                 if rest.len() != 4 {
                     return None;
                 }
@@ -227,14 +232,14 @@ impl HalfElem {
                     seq_no: NonZeroU32::new(u32::from_le_bytes(bytes))?,
                 })
             }
-            DATA => {
+            V0_DATA => {
                 if rest.is_empty() {
                     None
                 } else {
                     Some(HalfElem::Data)
                 }
             }
-            END => {
+            V0_END => {
                 if rest.len() != 8 {
                     return None;
                 }

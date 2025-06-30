@@ -1,6 +1,5 @@
 //! Configuration management
 #![doc = include_str!("../../../README.md")]
-
 #![cfg_attr(not(any(test, doctest, feature = "std")), no_std)]
 #![warn(missing_docs)]
 #![deny(clippy::unwrap_used)]
@@ -154,7 +153,7 @@ impl<'a> SerData<'a> {
     /// Returns None if the slice is empty.
     pub fn new(data: &'a mut [u8]) -> Option<Self> {
         let f = data.first_mut()?;
-        *f = consts::ELEM_DISCRIMINANT_DATA;
+        *f = consts::ELEM_VERSION_V0 | consts::ELEM_DISCRIMINANT_DATA;
 
         Some(Self { hdr_key_val: data })
     }
