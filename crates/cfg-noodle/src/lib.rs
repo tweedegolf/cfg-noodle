@@ -1,6 +1,5 @@
 //! Configuration management
 #![doc = include_str!("../../../README.md")]
-
 #![cfg_attr(not(any(test, doctest, feature = "std")), no_std)]
 #![warn(missing_docs)]
 #![deny(clippy::unwrap_used)]
@@ -114,13 +113,26 @@ const fn max(a: usize, b: usize) -> usize {
     if a > b { a } else { b }
 }
 
-mod consts {
+/// Constant values
+///
+/// Currently, this is largely to encode the header byte of [`Elem`]s, which
+/// use the upper 4 bits for "version" (currently only [`ELEM_VERSION_V0`] is supported),
+/// and the lower 4 bits for "discriminant".
+pub mod consts {
+    /// Mask for the "Version" portion of the element byte
+    pub const ELEM_VERSION_MASK: u8 = 0b1111_0000;
+    /// Mask for the "Discriminant" portion of the element byte
+    pub const ELEM_DISCRIMINANT_MASK: u8 = 0b0000_1111;
+
+    /// Current Elem version
+    pub const ELEM_VERSION_V0: u8 = 0b0000_0000;
+
     /// Discriminant used to mark Start elements on disk
-    pub(crate) const ELEM_START: u8 = 0;
+    pub const ELEM_DISCRIMINANT_START: u8 = 0b0000_0000;
     /// Discriminant used to mark Data elements on disk
-    pub(crate) const ELEM_DATA: u8 = 1;
+    pub const ELEM_DISCRIMINANT_DATA: u8 = 0b0000_0001;
     /// Discriminant used to mark End elements on disk
-    pub(crate) const ELEM_END: u8 = 2;
+    pub const ELEM_DISCRIMINANT_END: u8 = 0b0000_0010;
 }
 
 /// Serialized Data Element
@@ -141,7 +153,7 @@ impl<'a> SerData<'a> {
     /// Returns None if the slice is empty.
     pub fn new(data: &'a mut [u8]) -> Option<Self> {
         let f = data.first_mut()?;
-        *f = consts::ELEM_DATA;
+        *f = consts::ELEM_VERSION_V0 | consts::ELEM_DISCRIMINANT_DATA;
 
         Some(Self { hdr_key_val: data })
     }
