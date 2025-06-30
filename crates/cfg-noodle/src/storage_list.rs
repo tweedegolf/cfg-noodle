@@ -7,10 +7,9 @@
 //! [`StorageListNode`](crate::StorageListNode) and [`StorageListNodeHandle`](crate::StorageListNodeHandle)
 
 use crate::{
-    Crc32, Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData, StepErr, StepResult,
+    Crc32, Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData,
     error::{Error, LoadStoreError},
     logging::{debug, error, info, warn},
-    skip_to_seq, step,
     storage_node::{Node, NodeHeader, State},
 };
 use cordyceps::{List, list::IterRaw};
@@ -67,6 +66,43 @@ pub struct StorageList<R: ScopedRawMutex> {
     /// Notifies waiting nodes that the read process has completed.
     /// Woken after `process_reads` finishes loading data from flash.
     pub(crate) reading_done: WaitQueue,
+}
+
+/// Counter values from a [`StorageList::process_reads()`] operation
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub struct ProcessReadCounters {
+    /// Total bytes read from storage, including any re-reads if necessary
+    pub total_bytes_read: usize,
+    /// Total data bytes used by data of the current valid write record,
+    /// used to populate the list.
+    pub current_bytes_read: usize,
+}
+
+/// Counter values from a [`StorageList::process_writes()`] operation
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub struct ProcessWriteCounters {
+    /// Total bytes read from storage, including any re-reads if necessary
+    pub total_bytes_read: usize,
+    /// Total data bytes written as part of this operation
+    pub current_bytes_written: usize,
+}
+
+/// Counter values from a [`StorageList::process_garbage()`] operation
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub struct ProcessGarbageCounters {
+    /// Total bytes read from storage, including any re-reads if necessary
+    pub total_bytes_read: usize,
+    /// Bytes read AFTER collection occurred. May be zero if no collection
+    /// was necessary.
+    pub post_collection_bytes_read: usize,
+    /// Total data bytes popped as part of this operation
+    pub total_bytes_popped: usize,
 }
 
 /// The functional core of a [`StorageList`]
@@ -128,6 +164,8 @@ struct WriteReport {
     crc: u32,
     /// The count of data items contained in this record
     ct: usize,
+    /// The total number of bytes written for this record
+    bytes_written: usize,
 }
 
 // --------------------------------------------------------------------------
@@ -206,7 +244,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
         &'static self,
         storage: &mut S,
         buf: &mut [u8],
-    ) -> Result<(), LoadStoreError<S::Error>> {
+    ) -> Result<ProcessReadCounters, LoadStoreError<S::Error>> {
         info!("Start process_reads");
 
         if buf.len() != S::MAX_ELEM_SIZE {
@@ -224,11 +262,23 @@ impl<R: ScopedRawMutex> StorageList<R> {
         debug!("process_reads locked list");
 
         // Have we already determined the latest valid write record?
-        let res = inner.get_or_populate_latest(storage, buf).await?;
+        let mut total_bytes_read = 0usize;
+        let mut current_bytes_read = 0usize;
+        let res = inner
+            .get_or_populate_latest(storage, buf, &mut total_bytes_read)
+            .await?;
 
         // If we have something: populate all present items
         if let Some(latest) = res {
-            inner.extract_all(latest, storage, buf).await?;
+            inner
+                .extract_all(
+                    latest,
+                    storage,
+                    buf,
+                    &mut total_bytes_read,
+                    &mut current_bytes_read,
+                )
+                .await?;
         }
 
         // Now, we either have NOTHING, or we have populated all items that DO exist.
@@ -237,7 +287,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
         debug!("Reading done. Waking all.");
         self.reading_done.wake_all();
-        Ok(())
+        Ok(ProcessReadCounters {
+            total_bytes_read,
+            current_bytes_read,
+        })
     }
 
     /// Process writes to flash.
@@ -269,7 +322,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
         &'static self,
         storage: &mut S,
         buf: &mut [u8],
-    ) -> Result<(), LoadStoreError<S::Error>> {
+    ) -> Result<ProcessWriteCounters, LoadStoreError<S::Error>> {
         debug!("Start process_writes");
 
         if buf.len() != S::MAX_ELEM_SIZE {
@@ -299,7 +352,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
         // If the list is unchanged, there is no need to write it to flash!
         if !needs_writing {
             debug!("List does not need writing. Returning.");
-            return Ok(());
+            return Ok(ProcessWriteCounters {
+                total_bytes_read: 0,
+                current_bytes_written: 0,
+            });
         }
 
         debug!("Attempt write_to_flash");
@@ -311,7 +367,8 @@ impl<R: ScopedRawMutex> StorageList<R> {
         // Read back all items in the list any verify the data on the flash
         // actually is what we wanted to write.
         debug!("Verifying seq {}", rpt.seq);
-        let range = verify_list_in_flash(storage, rpt, buf).await?;
+        let mut total_bytes_read = 0;
+        let range = verify_list_in_flash(storage, &rpt, buf, &mut total_bytes_read).await?;
         debug!(
             "Verified new write at pos {}..={}",
             range.start(),
@@ -346,7 +403,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
             }
         }
 
-        Ok(())
+        Ok(ProcessWriteCounters {
+            total_bytes_read,
+            current_bytes_written: rpt.bytes_written,
+        })
     }
 
     /// Process garbage collection
@@ -362,13 +422,17 @@ impl<R: ScopedRawMutex> StorageList<R> {
         &'static self,
         storage: &mut S,
         buf: &mut [u8],
-    ) -> Result<(), LoadStoreError<S::Error>> {
+    ) -> Result<ProcessGarbageCounters, LoadStoreError<S::Error>> {
         // Take the mutex for a short time to copy out the current seq_state.
         let cur_seq_state = {
             let mut guard = self.inner.lock().await;
             if !guard.seq_state.needs_gc {
                 debug!("No garbage collect needed, returning Ok");
-                return Ok(());
+                return Ok(ProcessGarbageCounters {
+                    total_bytes_read: 0,
+                    post_collection_bytes_read: 0,
+                    total_bytes_popped: 0,
+                });
             }
 
             // Take the seq_state to inhibit any other reads/writes until
@@ -389,6 +453,10 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 .any(|r| r.range.contains(&n))
         };
 
+        // Setup counters
+        let mut total_bytes_read = 0;
+        let mut total_bytes_popped = 0;
+
         // Create an iterator
         let mut elems = storage
             .iter_elems()
@@ -405,10 +473,13 @@ impl<R: ScopedRawMutex> StorageList<R> {
                 break;
             };
             idx += 1;
+            let used = next.len();
+            total_bytes_read += used;
 
             // If it doesn't decode: yeet
             // If it's not in a good range: yeet
             if next.data().is_none() || !last_three_contains(this_idx) {
+                total_bytes_popped += used;
                 next.invalidate()
                     .await
                     .map_err(LoadStoreError::FlashWrite)?;
@@ -424,11 +495,19 @@ impl<R: ScopedRawMutex> StorageList<R> {
         //
         // This will hold the mutex for a bit, but HOPEFULLY not for too long, as we only perform
         // reads here, never writes or erases.
+        let mut post_collection_bytes_read = 0;
         let mut inner = self.inner.lock().await;
-        inner.get_or_populate_latest(storage, buf).await?;
+        inner
+            .get_or_populate_latest(storage, buf, &mut post_collection_bytes_read)
+            .await?;
         inner.seq_state.needs_gc = false;
+        total_bytes_read += post_collection_bytes_read;
 
-        Ok(())
+        Ok(ProcessGarbageCounters {
+            total_bytes_read,
+            post_collection_bytes_read,
+            total_bytes_popped,
+        })
     }
 
     /// Returns a reference to the wait queue that signals when nodes need to be read from flash.
@@ -488,6 +567,7 @@ impl StorageListInner {
         &mut self,
         s: &mut S,
         buf: &mut [u8],
+        bytes_read: &mut usize,
     ) -> Result<Option<GoodWriteRecord>, LoadStoreError<S::Error>> {
         // If we've already scanned, we know the highest number (or that there is none)
         if self.seq_state.initial_scan_completed() {
@@ -513,6 +593,9 @@ impl StorageListInner {
             };
             let idx = ctr;
             ctr += 1;
+
+            // Increment "data seen" counter
+            *bytes_read += item.len();
 
             // What kind of data is this?
             match item.data() {
@@ -585,6 +668,8 @@ impl StorageListInner {
         latest: GoodWriteRecord,
         storage: &mut S,
         buf: &mut [u8],
+        total_bytes_read: &mut usize,
+        current_bytes_read: &mut usize,
     ) -> Result<(), LoadStoreError<S::Error>> {
         let mut queue_iter = storage
             .iter_elems()
@@ -599,7 +684,9 @@ impl StorageListInner {
         // that we end up at the sequence number that we expect.
         for _ in 0..*latest.range.start() {
             match queue_iter.next(buf).await {
-                Ok(Some(_item)) => {}
+                Ok(Some(item)) => {
+                    *total_bytes_read += item.len();
+                }
                 Ok(None) => return Err(LoadStoreError::AppError(Error::InconsistentFlash)),
                 Err(e) => return Err(LoadStoreError::FlashRead(e)),
             }
@@ -609,6 +696,8 @@ impl StorageListInner {
         let Ok(Some(item)) = queue_iter.next(buf).await else {
             return Err(LoadStoreError::AppError(Error::InconsistentFlash));
         };
+        // update the counter
+        *total_bytes_read += item.len();
         // ...and it needs to be a Start record...
         let Some(Elem::Start { seq_no }) = item.data() else {
             return Err(LoadStoreError::AppError(Error::InconsistentFlash));
@@ -630,6 +719,8 @@ impl StorageListInner {
                 // flash error
                 Err(e) => return Err(LoadStoreError::FlashRead(e)),
             };
+            let item_len = item.len();
+            *total_bytes_read += item_len;
 
             let data = match item.data() {
                 // Got data: great!
@@ -651,6 +742,7 @@ impl StorageListInner {
                     return Err(LoadStoreError::AppError(Error::InconsistentFlash));
                 }
             };
+            *current_bytes_read += item_len;
 
             let Ok(kvpair) = extract(data.key_val()) else {
                 warn!("Failed to extract data on extract_all!");
@@ -748,10 +840,13 @@ impl StorageListInner {
             iter: self.list.iter_raw(),
         };
         let mut check_crc = Crc32::new();
-        storage
+        let mut bytes_written = 0usize;
+
+        let used = storage
             .push(&Elem::Start { seq_no })
             .await
             .map_err(LoadStoreError::FlashWrite)?;
+        bytes_written += used;
         let mut ctr = 0;
 
         for hdrptr in iter {
@@ -793,26 +888,29 @@ impl StorageListInner {
                 SerData::new(used).ok_or(LoadStoreError::AppError(Error::Serialization))?;
             check_crc.update(serdat.key_val());
             // Try writing to flash
-            storage
+            let used = storage
                 .push(&Elem::Data { data: serdat })
                 .await
                 .map_err(LoadStoreError::FlashWrite)?;
+            bytes_written += used;
             ctr += 1;
         }
         let crc = check_crc.finalize();
 
-        storage
+        let used = storage
             .push(&Elem::End {
                 seq_no,
                 calc_crc: crc,
             })
             .await
             .map_err(LoadStoreError::FlashWrite)?;
+        bytes_written += used;
 
         Ok(WriteReport {
             seq: seq_no,
             crc,
             ct: ctr,
+            bytes_written,
         })
     }
 
@@ -1066,43 +1164,51 @@ unsafe fn serialize_node(headerptr: NonNull<NodeHeader>, buf: &mut [u8]) -> Resu
 ///
 async fn verify_list_in_flash<S: NdlDataStorage>(
     storage: &mut S,
-    rpt: WriteReport,
+    rpt: &WriteReport,
     buf: &mut [u8],
+    total_bytes_read: &mut usize,
 ) -> Result<RangeInclusive<usize>, LoadStoreError<S::Error>> {
     // Create a `QueueIterator`
+    let mut total_items_seen_ctr = 0;
     let mut queue_iter = storage
         .iter_elems()
         .await
         .map_err(LoadStoreError::FlashRead)?;
 
     let seq = rpt.seq;
-    let skipres = skip_to_seq!(queue_iter, buf, seq);
-    let start_pos: usize = match skipres {
-        Ok(((), consumed)) => {
-            // The start item was consumed, so subtract one to get the position
-            // of the start item
-            consumed - 1
+
+    // Fast forward until we reach the expected start
+    loop {
+        match queue_iter.next(buf).await {
+            Ok(Some(item)) => {
+                total_items_seen_ctr += 1;
+                *total_bytes_read += item.len();
+                if matches!(item.data(), Some(Elem::Start { seq_no }) if seq_no == seq) {
+                    // Found it!
+                    break;
+                }
+            }
+            Ok(None) => return Err(LoadStoreError::AppError(Error::InconsistentFlash)),
+            Err(e) => return Err(LoadStoreError::FlashRead(e)),
         }
-        // This state should be impossible: we already determined which seq_no to skip to
-        Err(StepErr::EndOfList) => unreachable!("external flash inconsistent"),
-        Err(StepErr::FlashError(e)) => return Err(LoadStoreError::FlashRead(e)),
-    };
+    }
+    // We just saw the start counter, its position is 1 back from the # of items seen
+    let start_pos = total_items_seen_ctr - 1;
 
     let mut crc = Crc32::new();
     let mut data_items_consumed_ctr = 0;
-    let mut total_items_seen_ctr = start_pos;
     loop {
-        let res = step!(queue_iter, buf);
-        let item = match res {
-            Ok(i) => {
+        let item = match queue_iter.next(buf).await {
+            Ok(Some(i)) => {
                 debug!("visiting {:?} in verify", i.data());
+                *total_bytes_read += i.len();
                 i
             }
-            Err(StepErr::EndOfList) => {
+            Ok(None) => {
                 debug!("Surprising end of list");
                 return Err(LoadStoreError::WriteVerificationFailed);
             }
-            Err(StepErr::FlashError(e)) => return Err(LoadStoreError::FlashRead(e)),
+            Err(e) => return Err(LoadStoreError::FlashRead(e)),
         };
         total_items_seen_ctr += 1;
 

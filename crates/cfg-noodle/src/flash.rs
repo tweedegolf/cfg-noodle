@@ -95,7 +95,7 @@ where
         })
     }
 
-    async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::Error> {
+    async fn push(&mut self, data: &Elem<'_>) -> Result<usize, Self::Error> {
         // scratch buffer used if this is start/end
         let mut buf = [0u8; 9];
         let used = match data {
@@ -122,12 +122,24 @@ where
             used,
             false,
         )
-        .await
+        .await?;
+
+        Ok(size_with_overhead::<T>(used.len()))
     }
 
-    const MAX_ELEM_SIZE: usize = T::ERASE_SIZE
-        - 2 * crate::max(T::WRITE_SIZE, T::READ_SIZE)
-        - sequential_storage::item_overhead_size::<T>() as usize;
+    const MAX_ELEM_SIZE: usize = const {
+        // We start from the (min) erase size for the flash
+        let baseline = T::ERASE_SIZE;
+
+        // Each sector has some metadata: two words
+        let sector_metadata = 2 * crate::max(T::WRITE_SIZE, T::READ_SIZE);
+
+        // Each pushed item has some metadata
+        let item_metadata = sequential_storage::item_overhead_size::<T>() as usize;
+
+        // The max size is the baseline minus any overhead.
+        baseline - sector_metadata - item_metadata
+    };
 }
 
 // ---- impl FlashIter ----
@@ -189,6 +201,10 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> NdlElemIterNode for FlashNode<'_, '_, 
         self.qit.pop().await?;
         Ok(())
     }
+
+    fn len(&self) -> usize {
+        size_with_overhead::<T>(self.qit.deref().len())
+    }
 }
 
 // ---- impl HalfElem ----
@@ -230,4 +246,20 @@ impl HalfElem {
             _ => None,
         }
     }
+}
+
+// Helper functions
+
+/// Calculate the size this item would take for the given flash in a sequential-storage queue
+#[inline]
+fn size_with_overhead<T>(len: usize) -> usize
+where
+    T: MultiwriteNorFlash,
+{
+    // Items pushed to the queue have overhead
+    let baseline_overhead = sequential_storage::item_overhead_size::<T>() as usize;
+    // Items pushed to the queue require some alignment padding
+    let len_roundup = len.next_multiple_of(crate::max(T::WRITE_SIZE, T::READ_SIZE));
+
+    baseline_overhead + len_roundup
 }

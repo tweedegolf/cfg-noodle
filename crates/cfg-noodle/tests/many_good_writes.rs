@@ -66,23 +66,23 @@ async fn many_good_writes_inner() {
     #[rustfmt::skip]
     let expected = &[
         // Oldest item, seq_no 997
-        TestItem { ctr: 4980, elem: Some(TestElem::Start { seq_no: NonZeroU32::new(997).unwrap() }) },
-            TestItem { ctr: 4981, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 26, 0, 1, 133, 116] }) },
-            TestItem { ctr: 4982, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 25, 38, 242] }) },
-            TestItem { ctr: 4983, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 25, 3, 229] }) },
-        TestItem { ctr: 4984, elem: Some(TestElem::End { seq_no: NonZeroU32::new(997).unwrap(), calc_crc: 2789166760 }) },
+        TestItem { ctr: 4980, elem: TestElem::Start { seq_no: NonZeroU32::new(997).unwrap() } },
+            TestItem { ctr: 4981, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 26, 0, 1, 133, 116] } },
+            TestItem { ctr: 4982, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 25, 38, 242] } },
+            TestItem { ctr: 4983, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 25, 3, 229] } },
+        TestItem { ctr: 4984, elem: TestElem::End { seq_no: NonZeroU32::new(997).unwrap(), calc_crc: 2789166760 } },
         // Middle item, seq_no 998
-        TestItem { ctr: 4985, elem: Some(TestElem::Start { seq_no: NonZeroU32::new(998).unwrap() }) },
-            TestItem { ctr: 4986, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 26, 0, 1, 133, 216] }) },
-            TestItem { ctr: 4987, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 25, 38, 252] }) },
-            TestItem { ctr: 4988, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 25, 3, 230] }) },
-        TestItem { ctr: 4989, elem: Some(TestElem::End { seq_no: NonZeroU32::new(998).unwrap(), calc_crc: 1413754379 }) },
+        TestItem { ctr: 4985, elem: TestElem::Start { seq_no: NonZeroU32::new(998).unwrap() } },
+            TestItem { ctr: 4986, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 26, 0, 1, 133, 216] } },
+            TestItem { ctr: 4987, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 25, 38, 252] } },
+            TestItem { ctr: 4988, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 25, 3, 230] } },
+        TestItem { ctr: 4989, elem: TestElem::End { seq_no: NonZeroU32::new(998).unwrap(), calc_crc: 1413754379 } },
         // Newest item, seq_no 999
-        TestItem { ctr: 4990, elem: Some(TestElem::Start { seq_no: NonZeroU32::new(999).unwrap() }) },
-            TestItem { ctr: 4991, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 26, 0, 1, 134, 60] }) },
-            TestItem { ctr: 4992, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 25, 39, 6] }) },
-            TestItem { ctr: 4993, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 25, 3, 231] }) },
-        TestItem { ctr: 4994, elem: Some(TestElem::End { seq_no: NonZeroU32::new(999).unwrap(), calc_crc: 2388236464 }) },
+        TestItem { ctr: 4990, elem: TestElem::Start { seq_no: NonZeroU32::new(999).unwrap() } },
+            TestItem { ctr: 4991, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 26, 0, 1, 134, 60] } },
+            TestItem { ctr: 4992, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 25, 39, 6] } },
+            TestItem { ctr: 4993, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 25, 3, 231] } },
+        TestItem { ctr: 4994, elem: TestElem::End { seq_no: NonZeroU32::new(999).unwrap(), calc_crc: 2388236464 } },
     ];
 
     assert_eq!(contents, expected);
@@ -157,23 +157,23 @@ async fn many_good_writes_inner() {
     #[rustfmt::skip]
     let expected2 = &[
         // Oldest item, seq_no 998
-        TestItem { ctr: 4985, elem: Some(TestElem::Start { seq_no: NonZeroU32::new(998).unwrap() }) },
-            TestItem { ctr: 4986, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 26, 0, 1, 133, 216] }) },
-            TestItem { ctr: 4987, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 25, 38, 252] }) },
-            TestItem { ctr: 4988, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 25, 3, 230] }) },
-        TestItem { ctr: 4989, elem: Some(TestElem::End { seq_no: NonZeroU32::new(998).unwrap(), calc_crc: 1413754379 }) },
+        TestItem { ctr: 4985, elem: TestElem::Start { seq_no: NonZeroU32::new(998).unwrap() } },
+            TestItem { ctr: 4986, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 26, 0, 1, 133, 216] } },
+            TestItem { ctr: 4987, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 25, 38, 252] } },
+            TestItem { ctr: 4988, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 25, 3, 230] } },
+        TestItem { ctr: 4989, elem: TestElem::End { seq_no: NonZeroU32::new(998).unwrap(), calc_crc: 1413754379 } },
         // Middle item, seq_no 999
-        TestItem { ctr: 4990, elem: Some(TestElem::Start { seq_no: NonZeroU32::new(999).unwrap() }) },
-            TestItem { ctr: 4991, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 26, 0, 1, 134, 60] }) },
-            TestItem { ctr: 4992, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 25, 39, 6] }) },
-            TestItem { ctr: 4993, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 25, 3, 231] }) },
-        TestItem { ctr: 4994, elem: Some(TestElem::End { seq_no: NonZeroU32::new(999).unwrap(), calc_crc: 2388236464 }) },
+        TestItem { ctr: 4990, elem: TestElem::Start { seq_no: NonZeroU32::new(999).unwrap() } },
+            TestItem { ctr: 4991, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 26, 0, 1, 134, 60] } },
+            TestItem { ctr: 4992, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 25, 39, 6] } },
+            TestItem { ctr: 4993, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 25, 3, 231] } },
+        TestItem { ctr: 4994, elem: TestElem::End { seq_no: NonZeroU32::new(999).unwrap(), calc_crc: 2388236464 } },
         // Newest item, seq_no 1000
-        TestItem { ctr: 4995, elem: Some(TestElem::Start { seq_no: NonZeroU32::new(1000).unwrap() }) },
-            TestItem { ctr: 4996, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 26, 0, 1, 134, 160] }) },
-            TestItem { ctr: 4997, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 25, 39, 16] }) },
-            TestItem { ctr: 4998, elem: Some(TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 25, 3, 232] }) },
-        TestItem { ctr: 4999, elem: Some(TestElem::End { seq_no: NonZeroU32::new(1000).unwrap(), calc_crc: 2217662377 }) },
+        TestItem { ctr: 4995, elem: TestElem::Start { seq_no: NonZeroU32::new(1000).unwrap() } },
+            TestItem { ctr: 4996, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 51, 129, 26, 0, 1, 134, 160] } },
+            TestItem { ctr: 4997, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 50, 129, 25, 39, 16] } },
+            TestItem { ctr: 4998, elem: TestElem::Data { data: vec![1, 108, 116, 101, 115, 116, 47, 99, 111, 110, 102, 105, 103, 49, 129, 25, 3, 232] } },
+        TestItem { ctr: 4999, elem: TestElem::End { seq_no: NonZeroU32::new(1000).unwrap(), calc_crc: 2217662377 } },
     ];
 
     let contents = &rpt.flash.items;

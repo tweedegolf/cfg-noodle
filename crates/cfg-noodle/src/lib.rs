@@ -216,11 +216,13 @@ pub trait NdlDataStorage {
 
     /// Insert an element at the FRONT of the list.
     ///
+    /// On success, returns the size (in bytes) of the pushed element in storage.
+    ///
     /// This method MUST be cancellation safe, however if cancelled, it is not
     /// specified whether the item has been successfully written or not.
     /// Cancellation MUST NOT lead to data loss, other than the element currently
     /// being written.
-    async fn push(&mut self, data: &Elem<'_>) -> Result<(), Self::Error>;
+    async fn push(&mut self, data: &Elem<'_>) -> Result<usize, Self::Error>;
 
     /// Return the maximum size of an `Elem` that may be stored in the list in bytes.
     ///
@@ -277,6 +279,7 @@ pub trait NdlElemIter {
 }
 
 /// A single element yielded from a NdlElemIter implementation
+#[allow(clippy::len_without_is_empty)]
 pub trait NdlElemIterNode {
     /// Error encountered while invalidating an element
     type Error;
@@ -287,6 +290,11 @@ pub trait NdlElemIterNode {
     /// This means that the storage did not consider this item invalid, however we
     /// are unable to decode it as a valid [`Elem`].
     fn data(&self) -> Option<Elem<'_>>;
+
+    /// The length (in bytes) of the element in storage, including any overhead
+    ///
+    /// This should return the length even if [`Self::data()`] returns `None`.
+    fn len(&self) -> usize;
 
     /// Invalidate the element.
     ///
@@ -301,66 +309,6 @@ pub trait NdlElemIterNode {
     /// avoided in the normal case. If this method is cancelled, the element may or
     /// may not be invalidated, however other currently-valid data MUST NOT be lost.
     async fn invalidate(self) -> Result<(), Self::Error>;
-}
-
-/// Result used by [`step`] and [`skip_to_seq`] macros
-pub type StepResult<T, E> = Result<T, StepErr<E>>;
-
-/// An error occurred while calling [`step`] or [`skip_to_seq`] macros
-#[derive(Debug, PartialEq)]
-pub enum StepErr<E> {
-    /// End of list reached
-    EndOfList,
-    /// A flash error occurred
-    FlashError(E),
-}
-
-/// Advance the iterator one step
-#[macro_export]
-macro_rules! step {
-    ($iter:ident, $buf:ident) => {
-        loop {
-            let res = $iter.next($buf).await;
-            match res {
-                // Got an item (good or bad)
-                Ok(Some(item)) => break StepResult::Ok(item),
-                // end of list
-                Ok(None) => break Err($crate::StepErr::EndOfList),
-                // flash error
-                Err(e) => break Err($crate::StepErr::FlashError(e)),
-            }
-        }
-    };
-}
-
-/// Fast-forwards the iterator to the Elem::Start item with the given seq_no.
-/// Returns an error if not found. If Err is returned, the iterator
-/// is exhausted. If Ok is returned, `Elem::Start { seq_no }` has been consumed.
-///
-/// On success, it returns the number of items consumed, including the Start item
-#[macro_export]
-macro_rules! skip_to_seq {
-    ($iter:ident, $buf:ident, $seq:ident) => {
-        {
-            let mut ctr = 0;
-            loop {
-                let res = $iter.next($buf).await;
-                ctr += 1;
-                let item = match res {
-                    // Got an item
-                    Ok(Some(item)) => item,
-                    // end of list
-                    Ok(None) => break Err($crate::StepErr::EndOfList),
-                    // flash error
-                    Err(e) => break Err($crate::StepErr::FlashError(e)),
-                };
-                if !matches!(item.data(), Some(Elem::Start { seq_no }) if seq_no == $seq) {
-                    continue;
-                }
-                break StepResult::Ok(((), ctr));
-            }
-        }
-    };
 }
 
 use crc::{CRC_32_CKSUM, Crc, Digest, NoTable};
