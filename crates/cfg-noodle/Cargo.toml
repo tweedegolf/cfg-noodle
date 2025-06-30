@@ -45,6 +45,7 @@ defmt = [
     "dep:defmt",
     "embassy-futures/defmt",
     "embassy-sync/defmt",
+    "embassy-time/defmt",
     "sequential-storage/defmt-03",
 ]
 
