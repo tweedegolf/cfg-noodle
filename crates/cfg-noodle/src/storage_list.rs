@@ -595,7 +595,7 @@ impl StorageListInner {
             ctr += 1;
 
             // Increment "data seen" counter
-            *bytes_read = *bytes_read + item.len();
+            *bytes_read += item.len();
 
             // What kind of data is this?
             match item.data() {
@@ -685,7 +685,7 @@ impl StorageListInner {
         for _ in 0..*latest.range.start() {
             match queue_iter.next(buf).await {
                 Ok(Some(item)) => {
-                    *total_bytes_read = *total_bytes_read + item.len();
+                    *total_bytes_read += item.len();
                 }
                 Ok(None) => return Err(LoadStoreError::AppError(Error::InconsistentFlash)),
                 Err(e) => return Err(LoadStoreError::FlashRead(e)),
@@ -697,7 +697,7 @@ impl StorageListInner {
             return Err(LoadStoreError::AppError(Error::InconsistentFlash));
         };
         // update the counter
-        *total_bytes_read = *total_bytes_read + item.len();
+        *total_bytes_read += item.len();
         // ...and it needs to be a Start record...
         let Some(Elem::Start { seq_no }) = item.data() else {
             return Err(LoadStoreError::AppError(Error::InconsistentFlash));
@@ -720,7 +720,7 @@ impl StorageListInner {
                 Err(e) => return Err(LoadStoreError::FlashRead(e)),
             };
             let item_len = item.len();
-            *total_bytes_read = *total_bytes_read + item_len;
+            *total_bytes_read += item_len;
 
             let data = match item.data() {
                 // Got data: great!
@@ -742,7 +742,7 @@ impl StorageListInner {
                     return Err(LoadStoreError::AppError(Error::InconsistentFlash));
                 }
             };
-            *current_bytes_read = *current_bytes_read + item_len;
+            *current_bytes_read += item_len;
 
             let Ok(kvpair) = extract(data.key_val()) else {
                 warn!("Failed to extract data on extract_all!");
@@ -1182,7 +1182,7 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
         match queue_iter.next(buf).await {
             Ok(Some(item)) => {
                 total_items_seen_ctr += 1;
-                *total_bytes_read = *total_bytes_read + item.len();
+                *total_bytes_read += item.len();
                 if matches!(item.data(), Some(Elem::Start { seq_no }) if seq_no == seq) {
                     // Found it!
                     break;
@@ -1192,7 +1192,7 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
             Err(e) => return Err(LoadStoreError::FlashRead(e)),
         }
     }
-    // We just saw the start counter, it's position is 1 back from the # of items seen
+    // We just saw the start counter, its position is 1 back from the # of items seen
     let start_pos = total_items_seen_ctr - 1;
 
     let mut crc = Crc32::new();
@@ -1201,7 +1201,7 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
         let item = match queue_iter.next(buf).await {
             Ok(Some(i)) => {
                 debug!("visiting {:?} in verify", i.data());
-                *total_bytes_read = *total_bytes_read + i.len();
+                *total_bytes_read += i.len();
                 i
             }
             Ok(None) => {

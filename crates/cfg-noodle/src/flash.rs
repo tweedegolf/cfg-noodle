@@ -128,7 +128,7 @@ where
     }
 
     const MAX_ELEM_SIZE: usize = const {
-        // We start from the max erase size
+        // We start from the (min) erase size for the flash
         let baseline = T::ERASE_SIZE;
 
         // Each sector has some metadata: two words
