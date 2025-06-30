@@ -1,5 +1,5 @@
 //! Configuration management
-#![doc = include_str!("../../../README.md")]
+#![doc = include_str!("../README.md")]
 #![cfg_attr(not(any(test, doctest, feature = "std")), no_std)]
 #![warn(missing_docs)]
 #![deny(clippy::unwrap_used)]
@@ -118,6 +118,8 @@ const fn max(a: usize, b: usize) -> usize {
 /// Currently, this is largely to encode the header byte of [`Elem`]s, which
 /// use the upper 4 bits for "version" (currently only [`ELEM_VERSION_V0`] is supported),
 /// and the lower 4 bits for "discriminant".
+///
+/// [`ELEM_VERSION_V0`]: consts::ELEM_VERSION_V0
 pub mod consts {
     /// Mask for the "Version" portion of the element byte
     pub const ELEM_VERSION_MASK: u8 = 0b1111_0000;
