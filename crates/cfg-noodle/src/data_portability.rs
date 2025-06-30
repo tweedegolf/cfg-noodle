@@ -20,7 +20,7 @@
 //! > \[The\] encoding has the following characteristics:
 //! >
 //! >    1. The encoding does not contain any names, i.e. no field names, type names or variant names. Instead, every field and every constructor needs to be annotated with an index number, e.g. #[n(1)].
-//! >    2. Unknown fields are ignored during decoding.1
+//! >    2. Unknown fields are ignored during decoding.
 //! >    3. Optional types default to None if their value is not present during decoding.
 //! >    4. Optional enums default to None if an unknown variant is encountered during decoding.
 //!
