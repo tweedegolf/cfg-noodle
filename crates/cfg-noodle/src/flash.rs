@@ -85,7 +85,7 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> Flash<T, C> {
     }
 }
 
-impl<T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlDataStorage for Flash<T, C>
+impl<T: MultiwriteNorFlash, C: CacheImpl> NdlDataStorage for Flash<T, C>
 where
     <T as ErrorType>::Error: MaybeDefmtFormat,
 {
@@ -153,7 +153,7 @@ where
 
 // ---- impl FlashIter ----
 
-impl<'flash, T: MultiwriteNorFlash + 'static, C: CacheImpl + 'static> NdlElemIter
+impl<'flash, T: MultiwriteNorFlash, C: CacheImpl> NdlElemIter
     for FlashIter<'flash, T, C>
 {
     type Item<'this, 'buf>
