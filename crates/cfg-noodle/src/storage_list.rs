@@ -24,7 +24,7 @@ use minicbor::{
     encode::write::{Cursor, EndOfSlice},
     len_with,
 };
-use mutex_traits::{ConstInit, ScopedRawMutex};
+use mutex_traits::ScopedRawMutex;
 
 /// "Global anchor" of all storage items.
 ///
@@ -172,7 +172,7 @@ struct WriteReport {
 // impl StorageList
 // --------------------------------------------------------------------------
 
-impl<R: ScopedRawMutex + ConstInit> StorageList<R> {
+impl<R: ScopedRawMutex + Default> StorageList<R> {
     /// const constructor to make a new empty list. Intended to be used
     /// to create a static.
     ///
@@ -181,7 +181,7 @@ impl<R: ScopedRawMutex + ConstInit> StorageList<R> {
     /// # use mutex::raw_impls::cs::CriticalSectionRawMutex;
     /// static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
     /// ```
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Mutex::new_with_raw_mutex(
                 StorageListInner {
@@ -192,7 +192,7 @@ impl<R: ScopedRawMutex + ConstInit> StorageList<R> {
                         needs_gc: false,
                     },
                 },
-                R::INIT,
+                R::default(),
             ),
             needs_read: WaitQueue::new(),
             needs_write: WaitQueue::new(),
@@ -201,7 +201,7 @@ impl<R: ScopedRawMutex + ConstInit> StorageList<R> {
     }
 }
 
-impl<R: ScopedRawMutex + ConstInit> Default for StorageList<R> {
+impl<R: ScopedRawMutex + Default> Default for StorageList<R> {
     /// this only exists to shut up the clippy lint about impl'ing default
     fn default() -> Self {
         Self::new()
@@ -1247,7 +1247,7 @@ async fn verify_list_in_flash<S: NdlDataStorage>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod test {
     #![allow(clippy::unwrap_used)]
 

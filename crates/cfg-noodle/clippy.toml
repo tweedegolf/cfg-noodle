@@ -1,0 +1,5 @@
+disallowed-types = [
+    "std::sync::atomic::AtomicPtr",
+    "std::sync::atomic::AtomicU8",
+    "std::sync::Arc",
+]

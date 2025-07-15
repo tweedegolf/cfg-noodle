@@ -1,3 +1,5 @@
+#![cfg(not(loom))]
+
 use std::{num::NonZeroU32, sync::Arc};
 
 use cfg_noodle::{StorageList, StorageListNode, test_utils};

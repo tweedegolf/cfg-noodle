@@ -25,6 +25,11 @@ pub mod test_utils;
 mod storage_list;
 mod storage_node;
 
+mod sync;
+
+#[cfg(loom)]
+mod loom;
+
 use core::num::NonZeroU32;
 
 use minicbor::{CborLen, Encode, len_with};
