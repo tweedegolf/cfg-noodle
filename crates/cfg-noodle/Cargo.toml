@@ -91,3 +91,7 @@ loom = { version = "0.7.2", features = ["futures", "checkpoint"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[profile.release]
+debug-assertions = true
+overflow-checks = true
