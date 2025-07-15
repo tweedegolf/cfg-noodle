@@ -2,9 +2,9 @@
 
 #![allow(clippy::unwrap_used)]
 
+use crate::sync::Arc;
 use core::{fmt::Write as _, num::NonZeroU32};
-use std::{collections::VecDeque, sync::Arc};
-
+use embassy_futures::select::select;
 use log::{debug, error, info, warn};
 use maitake_sync::WaitQueue;
 use minicbor::encode::write::{Cursor, EndOfSlice};
@@ -13,7 +13,7 @@ use sequential_storage::{
     cache::NoCache,
     mock_flash::{MockFlashBase, WriteCountCheck},
 };
-use tokio::select;
+use std::collections::VecDeque;
 
 use crate::{
     Crc32, Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData, flash::Flash,
@@ -488,10 +488,7 @@ pub async fn worker_task_tst_sto_custom<R: ScopedRawMutex + Sync>(
             }
         }
     };
-    select! {
-        _ = stopper.wait() => {},
-        _ = fut => {},
-    };
+    select(stopper.wait(), fut).await;
     WorkerReport {
         flash,
         read_errs,

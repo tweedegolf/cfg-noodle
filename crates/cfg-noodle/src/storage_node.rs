@@ -1,6 +1,7 @@
 //! # Intrusive Linked List for Configuration Storage
 //! This implements the [`StorageList`] and its [`StorageListNode`]s
 
+use crate::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 use crate::{
     error::Error,
     logging::{MaybeDefmtFormat, debug, error},
@@ -13,7 +14,6 @@ use core::{
     marker::{PhantomData, PhantomPinned},
     mem::MaybeUninit,
     ptr::{self, NonNull, null_mut},
-    sync::atomic::{AtomicPtr, AtomicU8, Ordering},
 };
 use minicbor::{
     CborLen, Decode, Encode,
@@ -269,7 +269,7 @@ where
     T: MaybeDefmtFormat,
 {
     /// Make a new [`StorageListNode`], initially empty and unattached
-    pub const fn new(path: &'static str) -> Self {
+    pub fn new(path: &'static str) -> Self {
         Self {
             inner: Node {
                 header: NodeHeader {

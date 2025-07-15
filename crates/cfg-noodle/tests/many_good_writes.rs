@@ -1,3 +1,4 @@
+#![cfg(not(loom))]
 #![cfg_attr(miri, allow(dead_code, unused_imports))]
 
 use std::{num::NonZeroU32, sync::Arc};
