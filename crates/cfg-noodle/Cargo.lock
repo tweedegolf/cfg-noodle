@@ -148,6 +148,7 @@ dependencies = [
  "crc",
  "critical-section",
  "defmt 1.0.1",
+ "embassy-executor",
  "embassy-futures",
  "embassy-sync",
  "embassy-time",
