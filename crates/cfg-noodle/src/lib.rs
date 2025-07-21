@@ -261,6 +261,27 @@ pub trait NdlDataStorage {
     }
 }
 
+impl<T: NdlDataStorage> NdlDataStorage for &mut T {
+    type Iter<'this>
+        = T::Iter<'this>
+    where
+        Self: 'this;
+    type Error = T::Error;
+
+    fn iter_elems<'this>(
+        &'this mut self,
+    ) -> impl Future<Output = Result<Self::Iter<'this>, <Self::Iter<'this> as NdlElemIter>::Error>>
+    {
+        T::iter_elems(self)
+    }
+
+    fn push(&mut self, data: &Elem<'_>) -> impl Future<Output = Result<usize, Self::Error>> {
+        T::push(self, data)
+    }
+
+    const MAX_ELEM_SIZE: usize = T::MAX_ELEM_SIZE;
+}
+
 /// An iterator over `Elem`s stored in the queue.
 pub trait NdlElemIter {
     /// Items yielded by this iterator
