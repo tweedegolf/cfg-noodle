@@ -5,6 +5,10 @@
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![allow(async_fn_in_trait)]
+#![allow(
+    clippy::uninlined_format_args,
+    reason = "Having inlined variables does not work with defmt"
+)]
 
 pub mod data_portability;
 pub mod error;
