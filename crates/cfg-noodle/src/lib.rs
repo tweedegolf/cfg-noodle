@@ -184,6 +184,30 @@ impl<'a> SerData<'a> {
     pub fn key_val(&self) -> &[u8] {
         self.hdr_key_val.get(1..).unwrap_or(&[])
     }
+
+    /// Get the split key and value. This is the same data as [Self::key_val], but one parsing step further.
+    ///
+    /// The value contains the cbor bytes
+    pub fn kv_pair(&self) -> Result<KvPair<'_>, Error> {
+        let item = self.key_val();
+
+        let Ok(key) = minicbor::decode::<&str>(item) else {
+            return Err(Error::Deserialization);
+        };
+        let len = len_with(key, &mut ());
+        let Some(remain) = item.get(len..) else {
+            return Err(Error::Deserialization);
+        };
+        Ok(KvPair { key, body: remain })
+    }
+}
+
+/// A key-value pair
+pub struct KvPair<'a> {
+    /// The key of the pair
+    pub key: &'a str,
+    /// The body of the pair
+    pub body: &'a [u8],
 }
 
 /// A single element stored in flash
@@ -327,7 +351,7 @@ pub trait NdlElemIterNode {
 
 use crc::{CRC_32_CKSUM, Crc, Digest, NoTable};
 
-use crate::logging::MaybeDefmtFormat;
+use crate::{error::Error, logging::MaybeDefmtFormat};
 
 /// CRC32 implementation
 ///
