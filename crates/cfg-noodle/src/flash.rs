@@ -153,9 +153,7 @@ where
 
 // ---- impl FlashIter ----
 
-impl<'flash, T: MultiwriteNorFlash, C: CacheImpl> NdlElemIter
-    for FlashIter<'flash, T, C>
-{
+impl<'flash, T: MultiwriteNorFlash, C: CacheImpl> NdlElemIter for FlashIter<'flash, T, C> {
     type Item<'this, 'buf>
         = FlashNode<'flash, 'this, 'buf, T, C>
     where

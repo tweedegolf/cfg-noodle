@@ -20,10 +20,7 @@ use core::{
     sync::atomic::Ordering,
 };
 use maitake_sync::{Mutex, WaitQueue};
-use minicbor::{
-    encode::write::{Cursor, EndOfSlice},
-    len_with,
-};
+use minicbor::encode::write::{Cursor, EndOfSlice};
 use mutex_traits::{ConstInit, ScopedRawMutex};
 
 /// "Global anchor" of all storage items.
@@ -744,7 +741,7 @@ impl StorageListInner {
             };
             *current_bytes_read += item_len;
 
-            let Ok(kvpair) = extract(data.key_val()) else {
+            let Ok(kvpair) = data.kv_pair() else {
                 warn!("Failed to extract data on extract_all!");
                 continue;
             };
@@ -1062,25 +1059,6 @@ struct SendPtr {
 /// - Rule 1: Nodes are always shared
 /// - Rule 5: The nodes may not be attached/detached while we hold the mutex
 unsafe impl Send for SendPtr {}
-
-struct KvPair<'a> {
-    key: &'a str,
-    body: &'a [u8],
-}
-
-/// Get the `key` bytes from a list item in the flash.
-///
-/// Used to extract the key from a `QueueIteratorItem`.
-fn extract(item: &[u8]) -> Result<KvPair<'_>, Error> {
-    let Ok(key) = minicbor::decode::<&str>(item) else {
-        return Err(Error::Deserialization);
-    };
-    let len = len_with(key, &mut ());
-    let Some(remain) = item.get(len..) else {
-        return Err(Error::Deserialization);
-    };
-    Ok(KvPair { key, body: remain })
-}
 
 /// Serialize a storage node by writing its key and payload data
 /// into the provided buffer.
