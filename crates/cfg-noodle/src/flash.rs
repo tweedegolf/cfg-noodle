@@ -270,3 +270,73 @@ where
 
     baseline_overhead + len_roundup
 }
+
+/// An implementation of an empty flash
+///
+/// On reads, it is always empty, any writes to it are ignored.
+/// See also [`worker_task::no_op_worker_task`](`crate::worker_task::no_op_worker_task`) for a worker that uses it.
+pub mod empty {
+    use crate::{Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode};
+
+    /// A Flash that always reads as empty and ignores all writes
+    ///
+    /// It can be used for testing and evaluation.
+    pub struct AlwaysEmptyFlash;
+
+    impl NdlDataStorage for AlwaysEmptyFlash {
+        type Iter<'this> = AlwaysEmptyIter;
+        type Error = core::convert::Infallible;
+
+        async fn iter_elems<'this>(
+            &'this mut self,
+        ) -> Result<Self::Iter<'this>, <Self::Iter<'this> as NdlElemIter>::Error> {
+            Ok(AlwaysEmptyIter)
+        }
+
+        async fn push(&mut self, _data: &Elem<'_>) -> Result<usize, Self::Error> {
+            Ok(0)
+        }
+
+        const MAX_ELEM_SIZE: usize = 0;
+    }
+
+    /// An implementation of [AlwaysEmptyIter] that always returns no elements.
+    pub struct AlwaysEmptyIter;
+
+    impl NdlElemIter for AlwaysEmptyIter {
+        type Item<'a, 'b> = NeverNode;
+        type Error = core::convert::Infallible;
+
+        async fn next<'iter, 'buf>(
+            &'iter mut self,
+            _buf: &'buf mut [u8],
+        ) -> Result<Option<Self::Item<'iter, 'buf>>, Self::Error>
+        where
+            Self: 'buf,
+            Self: 'iter,
+        {
+            Ok(None)
+        }
+    }
+
+    /// An implementation of [NdlElemIterNode] that can never be constructed.
+    ///
+    /// This is useful for testing with [AlwaysEmptyFlash].
+    pub enum NeverNode {}
+
+    impl NdlElemIterNode for NeverNode {
+        type Error = core::convert::Infallible;
+
+        fn data(&self) -> Option<Elem<'_>> {
+            match *self {}
+        }
+
+        fn len(&self) -> usize {
+            match *self {}
+        }
+
+        async fn invalidate(self) -> Result<(), Self::Error> {
+            match self {}
+        }
+    }
+}

@@ -9,6 +9,7 @@ use mutex_traits::ScopedRawMutex;
 use crate::{
     NdlDataStorage, StorageList,
     error::{Error, LoadStoreError},
+    flash::empty::AlwaysEmptyFlash,
     logging::{debug, error, info, warn},
 };
 
@@ -189,4 +190,66 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
     }
 
     info!("worker task stopped!");
+}
+
+/// A worker tasks that always reads no entries and ignores all writes
+///
+/// This is useful in testing to always start out with an empty flash.
+pub async fn no_op_worker_task<R: ScopedRawMutex + Sync>(list: &'static StorageList<R>) -> ! {
+    loop {
+        list.process_garbage(&mut AlwaysEmptyFlash, &mut [])
+            .await
+            .expect("AlwaysEmptyFlash never fails");
+
+        match select(list.needs_read(), list.needs_write()).await {
+            Either::First(()) => {
+                list.process_reads(&mut AlwaysEmptyFlash, &mut [])
+                    .await
+                    .expect("AlwaysEmptyFlash never fails");
+            }
+            Either::Second(()) => {
+                list.process_writes(&mut AlwaysEmptyFlash, &mut [])
+                    .await
+                    .expect("AlwaysEmptyFlash never fails");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::StorageListNode;
+    use mutex::raw_impls::cs::CriticalSectionRawMutex;
+
+    #[expect(
+        clippy::unwrap_used,
+        reason = "Only unwrapping flash errors which can never happen"
+    )]
+    #[test_log::test(tokio::test)]
+    async fn no_op_worker_never_fails_and_ignores_all_writes() {
+        static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static NODE: StorageListNode<u64> = StorageListNode::new("config/node");
+
+        let test = async {
+            let mut handle = NODE.attach(&LIST).await.unwrap();
+
+            // On start-up we read the default
+            assert_eq!(handle.load(), 0);
+
+            // Writing locally works
+            handle.write(&42).await.unwrap();
+            assert_eq!(handle.load(), 42);
+
+            // But data will not be written to flash
+            drop(handle);
+            NODE.detach(&LIST).await.unwrap();
+
+            // So when we re-attach, we get back the default value
+            let handle = NODE.attach(&LIST).await.unwrap();
+            assert_eq!(handle.load(), 0);
+        };
+
+        select(test, no_op_worker_task(&LIST)).await;
+    }
 }
