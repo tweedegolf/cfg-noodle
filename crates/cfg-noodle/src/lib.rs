@@ -5,6 +5,10 @@
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![allow(async_fn_in_trait)]
+#![allow(
+    clippy::uninlined_format_args,
+    reason = "Having inlined variables does not work with defmt"
+)]
 
 pub mod data_portability;
 pub mod error;
@@ -279,6 +283,27 @@ pub trait NdlDataStorage {
     {
         Self::MAX_ELEM_SIZE >= 1 + len_with(key, &mut ()) + len_with(node, &mut ())
     }
+}
+
+impl<T: NdlDataStorage> NdlDataStorage for &mut T {
+    type Iter<'this>
+        = T::Iter<'this>
+    where
+        Self: 'this;
+    type Error = T::Error;
+
+    fn iter_elems<'this>(
+        &'this mut self,
+    ) -> impl Future<Output = Result<Self::Iter<'this>, <Self::Iter<'this> as NdlElemIter>::Error>>
+    {
+        T::iter_elems(self)
+    }
+
+    fn push(&mut self, data: &Elem<'_>) -> impl Future<Output = Result<usize, Self::Error>> {
+        T::push(self, data)
+    }
+
+    const MAX_ELEM_SIZE: usize = T::MAX_ELEM_SIZE;
 }
 
 /// An iterator over `Elem`s stored in the queue.
