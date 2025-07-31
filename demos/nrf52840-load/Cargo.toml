@@ -12,7 +12,7 @@ embassy-nrf             = { version = "0.3.1", features = ["defmt", "nrf52840", 
 # embassy-nrf 0.3.1 uses embassy-sync 0.6.2, so we must use that, too, for now.
 embassy-sync            = { version = "0.6.2", features = ["defmt"] }
 embassy-time            = { version = "0.4.0", features = ["defmt", "defmt-timestamp-uptime"] }
-minicbor                = { version = "1.0.0", features = ["derive"], default-features = false }
+minicbor                = { version = "2.0.0", features = ["derive"], default-features = false }
 mutex                   = { version = "1.0.0", features = ["impl-critical-section"], default-features = false }
 panic-probe             = { version = "1.0.0",   features = ["print-defmt"] }
 portable-atomic         = { version = "1.11.1", features = ["critical-section"] }
@@ -24,7 +24,7 @@ defmt                   = "1.0.1"
 defmt-rtt               = "1.0.0"
 embassy-embedded-hal    = "0.3.0"
 embassy-futures         = "0.1.1"
-sequential-storage      = "4.0.3"
+sequential-storage      = "5.0.0"
 static_cell             = "2.1"
 maitake-sync = { version = "0.2.1", default-features = false, features = ["critical-section"] }
 
