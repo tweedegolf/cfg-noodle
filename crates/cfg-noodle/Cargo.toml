@@ -1,6 +1,6 @@
 [package]
 name = "cfg-noodle"
-version = "0.3.0"
+version = "0.4.0"
 authors = [
     "James Munns <james@onevariable.com>",
     "Julian Dickert <julian@systemscape.de>",
@@ -68,13 +68,13 @@ embassy-time            = "0.4.0"
 embedded-storage-async  = "0.4.1"
 mutex-traits            = "1.0.0"
 pin-project             = "1.1.10"
-sequential-storage      = "4.0.3"
+sequential-storage      = "5.0.0"
 
 cordyceps        = { version = "0.3.4", default-features = false }
 defmt            = { version = "1.0.1", optional = true }
 log              = { version = "0.4.27", optional = true }
 maitake-sync     = { version = "0.2.1", default-features = false }
-minicbor         = { version = "1.0.0", default-features = false, features = ["derive"] }
+minicbor         = { version = "2.0.0", default-features = false, features = ["derive"] }
 mutex            = { version = "1.0.0", features = ["impl-critical-section"] }
 simple_logger    = { version = "5.0.0", optional = true }
 tokio            = { version = "1.45.1", optional = true, features = ["macros", "rt-multi-thread", "time"] }
