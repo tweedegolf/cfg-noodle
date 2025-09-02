@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.5.0 03-09-25
+
+- *Breaking:* Update to embassy-time 0.5
+
 ## 0.4.0 31-07-25
 
 - *Breaking:* Updated sequential-storage to 5.0.0 and minicbor to 2.0.0

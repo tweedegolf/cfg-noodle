@@ -7,13 +7,13 @@ edition = "2021"
 cfg-noodle              = { path = "../../crates/cfg-noodle", features = ["defmt"] }
 
 cortex-m                = { version = "0.7.7", features = ["inline-asm", "critical-section-single-core"] }
-embassy-executor        = { version = "0.7.0", features = ["task-arena-size-32768", "arch-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
-embassy-nrf             = { version = "0.3.1", features = ["defmt", "nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac", "time"] }
+embassy-executor        = { version = "0.9.1", features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
+embassy-nrf             = { version = "0.7.0", features = ["defmt", "nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac", "time"] }
 # embassy-nrf 0.3.1 uses embassy-sync 0.6.2, so we must use that, too, for now.
-embassy-sync            = { version = "0.6.2", features = ["defmt"] }
-embassy-time            = { version = "0.4.0", features = ["defmt", "defmt-timestamp-uptime"] }
-minicbor                = { version = "2.0.0", features = ["derive"], default-features = false }
-mutex                   = { version = "1.0.0", features = ["impl-critical-section"], default-features = false }
+embassy-sync            = { version = "0.7.2", features = ["defmt"] }
+embassy-time            = { version = "0.5.0", features = ["defmt", "defmt-timestamp-uptime"] }
+minicbor                = { version = "2.1.1", features = ["derive"], default-features = false }
+mutex                   = { version = "1.0.2", features = ["impl-critical-section"], default-features = false }
 panic-probe             = { version = "1.0.0",   features = ["print-defmt"] }
 portable-atomic         = { version = "1.11.1", features = ["critical-section"] }
 
@@ -22,11 +22,11 @@ mx25r                   = { git = "https://github.com/xgroleau/mx25r-rs",   rev 
 cortex-m-rt             = "0.7.5"
 defmt                   = "1.0.1"
 defmt-rtt               = "1.0.0"
-embassy-embedded-hal    = "0.3.0"
-embassy-futures         = "0.1.1"
-sequential-storage      = "5.0.0"
+embassy-embedded-hal    = "0.5.0"
+embassy-futures         = "0.1.2"
+sequential-storage      = "5.0.1"
 static_cell             = "2.1"
-maitake-sync = { version = "0.2.1", default-features = false, features = ["critical-section"] }
+maitake-sync = { version = "0.2.2", default-features = false, features = ["critical-section"] }
 
 [profile.release]
 debug = 2
