@@ -29,7 +29,7 @@ pub enum Error {
     NodeInOtherList,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 /// Errors during loading from and storing to flash.
 ///

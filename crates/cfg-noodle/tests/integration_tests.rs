@@ -22,6 +22,7 @@ struct TestConfig {
     optional_truth: Option<bool>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Default, Encode, Decode, Clone, CborLen)]
 struct SimpleConfig {
     #[n(0)]

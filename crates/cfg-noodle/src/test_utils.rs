@@ -35,6 +35,12 @@ use crate::{
 pub struct TestStorage {
     ctr: u64,
     pub items: Vec<TestItem>,
+    pub forced_error: Option<TestStorageError>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum TestStorageError {
+    FakeBadRead,
 }
 
 /// An iterator over a [`TestStorage`]
@@ -206,11 +212,14 @@ impl NdlDataStorage for TestStorage {
     where
         Self: 'this;
 
-    type Error = ();
+    type Error = TestStorageError;
 
     async fn iter_elems<'this>(
         &'this mut self,
     ) -> Result<Self::Iter<'this>, <Self::Iter<'this> as NdlElemIter>::Error> {
+        if let Some(err) = self.forced_error {
+            return Err(err);
+        }
         // Create a clone of the items to make things easier.
         let remain_items = self.items.iter().cloned().collect();
         Ok(TestStorageIter {
@@ -220,6 +229,9 @@ impl NdlDataStorage for TestStorage {
     }
 
     async fn push(&mut self, data: &Elem<'_>) -> Result<usize, Self::Error> {
+        if let Some(err) = self.forced_error {
+            return Err(err);
+        }
         info!("Pushing {data:?}");
         let ctr = self.next_ctr();
         let item: TestElem = data.into();
@@ -251,7 +263,7 @@ impl<'a> NdlElemIter for TestStorageIter<'a> {
         Self: 'this,
         Self: 'buf;
 
-    type Error = ();
+    type Error = TestStorageError;
 
     async fn next<'iter, 'buf>(
         &'iter mut self,
@@ -261,6 +273,9 @@ impl<'a> NdlElemIter for TestStorageIter<'a> {
         Self: 'buf,
         Self: 'iter,
     {
+        if let Some(err) = self.sto.forced_error {
+            return Err(err);
+        }
         if let Some(item) = self.remain_items.pop_front() {
             debug!("Popping {item:?}");
             Ok(Some(TestStorageItemNode {
@@ -276,7 +291,7 @@ impl<'a> NdlElemIter for TestStorageIter<'a> {
 // ---- impl TestStorageItemNode ----
 
 impl<'a> NdlElemIterNode for TestStorageItemNode<'a> {
-    type Error = ();
+    type Error = TestStorageError;
 
     fn data(&self) -> Option<Elem<'_>> {
         let elem = &self.item.elem;
@@ -293,6 +308,9 @@ impl<'a> NdlElemIterNode for TestStorageItemNode<'a> {
     }
 
     async fn invalidate(self) -> Result<(), Self::Error> {
+        if let Some(err) = self.sto.forced_error {
+            return Err(err);
+        }
         warn!("Invalidating {:?}", self.item);
         let item_ctr = self.item.ctr;
         // todo: find + remove might be faster, but whatever, test code
@@ -381,7 +399,7 @@ pub fn get_mock_flash() -> MockFlash {
     let mut flash = MockFlashBase::<10, 16, 256>::new(WriteCountCheck::OnceOnly, None, true);
     // TODO: Figure out why miri tests with unaligned buffers and whether
     // this needs any fixing. For now just disable the alignment check in MockFlash
-    flash.alignment_check = false;
+    flash.alignment_check = !cfg!(miri);
     Flash::new(flash, 0x0000..0x1000, NoCache::new())
 }
 
