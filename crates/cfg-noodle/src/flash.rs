@@ -4,7 +4,7 @@
 //! and exposes async methods for queue-like operations on persistent storage.
 use core::{num::NonZeroU32, ops::Deref};
 
-use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash};
+use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, ReadNorFlash};
 use sequential_storage::{
     cache::CacheImpl,
     queue::{self, QueueIterator, QueueIteratorEntry},
@@ -85,7 +85,7 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> Flash<T, C> {
     }
 }
 
-impl<T: MultiwriteNorFlash, C: CacheImpl> NdlDataStorage for Flash<T, C>
+impl<T: MultiwriteNorFlash + ReadNorFlash, C: CacheImpl> NdlDataStorage for Flash<T, C>
 where
     <T as ErrorType>::Error: MaybeDefmtFormat,
 {
@@ -134,6 +134,11 @@ where
         .await?;
 
         Ok(size_with_overhead::<T>(used.len()))
+    }
+
+    async fn read_raw_data(&mut self, offset: usize, buf: &mut [u8]) -> Result<(), ()> { 
+        let _ = self.flash.read(offset as u32, buf).await.map_err(|_| ())?;
+        Ok(())
     }
 
     const MAX_ELEM_SIZE: usize = const {

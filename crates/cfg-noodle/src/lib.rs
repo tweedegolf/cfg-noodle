@@ -266,6 +266,11 @@ pub trait NdlDataStorage {
     /// being written.
     async fn push(&mut self, data: &Elem<'_>) -> Result<usize, Self::Error>;
 
+
+
+    /// Read raw data from storage into `buf` at `offset`.
+    async fn read_raw_data(&mut self, _offset: usize, _buf: &mut [u8]) -> Result<(), ()> { Err(())}
+
     /// Return the maximum size of an `Elem` that may be stored in the list in bytes.
     ///
     /// This includes a one byte element header, the CBOR-serialized key, and the
