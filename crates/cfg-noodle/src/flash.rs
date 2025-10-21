@@ -137,7 +137,11 @@ where
     }
 
     async fn read_raw_data(&mut self, offset: usize, buf: &mut [u8]) -> Result<(), Self::Error> { 
-        self.flash.read(offset as u32, buf).await.map_err(|e| Self::Error::Storage { value: e })
+        self.flash.read(offset as u32, buf).await.map_err(|e| Self::Error::Storage {
+            value: e,
+            #[cfg(feature = "std")]
+            backtrace: std::backtrace::Backtrace::capture(),
+        })
     }
 
     const MAX_ELEM_SIZE: usize = const {

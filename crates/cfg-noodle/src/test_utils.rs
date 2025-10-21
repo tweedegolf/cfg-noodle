@@ -250,6 +250,10 @@ impl NdlDataStorage for TestStorage {
         Ok(used)
     }
 
+    async fn read_raw_data(&mut self, _offset: usize, _buf: &mut [u8]) -> Result<(), Self::Error> {
+        Ok(()) // always succeeds, but does nothing
+    }
+
     // No actual limit on the test storage, use some reasonable value.
     const MAX_ELEM_SIZE: usize = 4080;
 }
