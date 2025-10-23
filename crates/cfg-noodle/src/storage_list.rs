@@ -520,6 +520,46 @@ impl<R: ScopedRawMutex> StorageList<R> {
         // No need to check for errors, we never close the WaitQueue
         let _ = self.needs_write.wait().await;
     }
+
+    /// Manually reset the `cfg-noodle` cache
+    ///
+    /// This should not normally be necessary, and has some important caveats:
+    ///
+    /// 1. The next `process_reads` will be slow (requires re-building cache, like on a typical
+    ///    first `process_reads`), and a `process_reads` MUST be completed before calling
+    ///    `process_writes`/`process_garbage`, similar to after a clean startup.
+    /// 2. This method does NOT reset the cache of our storage, for example if `sequential-storage`
+    ///    is used with a key/pointer cache. You still must manually perform this action separately.
+    /// 3. This method does NOT reset any of the [`StorageNode`]s. If they have previously loaded
+    ///    some value, they will retain that value moving forward.
+    ///
+    /// This method is intended for the EXTREMELY RARE case where:
+    ///
+    /// 1. `process_reads` succeeds at startup
+    /// 2. Some later failure/corruption of the underlying storage makes it necessary to wipe
+    ///    or reset the underlying storage method
+    /// 3. We need to "fix the plane while it is flying", and try to get cfg-noodle back into
+    ///    a reasonable state.
+    ///
+    /// In this dangerous case, you probably want to do something like the following from the
+    /// I/O worker task:
+    ///
+    /// 1. Notice the state is bad (failed writes? some other signs?)
+    /// 2. Do whatever reset/full wipe/reformat of the external storage
+    /// 3. (if necessary), reset the cache of the external storage (e.g. s-s's storage cache)
+    /// 4. Call this method
+    /// 5. Call `process_reads()` to re-build the cache
+    /// 6. Call `process_garbage()`, if necessary (probably not if we have an empty storage
+    ///    medium!)
+    /// 7. Call `process_writes()` to persist the current state of in-memory data back to the
+    ///    external flash
+    ///
+    /// This method does not perform any I/O.
+    pub async fn reset_cache(&self) {
+        warn!("manually resetting cache!");
+        let mut inner = self.inner.lock().await;
+        inner.seq_state = Default::default();
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -956,6 +996,14 @@ impl StorageListInner {
             }
         }
 
+        // If NONE of the items need writing, BUT we also have no data on disk, then
+        // we should perform a write-back. In MOST cases, this isn't necessary, but
+        // if some kind of tricky reset has happened, e.g. `reset_cache()` has been
+        // called, we should check if we need to write-back.
+        if !needs_writing {
+            needs_writing |= self.seq_state.highest_seen().is_none();
+        }
+
         Ok(needs_writing)
     }
 }
@@ -974,10 +1022,10 @@ impl SeqState {
     /// What is the highest sequence number we've seen in external flash, if any?
     #[inline]
     fn highest_seen(&self) -> Option<GoodWriteRecord> {
-        if let Some(last) = self.last_three.last() {
-            if let Some(seen) = last.as_ref() {
-                return Some(seen.clone());
-            }
+        if let Some(last) = self.last_three.last()
+            && let Some(seen) = last.as_ref()
+        {
+            return Some(seen.clone());
         }
         None
     }

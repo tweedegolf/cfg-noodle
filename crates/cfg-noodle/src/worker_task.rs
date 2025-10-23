@@ -195,24 +195,15 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
 /// A worker tasks that always reads no entries and ignores all writes
 ///
 /// This is useful in testing to always start out with an empty flash.
+///
+/// The no-op worker task ONLY serves `process_reads`, not `process_writes` or
+/// `process_garbage`: these would fail when attempting to verify with read-back.
 pub async fn no_op_worker_task<R: ScopedRawMutex + Sync>(list: &'static StorageList<R>) -> ! {
     loop {
-        list.process_garbage(&mut AlwaysEmptyFlash, &mut [])
+        list.needs_read().await;
+        list.process_reads(&mut AlwaysEmptyFlash, &mut [])
             .await
             .expect("AlwaysEmptyFlash never fails");
-
-        match select(list.needs_read(), list.needs_write()).await {
-            Either::First(()) => {
-                list.process_reads(&mut AlwaysEmptyFlash, &mut [])
-                    .await
-                    .expect("AlwaysEmptyFlash never fails");
-            }
-            Either::Second(()) => {
-                list.process_writes(&mut AlwaysEmptyFlash, &mut [])
-                    .await
-                    .expect("AlwaysEmptyFlash never fails");
-            }
-        }
     }
 }
 
