@@ -266,6 +266,9 @@ pub trait NdlDataStorage {
     /// being written.
     async fn push(&mut self, data: &Elem<'_>) -> Result<usize, Self::Error>;
 
+    /// Read raw data from storage into `buf` at `offset`. This API is there to provide the ability to do dumps/backups
+    async fn read_raw_data(&mut self, offset: usize, buf: &mut [u8]) -> Result<(), Self::Error>;
+
     /// Return the maximum size of an `Elem` that may be stored in the list in bytes.
     ///
     /// This includes a one byte element header, the CBOR-serialized key, and the
@@ -301,6 +304,10 @@ impl<T: NdlDataStorage> NdlDataStorage for &mut T {
 
     fn push(&mut self, data: &Elem<'_>) -> impl Future<Output = Result<usize, Self::Error>> {
         T::push(self, data)
+    }
+
+    fn read_raw_data(&mut self, offset: usize, buf: &mut [u8]) -> impl Future<Output = Result<(), Self::Error>> { 
+        T::read_raw_data(self, offset, buf)
     }
 
     const MAX_ELEM_SIZE: usize = T::MAX_ELEM_SIZE;

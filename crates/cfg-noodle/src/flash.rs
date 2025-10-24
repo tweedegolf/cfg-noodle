@@ -136,6 +136,14 @@ where
         Ok(size_with_overhead::<T>(used.len()))
     }
 
+    async fn read_raw_data(&mut self, offset: usize, buf: &mut [u8]) -> Result<(), Self::Error> { 
+        self.flash.read(offset as u32, buf).await.map_err(|e| Self::Error::Storage {
+            value: e,
+            #[cfg(feature = "std")]
+            backtrace: std::backtrace::Backtrace::capture(),
+        })
+    }
+
     const MAX_ELEM_SIZE: usize = const {
         // We start from the (min) erase size for the flash
         let baseline = T::ERASE_SIZE;
@@ -295,6 +303,10 @@ pub mod empty {
 
         async fn push(&mut self, _data: &Elem<'_>) -> Result<usize, Self::Error> {
             Ok(0)
+        }
+
+        async fn read_raw_data(&mut self, _offset: usize, _buf: &mut [u8]) -> Result<(), Self::Error> {
+            Ok(()) // always succeeds, but does nothing
         }
 
         const MAX_ELEM_SIZE: usize = 0;
