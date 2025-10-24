@@ -5,6 +5,7 @@
 use core::{fmt::Write as _, num::NonZeroU32};
 use std::{collections::VecDeque, sync::Arc};
 
+use embassy_executor as _; // Required to compile on windows
 use log::{debug, error, info, warn};
 use maitake_sync::WaitQueue;
 use minicbor::encode::write::{Cursor, EndOfSlice};
@@ -14,7 +15,6 @@ use sequential_storage::{
     mock_flash::{MockFlashBase, WriteCountCheck},
 };
 use tokio::select;
-use embassy_executor as _; // Required to compile on windows
 
 use crate::{
     Crc32, Elem, NdlDataStorage, NdlElemIter, NdlElemIterNode, SerData, flash::Flash,
