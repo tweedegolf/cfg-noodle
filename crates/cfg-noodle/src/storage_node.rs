@@ -465,7 +465,7 @@ where
                 // - Rule 3.1.1: The mutex is locked
                 // - Rule 3.1.2.2: The node is in the NonResident state
                 let body: &mut MaybeUninit<T> = unsafe { &mut *body };
-                *body = MaybeUninit::new(f());
+                body.write(f());
                 // We do NOT hold the lock, use Relaxed ordering.
                 hdrref
                     .state
@@ -922,7 +922,7 @@ where
     // Rule 3.1.1: The mutex is locked
     // Rule 3.2.1: The node is in the initial state
     let body: &mut MaybeUninit<T> = unsafe { &mut *tptr };
-    *body = MaybeUninit::new(t);
+    body.write(t);
 
     Ok(len)
 }
