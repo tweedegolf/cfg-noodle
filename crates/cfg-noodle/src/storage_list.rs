@@ -1080,10 +1080,7 @@ impl<const KEPT_RECORDS: usize> SeqState<KEPT_RECORDS> {
             .sort_unstable_by_key(|n| n.as_ref().map(|i| i.seq));
 
         // Should be impossible to not have something, just prevent panic branches
-        let next = self
-            .last_records
-            .last()
-            .expect("This is a non-0-len array, not a slice. We can safely unwrap")
+        let next = self.last_records[KEPT_RECORDS - 1]
             .as_ref()
             .map(|n| n.seq)
             .unwrap_or(const { NonZeroU32::new(1).unwrap() });
