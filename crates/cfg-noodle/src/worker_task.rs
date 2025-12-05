@@ -45,7 +45,12 @@ use crate::{
 ///
 /// Errors during storage operations are logged but do not cause the task to terminate.
 /// The task will continue processing subsequent signals even if individual operations fail.
-pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T, const KEPT_RECORDS: usize>(
+pub async fn default_worker_task<
+    R: ScopedRawMutex + Sync,
+    S: NdlDataStorage,
+    T,
+    const KEPT_RECORDS: usize,
+>(
     list: &'static StorageList<R, KEPT_RECORDS>,
     mut flash: S,
     stopper: impl Future<Output = T>,
@@ -198,7 +203,9 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T,
 ///
 /// The no-op worker task ONLY serves `process_reads`, not `process_writes` or
 /// `process_garbage`: these would fail when attempting to verify with read-back.
-pub async fn no_op_worker_task<R: ScopedRawMutex + Sync, const KEPT_RECORDS: usize>(list: &'static StorageList<R, KEPT_RECORDS>) -> ! {
+pub async fn no_op_worker_task<R: ScopedRawMutex + Sync, const KEPT_RECORDS: usize>(
+    list: &'static StorageList<R, KEPT_RECORDS>,
+) -> ! {
     loop {
         list.needs_read().await;
         list.process_reads(&mut AlwaysEmptyFlash, &mut [])

@@ -513,7 +513,10 @@ where
     ///
     /// This node will no longer participate in any future reads/writes/garbage collection
     /// of the list it is detached from.
-    pub async fn detach<R, const KEPT_RECORDS: usize>(&'static self, list: &'static StorageList<R, KEPT_RECORDS>) -> Result<(), Error>
+    pub async fn detach<R, const KEPT_RECORDS: usize>(
+        &'static self,
+        list: &'static StorageList<R, KEPT_RECORDS>,
+    ) -> Result<(), Error>
     where
         R: ScopedRawMutex + 'static,
     {

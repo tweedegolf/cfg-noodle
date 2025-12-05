@@ -1065,8 +1065,7 @@ impl<const KEPT_RECORDS: usize> SeqState<KEPT_RECORDS> {
                 Some(rec) => rec.seq.get(),
                 None => 0,
             })
-            // This is a non-0-len array, not a slice. We can safely unwrap
-            .unwrap();
+            .expect("This is a non-0-len array, not a slice. We can safely unwrap");
 
         if let Some(lowest) = lowest
             && lowest.seq > rec.seq
@@ -1084,8 +1083,7 @@ impl<const KEPT_RECORDS: usize> SeqState<KEPT_RECORDS> {
         let next = self
             .last_records
             .last()
-            // This is a non-0-len array, not a slice. We can safely unwrap
-            .unwrap()
+            .expect("This is a non-0-len array, not a slice. We can safely unwrap")
             .as_ref()
             .map(|n| n.seq)
             .unwrap_or(const { NonZeroU32::new(1).unwrap() });
