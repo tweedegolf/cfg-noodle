@@ -29,7 +29,7 @@ async fn bad_with_test_storage() {
     wr.add_data_elem("test/config3", &SimpleConfig { data: 15 });
     wr.end_write_record();
 
-    static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    static LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
     static NODE_A: StorageListNode<SimpleConfig> = StorageListNode::new("test/config1");
     static NODE_B: StorageListNode<SimpleConfig> = StorageListNode::new("test/config2");
     static NODE_C: StorageListNode<SimpleConfig> = StorageListNode::new("test/config3");
@@ -115,7 +115,7 @@ async fn with_test_storage() {
     wr.add_data_elem("test/config3", &SimpleConfig { data: 15 });
     wr.end_write_record();
 
-    static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    static LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
     static NODE_A: StorageListNode<SimpleConfig> = StorageListNode::new("test/config1");
     static NODE_B: StorageListNode<SimpleConfig> = StorageListNode::new("test/config2");
     static NODE_C: StorageListNode<SimpleConfig> = StorageListNode::new("test/config3");

@@ -85,7 +85,7 @@
 //! }
 //! # tokio::runtime::Runtime::new().unwrap().block_on(async {
 //!
-//! static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+//! static GLOBAL_LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
 //! // NOTE: normally you never want shadowed config keys like this,
 //! // we will be ensuring only one of these is ever attached at once
 //! // by detaching them after each step, to simulate firmware changes over time.

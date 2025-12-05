@@ -37,7 +37,7 @@ async fn with_test_storage() {
     // But ensure that the underlying storage will ALWAYS return an error
     flash.forced_error = Some(TestStorageError::FakeBadRead);
 
-    static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    static LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
     static NODE_A: StorageListNode<SimpleConfig> = StorageListNode::new("test/config1");
 
     let mut buf = [0u8; 4096];
@@ -89,7 +89,7 @@ async fn with_mock_flash() {
     // Corrupt the flash, giving it all zeros
     flash.flash().as_bytes_mut().iter_mut().for_each(|b| *b = 0);
 
-    static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    static LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
     static NODE_A: StorageListNode<SimpleConfig> = StorageListNode::new("test/config1");
 
     let mut buf = [0u8; 4096];

@@ -45,8 +45,8 @@ use crate::{
 ///
 /// Errors during storage operations are logged but do not cause the task to terminate.
 /// The task will continue processing subsequent signals even if individual operations fail.
-pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>(
-    list: &'static StorageList<R>,
+pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T, const KEPT_RECORDS: usize>(
+    list: &'static StorageList<R, KEPT_RECORDS>,
     mut flash: S,
     stopper: impl Future<Output = T>,
     buf: &mut [u8],
@@ -198,7 +198,7 @@ pub async fn default_worker_task<R: ScopedRawMutex + Sync, S: NdlDataStorage, T>
 ///
 /// The no-op worker task ONLY serves `process_reads`, not `process_writes` or
 /// `process_garbage`: these would fail when attempting to verify with read-back.
-pub async fn no_op_worker_task<R: ScopedRawMutex + Sync>(list: &'static StorageList<R>) -> ! {
+pub async fn no_op_worker_task<R: ScopedRawMutex + Sync, const KEPT_RECORDS: usize>(list: &'static StorageList<R, KEPT_RECORDS>) -> ! {
     loop {
         list.needs_read().await;
         list.process_reads(&mut AlwaysEmptyFlash, &mut [])
@@ -219,7 +219,7 @@ mod tests {
     )]
     #[test_log::test(tokio::test)]
     async fn no_op_worker_never_fails_and_ignores_all_writes() {
-        static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
         static NODE: StorageListNode<u64> = StorageListNode::new("config/node");
 
         let test = async {

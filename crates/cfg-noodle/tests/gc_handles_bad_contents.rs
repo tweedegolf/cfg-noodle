@@ -100,7 +100,7 @@ async fn gc_handles_bad_contents_inner() {
     flash.start_write_record(NonZeroU32::new(5).unwrap());
     flash.end_write_record(NonZeroU32::new(4).unwrap(), 1234);
 
-    static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    static LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
     static NODE_A: StorageListNode<SimpleConfig> = StorageListNode::new("test/config1");
     static NODE_B: StorageListNode<SimpleConfig> = StorageListNode::new("test/config2");
     static NODE_C: StorageListNode<SimpleConfig> = StorageListNode::new("test/config3");

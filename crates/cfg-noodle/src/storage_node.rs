@@ -44,7 +44,7 @@ pub struct StorageListNode<T: 'static + MaybeDefmtFormat> {
 ///
 /// "end users" will interact with the `StorageListNodeHandle` to retrieve stored
 /// configuration and store changes and store changes to the configuration they care about.
-pub struct StorageListNodeHandle<T, R>
+pub struct StorageListNodeHandle<T, R, const KEPT_RECORDS: usize>
 where
     T: 'static + MaybeDefmtFormat,
     R: ScopedRawMutex + 'static,
@@ -53,7 +53,7 @@ where
     /// stored in the inner->taken_for_list. It is important that we
     /// retain the `R` generic so that we can correctly interact with
     /// the pointer to the list, which has been erased in `taken_for_list`.
-    list_ty: PhantomData<&'static StorageList<R>>,
+    list_ty: PhantomData<&'static StorageList<R, KEPT_RECORDS>>,
 
     /// Store the StorageListNode for this handle
     inner: &'static StorageListNode<T>,
@@ -244,14 +244,14 @@ where
     ///   struct MyStoredVar(#[n(0)] u8);
     ///
     ///   static MY_CONFIG: StorageListNode<MyStoredVar> = StorageListNode::new("config/myconfig");
-    ///   static MY_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    ///   static MY_LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
     ///
     ///   MY_CONFIG.attach(&MY_LIST).await;
     /// # };
-    pub async fn attach<R>(
+    pub async fn attach<R, const KEPT_RECORDS: usize>(
         &'static self,
-        list: &'static StorageList<R>,
-    ) -> Result<StorageListNodeHandle<T, R>, Error>
+        list: &'static StorageList<R, KEPT_RECORDS>,
+    ) -> Result<StorageListNodeHandle<T, R, KEPT_RECORDS>, Error>
     where
         R: ScopedRawMutex + 'static,
     {
@@ -308,16 +308,16 @@ where
     ///   struct MyStoredVar(#[n(0)] u8);
     ///
     ///   static MY_CONFIG: StorageListNode<MyStoredVar> = StorageListNode::new("config/myconfig");
-    ///   static MY_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    ///   static MY_LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
     ///
     ///   MY_CONFIG.attach_with_default(&MY_LIST, || MyStoredVar(123)).await;
     /// # };
     /// ```
-    pub async fn attach_with_default<R, F: FnOnce() -> T>(
+    pub async fn attach_with_default<R, F: FnOnce() -> T, const KEPT_RECORDS: usize>(
         &'static self,
-        list: &'static StorageList<R>,
+        list: &'static StorageList<R, KEPT_RECORDS>,
         f: F,
-    ) -> Result<StorageListNodeHandle<T, R>, Error>
+    ) -> Result<StorageListNodeHandle<T, R, KEPT_RECORDS>, Error>
     where
         R: ScopedRawMutex + 'static,
     {
@@ -336,10 +336,10 @@ where
             // Also, byte_add requires that the computed offset stays in bounds of the
             // allocated object, so that must be at least 2 bytes.
             let _: () = const {
-                let align = align_of::<StorageList<R>>();
+                let align = align_of::<StorageList<R, KEPT_RECORDS>>();
                 assert!(align > 1, "bithacking requires alignment greater than 1");
 
-                let size_bytes = size_of::<StorageList<R>>();
+                let size_bytes = size_of::<StorageList<R, KEPT_RECORDS>>();
                 assert!(size_bytes >= 2, "bithacking requires size bytes >=2");
             };
 
@@ -350,8 +350,8 @@ where
             // Check: Is this node eligible to take? A node is eligible to take
             // if EITHER it is linked to the current list already, but no handle
             // exists, OR if the node is not attached to any list.
-            let list_ptr: *const StorageList<R> = list;
-            let list_ptr: *mut StorageList<R> = list_ptr.cast_mut();
+            let list_ptr: *const StorageList<R, KEPT_RECORDS> = list;
+            let list_ptr: *mut StorageList<R, KEPT_RECORDS> = list_ptr.cast_mut();
             let list_ptr: *mut () = list_ptr.cast();
             // SAFETY: the const asserts above ensure that this is safe to do.
             let list_ptr_taken: *mut () = unsafe { list_ptr.byte_add(1) };
@@ -513,15 +513,15 @@ where
     ///
     /// This node will no longer participate in any future reads/writes/garbage collection
     /// of the list it is detached from.
-    pub async fn detach<R>(&'static self, list: &'static StorageList<R>) -> Result<(), Error>
+    pub async fn detach<R, const KEPT_RECORDS: usize>(&'static self, list: &'static StorageList<R, KEPT_RECORDS>) -> Result<(), Error>
     where
         R: ScopedRawMutex + 'static,
     {
         debug!("Detaching node");
 
         // Again: we are doing bit-hacks. See `attach_with_default` for an explanation.
-        let list_ptr: *const StorageList<R> = list;
-        let list_ptr: *mut StorageList<R> = list_ptr.cast_mut();
+        let list_ptr: *const StorageList<R, KEPT_RECORDS> = list;
+        let list_ptr: *mut StorageList<R, KEPT_RECORDS> = list_ptr.cast_mut();
         let list_ptr: *mut () = list_ptr.cast();
         // SAFETY: The resulting pointer is in bounds of the allocated object
         // because StorageList is at least 2 bytes. This is ensured with const asserts in
@@ -612,7 +612,7 @@ unsafe impl<T> Sync for StorageListNode<T> where T: Send + 'static + MaybeDefmtF
 
 // ---- impl StorageListNodeHandle ----
 
-impl<T, R> StorageListNodeHandle<T, R>
+impl<T, R, const KEPT_RECORDS: usize> StorageListNodeHandle<T, R, KEPT_RECORDS>
 where
     T: Clone + Send + 'static + MaybeDefmtFormat,
     R: ScopedRawMutex + 'static,
@@ -622,7 +622,7 @@ where
         self.inner.inner.header.key
     }
 
-    fn list(&self) -> &'static StorageList<R> {
+    fn list(&self) -> &'static StorageList<R, KEPT_RECORDS> {
         let ptr: *mut () = self.inner.taken_for_list.load(Ordering::Acquire);
         debug_assert!(!ptr.is_null(), "handle should not be null");
         debug_assert_eq!((ptr as usize) & 1, 1, "'is taken' bit should be set");
@@ -633,7 +633,7 @@ where
         unsafe {
             let ptr: *mut () = ptr.byte_sub(1);
             let ptr: *const () = ptr.cast_const();
-            let ptr: *const StorageList<R> = ptr.cast();
+            let ptr: *const StorageList<R, KEPT_RECORDS> = ptr.cast();
             &*ptr
         }
     }
@@ -724,7 +724,7 @@ where
 }
 
 /// Impl Debug to allow for using unwrap in tests.
-impl<T, R> Debug for StorageListNodeHandle<T, R>
+impl<T, R, const KEPT_RECORDS: usize> Debug for StorageListNodeHandle<T, R, KEPT_RECORDS>
 where
     T: 'static + MaybeDefmtFormat,
     R: ScopedRawMutex + 'static,
@@ -737,7 +737,7 @@ where
     }
 }
 
-impl<T, R> Drop for StorageListNodeHandle<T, R>
+impl<T, R, const KEPT_RECORDS: usize> Drop for StorageListNodeHandle<T, R, KEPT_RECORDS>
 where
     T: 'static + MaybeDefmtFormat,
     R: ScopedRawMutex + 'static,
