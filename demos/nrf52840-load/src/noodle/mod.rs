@@ -37,7 +37,7 @@ const PAGE_COUNT: usize = const { TOTAL_SIZE / (SECTOR_SIZE as usize) };
 // This is generic over the kind of mutex. If you do not access the list in interrupt
 // context, this could probably be relaxed to ThreadModeRawMutex, once
 // https://github.com/tosc-rs/scoped-mutex/issues/15 has been fixed.
-pub static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+pub static LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
 
 // We put our scratch buffer in a `ConstStaticCell` to avoid ever creating it on the stack.
 //

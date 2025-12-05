@@ -11,7 +11,6 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_nrf::{
     bind_interrupts,
-    config::{Config as NrfConfig, HfclkSource},
     gpio::{Input, Level, Output, OutputDrive, Pull},
     spim::{self, Spim},
 };
@@ -39,8 +38,6 @@ pub type DkMX25R = AsyncMX25R6435F<SpiDev>;
 async fn main(spawner: Spawner) {
     // SYSTEM INIT
     info!("Start");
-    let mut config = NrfConfig::default();
-    config.hfclk_source = HfclkSource::ExternalXtal;
     let p = embassy_nrf::init(Default::default());
 
     // External flash init

@@ -493,7 +493,6 @@ impl<R: ScopedRawMutex, const KEPT_RECORDS: usize> StorageList<R, KEPT_RECORDS> 
 
             // If it doesn't decode: yeet
             // If it's not in a good range: yeet
-            log::info!("{:?}", cur_seq_state.last_records);
             if next.data().is_none() || !last_records_contain(this_idx) {
                 total_bytes_popped += used;
                 next.invalidate()
