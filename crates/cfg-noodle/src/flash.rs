@@ -6,8 +6,8 @@ use core::{num::NonZeroU32, ops::Deref};
 
 use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash};
 use sequential_storage::{
-    cache::CacheImpl,
-    queue::{self, QueueIterator, QueueIteratorEntry},
+    cache::{CacheImpl, NoCache},
+    queue::{QueueConfig, QueueIterator, QueueIteratorEntry, QueueStorage},
 };
 
 use crate::{
@@ -16,9 +16,7 @@ use crate::{
 
 /// Owns a flash and the range reserved for the `StorageList`
 pub struct Flash<T: MultiwriteNorFlash, C: CacheImpl> {
-    flash: T,
-    range: core::ops::Range<u32>,
-    cache: C,
+    queue: QueueStorage<T, C>,
 }
 
 /// An iterator over a [`Flash`]
@@ -71,17 +69,37 @@ impl<T: MultiwriteNorFlash, C: CacheImpl> Flash<T, C> {
     /// * `flash` - The MultiwriteNorFlash device to use for storage operations
     /// * `range` - The address range within the flash device reserved for this storage
     /// * `cache` - the cache to use with this flash access
-    pub fn new(flash: T, range: core::ops::Range<u32>, cache: C) -> Self {
+    ///
+    /// # Panic
+    ///
+    /// Panics if the range is not valid for the flash. To avoid panics, use [Self::try_new].
+    pub const fn new(flash: T, range: core::ops::Range<u32>, cache: C) -> Self {
         Self {
-            flash,
-            range,
-            cache,
+            queue: QueueStorage::new(flash, QueueConfig::new(range), cache),
         }
+    }
+
+    /// Creates a new Flash instance with the given flash device and address range.
+    ///
+    /// # Arguments
+    /// * `flash` - The MultiwriteNorFlash device to use for storage operations
+    /// * `range` - The address range within the flash device reserved for this storage
+    /// * `cache` - the cache to use with this flash access
+    pub fn try_new(flash: T, range: core::ops::Range<u32>, cache: C) -> Option<Self> {
+        let config = QueueConfig::try_new(range)?;
+        Some(Self {
+            queue: QueueStorage::new(flash, config, cache),
+        })
     }
 
     /// Returns a mutable reference to the underlying flash device.
     pub fn flash(&mut self) -> &mut T {
-        &mut self.flash
+        self.queue.flash()
+    }
+
+    #[cfg(any(test, feature = "std"))]
+    pub(crate) fn queue(&mut self) -> &mut QueueStorage<T, C> {
+        &mut self.queue
     }
 }
 
@@ -100,7 +118,7 @@ where
         &'this mut self,
     ) -> Result<Self::Iter<'this>, <Self::Iter<'this> as NdlElemIter>::Error> {
         Ok(FlashIter {
-            iter: queue::iter(&mut self.flash, self.range.clone(), &mut self.cache).await?,
+            iter: self.queue.iter().await?,
         })
     }
 
@@ -124,14 +142,7 @@ where
         };
 
         // Push data to the underlying queue
-        queue::push(
-            &mut self.flash,
-            self.range.clone(),
-            &mut self.cache,
-            used,
-            false,
-        )
-        .await?;
+        self.queue.push(used, false).await?;
 
         Ok(size_with_overhead::<T>(used.len()))
     }
@@ -144,7 +155,7 @@ where
         let sector_metadata = 2 * crate::max(T::WRITE_SIZE, T::READ_SIZE);
 
         // Each pushed item has some metadata
-        let item_metadata = sequential_storage::item_overhead_size::<T>() as usize;
+        let item_metadata = QueueStorage::<T, C>::item_overhead_size() as usize;
 
         // The max size is the baseline minus any overhead.
         baseline - sector_metadata - item_metadata
@@ -264,7 +275,7 @@ where
     T: MultiwriteNorFlash,
 {
     // Items pushed to the queue have overhead
-    let baseline_overhead = sequential_storage::item_overhead_size::<T>() as usize;
+    let baseline_overhead = QueueStorage::<T, NoCache>::item_overhead_size() as usize;
     // Items pushed to the queue require some alignment padding
     let len_roundup = len.next_multiple_of(crate::max(T::WRITE_SIZE, T::READ_SIZE));
 

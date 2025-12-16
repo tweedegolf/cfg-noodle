@@ -434,7 +434,7 @@ pub async fn worker_task_seq_sto<R: ScopedRawMutex + Sync, const KEPT_RECORDS: u
                     error!("Error in process_writes: {:?}", e);
                 }
 
-                info!("Wrote to flash: {}", flash.flash().print_items().await);
+                info!("Wrote to flash: {}", flash.queue().print_items().await);
 
                 if let Err(e) = list.process_garbage(&mut flash, &mut buf).await {
                     error!("Error in process_garbage: {:?}", e);
