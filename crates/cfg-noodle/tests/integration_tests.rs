@@ -45,7 +45,7 @@ struct SimpleConfig {
 #[test(tokio::test)]
 async fn test_read_from_empty_flash() {
     info!("Starting test");
-    static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    static LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
     static NODE: StorageListNode<TestConfig> = StorageListNode::new("test/config");
 
     // Create flash but do not populate with any data
@@ -85,7 +85,7 @@ async fn test_read_clean_state() {
     let local = LocalSet::new();
     local
         .run_until(async move {
-            static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+            static LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
             static NODE: StorageListNode<TestConfig> = StorageListNode::new("test/config");
             info!("Spawning worker task");
             let stopper = Arc::new(WaitQueue::new());
@@ -111,7 +111,7 @@ async fn test_read_clean_state() {
             let flash = report.flash;
 
             // Create new list and node to simulate restart
-            static LIST2: StorageList<CriticalSectionRawMutex> = StorageList::new();
+            static LIST2: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
             static NODE2: StorageListNode<TestConfig> = StorageListNode::new("test/config");
 
             info!(
@@ -154,7 +154,7 @@ async fn test_read_clean_state_new_config() {
     let local = LocalSet::new();
     local
         .run_until(async move {
-            static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+            static LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
             static NODE: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
 
             info!("Spawning worker task");
@@ -181,7 +181,7 @@ async fn test_read_clean_state_new_config() {
             let flash = report.flash;
 
             // Create new list and node to simulate restart
-            static LIST2: StorageList<CriticalSectionRawMutex> = StorageList::new();
+            static LIST2: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
             static NODE1: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
             static NODE2: StorageListNode<TestConfig> = StorageListNode::new("test/config2");
 
@@ -238,7 +238,7 @@ async fn test_read_interrupted_write() {
     let local = LocalSet::new();
     local
         .run_until(async move {
-            static LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+            static LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
             static NODE1: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
             static NODE2: StorageListNode<TestConfig> = StorageListNode::new("test/config2");
 
@@ -312,7 +312,7 @@ async fn test_read_interrupted_write() {
             }
 
             // Create new list and node to simulate restart
-            static LIST2: StorageList<CriticalSectionRawMutex> = StorageList::new();
+            static LIST2: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
 
             static NODE1_2: StorageListNode<TestConfig> = StorageListNode::new("test/config1");
             static NODE2_2: StorageListNode<TestConfig> = StorageListNode::new("test/config2");

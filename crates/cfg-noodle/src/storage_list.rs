@@ -32,7 +32,7 @@ use mutex_traits::{ConstInit, ScopedRawMutex};
 ///    role of loading data FROM flash (and putting it in the Nodes),
 ///    as well as the role of deciding when to write data TO flash
 ///    (retrieving it from each node).
-pub struct StorageList<R: ScopedRawMutex> {
+pub struct StorageList<R: ScopedRawMutex, const KEPT_RECORDS: usize = 3> {
     /// The type parameter `R` allows us to be generic over kinds of mutex
     /// impls, allowing for use of a `std` mutex on `std`, and for things
     /// like `CriticalSectionRawMutex` or `ThreadModeRawMutex` on no-std
@@ -53,7 +53,7 @@ pub struct StorageList<R: ScopedRawMutex> {
     /// hold a different type T, so at a top level, we ONLY store a list of the
     /// Header, which is the first field in `Node<T>`, which is repr-C, so we
     /// can cast this back to a `Node<T>` as needed
-    pub(crate) inner: Mutex<StorageListInner, R>,
+    pub(crate) inner: Mutex<StorageListInner<KEPT_RECORDS>, R>,
     /// Notifies the worker task that nodes need to be read from flash.
     /// Woken when a new node is attached and requires data to be loaded.
     pub(crate) needs_read: WaitQueue,
@@ -107,9 +107,9 @@ pub struct ProcessGarbageCounters {
 /// This type contains any pieces that require the mutex to be locked to access.
 /// This means that holding an `&mut StorageListInner` means that you have exclusive
 /// access to the entire list and all nodes attached to it.
-pub(crate) struct StorageListInner {
+pub(crate) struct StorageListInner<const KEPT_RECORDS: usize> {
     pub(crate) list: List<NodeHeader>,
-    seq_state: SeqState,
+    seq_state: SeqState<KEPT_RECORDS>,
 }
 
 /// The metadata of a verified "Write Record"
@@ -137,16 +137,16 @@ struct GoodWriteRecord {
 /// This is populated when we perform the first `process_read`s, updated during
 /// during each successful `process_write`, and invalidated and re-calculated
 /// during each successful `process_garbage` call.
-#[derive(Default, Clone)]
-struct SeqState {
+#[derive(Clone)]
+struct SeqState<const KEPT_RECORDS: usize> {
     /// Next Sequence Number. Is None if we have not performed the initial scan of the storage
     next_seq: Option<NonZeroU32>,
-    /// The three most recent, valid, Write Records (as sorted by their sequence numbers)
+    /// The most recent, valid, Write Records (as sorted by their sequence numbers)
     ///
-    /// We retain three for the purpose of garbage collection: we don't necessarily want to
+    /// We retain multiple for the purpose of garbage collection: we don't necessarily want to
     /// invalidate ALL old records, in the off chance that our LATEST written record becomes
-    /// corrupt. In this case, we
-    last_three: [Option<GoodWriteRecord>; 3],
+    /// corrupt. Users can set this to just one though if they don't care about redundancy
+    last_records: [Option<GoodWriteRecord>; KEPT_RECORDS],
     /// Do we need to perform a garbage collection pass?
     ///
     /// This is set after each call to process_write, and
@@ -169,36 +169,54 @@ struct WriteReport {
 // impl StorageList
 // --------------------------------------------------------------------------
 
-impl<R: ScopedRawMutex + ConstInit> StorageList<R> {
+impl<R: ScopedRawMutex + ConstInit, const KEPT_RECORDS: usize> StorageList<R, KEPT_RECORDS> {
     /// const constructor to make a new empty list. Intended to be used
     /// to create a static.
+    ///
+    /// Will panic if `KEPT_RECORDS` is 0.
     ///
     /// ```
     /// # use cfg_noodle::StorageList;
     /// # use mutex::raw_impls::cs::CriticalSectionRawMutex;
-    /// static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+    /// static GLOBAL_LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
     /// ```
     pub const fn new() -> Self {
-        Self {
-            inner: Mutex::new_with_raw_mutex(
-                StorageListInner {
-                    list: List::new(),
-                    seq_state: SeqState {
-                        next_seq: None,
-                        last_three: [const { None }; 3],
-                        needs_gc: false,
+        Self::try_new().expect("StorageList must keep at least one record")
+    }
+
+    /// const constructor to make a new empty list. Intended to be used
+    /// to create a static.
+    ///
+    /// Will return `None` if `KEPT_RECORDS` is 0.
+    ///
+    /// ```
+    /// # use cfg_noodle::StorageList;
+    /// # use mutex::raw_impls::cs::CriticalSectionRawMutex;
+    /// static GLOBAL_LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::try_new().unwrap();
+    /// ```
+    pub const fn try_new() -> Option<Self> {
+        if KEPT_RECORDS == 0 {
+            None
+        } else {
+            Some(Self {
+                inner: Mutex::new_with_raw_mutex(
+                    StorageListInner {
+                        list: List::new(),
+                        seq_state: SeqState::new(),
                     },
-                },
-                R::INIT,
-            ),
-            needs_read: WaitQueue::new(),
-            needs_write: WaitQueue::new(),
-            reading_done: WaitQueue::new(),
+                    R::INIT,
+                ),
+                needs_read: WaitQueue::new(),
+                needs_write: WaitQueue::new(),
+                reading_done: WaitQueue::new(),
+            })
         }
     }
 }
 
-impl<R: ScopedRawMutex + ConstInit> Default for StorageList<R> {
+impl<R: ScopedRawMutex + ConstInit, const KEPT_RECORDS: usize> Default
+    for StorageList<R, KEPT_RECORDS>
+{
     /// this only exists to shut up the clippy lint about impl'ing default
     fn default() -> Self {
         Self::new()
@@ -208,7 +226,7 @@ impl<R: ScopedRawMutex + ConstInit> Default for StorageList<R> {
 /// These are public methods for the `StorageList`. They currently are intended to be
 /// used by the "storage worker task", that decides when we actually want to
 /// interact with the flash.
-impl<R: ScopedRawMutex> StorageList<R> {
+impl<R: ScopedRawMutex, const KEPT_RECORDS: usize> StorageList<R, KEPT_RECORDS> {
     /// Process any nodes that are requesting flash data
     ///
     /// This function will traverse the list in order to attempt to fill any [`StorageListNode`]s that
@@ -435,16 +453,16 @@ impl<R: ScopedRawMutex> StorageList<R> {
             // Take the seq_state to inhibit any other reads/writes until
             // we successfully complete, AND that a re-index will be required
             // even if we early-return here
-            core::mem::take(&mut guard.seq_state)
+            core::mem::replace(&mut guard.seq_state, SeqState::new())
         };
 
         // Helper function that iterates over each present GoodWriteRecord,
         // and returns whether ANY of the good records contain this iterator-index
         //
         // TODO: ensure none of the good items are overlapping?
-        let last_three_contains = |n: usize| {
+        let last_records_contain = |n: usize| {
             cur_seq_state
-                .last_three
+                .last_records
                 .iter()
                 .filter_map(Option::as_ref)
                 .any(|r| r.range.contains(&n))
@@ -475,7 +493,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
 
             // If it doesn't decode: yeet
             // If it's not in a good range: yeet
-            if next.data().is_none() || !last_three_contains(this_idx) {
+            if next.data().is_none() || !last_records_contain(this_idx) {
                 total_bytes_popped += used;
                 next.invalidate()
                     .await
@@ -558,7 +576,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
     pub async fn reset_cache(&self) {
         warn!("manually resetting cache!");
         let mut inner = self.inner.lock().await;
-        inner.seq_state = Default::default();
+        inner.seq_state = SeqState::new();
     }
 }
 
@@ -566,7 +584,7 @@ impl<R: ScopedRawMutex> StorageList<R> {
 // impl StorageListInner
 // --------------------------------------------------------------------------
 
-impl StorageListInner {
+impl<const KEPT_RECORDS: usize> StorageListInner<KEPT_RECORDS> {
     /// Find a `NodeHeader` with the given `key` in the storage list.
     ///
     /// This function searches through the intrusive linked list of storage nodes to find
@@ -1012,7 +1030,15 @@ impl StorageListInner {
 // impl SeqState
 // --------------------------------------------------------------------------
 
-impl SeqState {
+impl<const KEPT_RECORDS: usize> SeqState<KEPT_RECORDS> {
+    const fn new() -> Self {
+        Self {
+            next_seq: None,
+            last_records: [const { None }; KEPT_RECORDS],
+            needs_gc: false,
+        }
+    }
+
     /// Have we hydrated from the external flash?
     #[inline]
     fn initial_scan_completed(&self) -> bool {
@@ -1022,7 +1048,7 @@ impl SeqState {
     /// What is the highest sequence number we've seen in external flash, if any?
     #[inline]
     fn highest_seen(&self) -> Option<GoodWriteRecord> {
-        if let Some(last) = self.last_three.last()
+        if let Some(last) = self.last_records.last()
             && let Some(seen) = last.as_ref()
         {
             return Some(seen.clone());
@@ -1032,18 +1058,29 @@ impl SeqState {
 
     /// Insert a known-good sequence number
     fn insert_good(&mut self, rec: GoodWriteRecord) {
-        // todo: smarter than this
-        let mut last_four = [
-            self.last_three[0].clone(),
-            self.last_three[1].clone(),
-            self.last_three[2].clone(),
-            Some(rec),
-        ];
-        last_four.sort_unstable_by_key(|n| n.as_ref().map(|i| i.seq));
-        self.last_three.clone_from_slice(&last_four[1..]);
+        let lowest = self
+            .last_records
+            .iter_mut()
+            .min_by_key(|rec| match rec {
+                Some(rec) => rec.seq.get(),
+                None => 0,
+            })
+            .expect("This is a non-0-len array, not a slice. We can safely unwrap");
+
+        if let Some(lowest) = lowest
+            && lowest.seq > rec.seq
+        {
+            // We have newer records already
+            return;
+        }
+
+        *lowest = Some(rec);
+
+        self.last_records
+            .sort_unstable_by_key(|n| n.as_ref().map(|i| i.seq));
 
         // Should be impossible to not have something, just prevent panic branches
-        let next = self.last_three[2]
+        let next = self.last_records[KEPT_RECORDS - 1]
             .as_ref()
             .map(|n| n.seq)
             .unwrap_or(const { NonZeroU32::new(1).unwrap() });
@@ -1309,18 +1346,18 @@ mod test {
         const THREE: GoodWriteRecord = maker(3, 30..=35);
         const FOUR: GoodWriteRecord = maker(4, 40..=45);
 
-        let mut s = SeqState::default();
-        assert_eq!(s.last_three, [None, None, None]);
+        let mut s = SeqState::new();
+        assert_eq!(s.last_records, [None, None, None]);
         s.insert_good(ONE);
-        assert_eq!(s.last_three, [None, None, Some(ONE)]);
+        assert_eq!(s.last_records, [None, None, Some(ONE)]);
         s.insert_good(TWO);
-        assert_eq!(s.last_three, [None, Some(ONE), Some(TWO)]);
+        assert_eq!(s.last_records, [None, Some(ONE), Some(TWO)]);
         s.insert_good(THREE);
-        assert_eq!(s.last_three, [Some(ONE), Some(TWO), Some(THREE)]);
+        assert_eq!(s.last_records, [Some(ONE), Some(TWO), Some(THREE)]);
         s.insert_good(FOUR);
-        assert_eq!(s.last_three, [Some(TWO), Some(THREE), Some(FOUR)]);
+        assert_eq!(s.last_records, [Some(TWO), Some(THREE), Some(FOUR)]);
         s.insert_good(ONE);
-        assert_eq!(s.last_three, [Some(TWO), Some(THREE), Some(FOUR)]);
+        assert_eq!(s.last_records, [Some(TWO), Some(THREE), Some(FOUR)]);
     }
 
     #[derive(Debug, Encode, Decode, Clone, PartialEq, CborLen)]
@@ -1346,7 +1383,7 @@ mod test {
     /// Test that we can handle multiple nodes using sequential-storage
     #[test(tokio::test)]
     async fn test_two_configs_seq_sto() {
-        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
         static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config1");
         static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
@@ -1402,7 +1439,7 @@ mod test {
     /// Test that we can handle multiple nodes using the TestStorage backend
     #[test(tokio::test)]
     async fn test_two_configs_tst_sto() {
-        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
         static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config1");
         static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
@@ -1463,7 +1500,7 @@ mod test {
     /// whether reading an item from flash works.
     #[test(tokio::test)]
     async fn test_load_existing() {
-        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
         static POSITRON_CONFIG: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config");
 
@@ -1519,7 +1556,7 @@ mod test {
     /// Test that attaching duplicate keys causes a panic
     #[test(tokio::test)]
     async fn test_duplicate_key() {
-        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
         static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config");
         static POSITRON_CONFIG2: StorageListNode<PositronConfig> =
@@ -1553,7 +1590,7 @@ mod test {
     /// Test creating two handles from the same node fails
     #[test(tokio::test)]
     async fn test_duplicate_handle() {
-        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
         static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config");
 
@@ -1585,7 +1622,7 @@ mod test {
     /// Test reattaching a node fails before dropping the handle and works after dropping the handle
     #[test(tokio::test)]
     async fn test_reattach_handle() {
-        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static GLOBAL_LIST: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
         static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config");
 
@@ -1626,8 +1663,8 @@ mod test {
     /// Test creating two handles from the same node fails
     #[test(tokio::test)]
     async fn test_cant_reattach_without_detach_handle() {
-        static GLOBAL_LIST1: StorageList<CriticalSectionRawMutex> = StorageList::new();
-        static GLOBAL_LIST2: StorageList<CriticalSectionRawMutex> = StorageList::new();
+        static GLOBAL_LIST1: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
+        static GLOBAL_LIST2: StorageList<CriticalSectionRawMutex, 3> = StorageList::new();
         static POSITRON_CONFIG1: StorageListNode<PositronConfig> =
             StorageListNode::new("positron/config");
 

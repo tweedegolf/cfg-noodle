@@ -406,8 +406,8 @@ pub fn get_mock_flash() -> MockFlash {
 /// A simple worker task for sequential-storage based testing
 ///
 /// Currently processes reads and writes automatically when signalled.
-pub async fn worker_task_seq_sto<R: ScopedRawMutex + Sync>(
-    list: &'static StorageList<R>,
+pub async fn worker_task_seq_sto<R: ScopedRawMutex + Sync, const KEPT_RECORDS: usize>(
+    list: &'static StorageList<R, KEPT_RECORDS>,
     mut flash: MockFlash,
 ) {
     let mut buf = [0u8; MockFlash::MAX_ELEM_SIZE];
@@ -448,8 +448,8 @@ pub async fn worker_task_seq_sto<R: ScopedRawMutex + Sync>(
 ///
 /// Creates a new empty [`TestStorage`]. Will stop executuion when
 /// the stopper is awoken or closed. This can be done with [`WaitQueue::close()`].
-pub async fn worker_task_tst_sto<R: ScopedRawMutex + Sync>(
-    list: &'static StorageList<R>,
+pub async fn worker_task_tst_sto<R: ScopedRawMutex + Sync, const KEPT_RECORDS: usize>(
+    list: &'static StorageList<R, KEPT_RECORDS>,
     stopper: Arc<WaitQueue>,
 ) -> WorkerReport {
     worker_task_tst_sto_custom(list, stopper, TestStorage::default()).await
@@ -459,8 +459,8 @@ pub async fn worker_task_tst_sto<R: ScopedRawMutex + Sync>(
 ///
 /// The same as [`worker_task_tst_sto()`], but takes a flash, which can be pre-populated
 /// with initial data
-pub async fn worker_task_tst_sto_custom<R: ScopedRawMutex + Sync>(
-    list: &'static StorageList<R>,
+pub async fn worker_task_tst_sto_custom<R: ScopedRawMutex + Sync, const KEPT_RECORDS: usize>(
+    list: &'static StorageList<R, KEPT_RECORDS>,
     stopper: Arc<WaitQueue>,
     mut flash: TestStorage,
 ) -> WorkerReport {

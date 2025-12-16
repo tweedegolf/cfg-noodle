@@ -12,7 +12,6 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_nrf::{
     bind_interrupts,
-    config::{Config as NrfConfig, HfclkSource},
     gpio::{Level, Output, OutputDrive},
     spim::{self, Spim},
 };
@@ -41,8 +40,6 @@ pub type DkMX25R = AsyncMX25R6435F<SpiDev>;
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     // SYSTEM INIT
-    let mut config = NrfConfig::default();
-    config.hfclk_source = HfclkSource::ExternalXtal;
     let p = embassy_nrf::init(Default::default());
 
     // Let the debugger attach...
