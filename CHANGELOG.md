@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## 0.6.0 16-12-25
+
 - *Breaking:* Added const generic to list that controls how much redundancy is stored. To keep the same behavior as before, use the value 3.
 - *Breaking:* Updated to sequential-storage 7
 
