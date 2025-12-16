@@ -127,17 +127,36 @@ impl State {
         }
     }
     /// Convert u8 to a [`State`].
-    ///
-    /// Panics if the u8 value does not have a matching state as
-    /// returned by [`Self::into_u8`].
-    pub const fn from_u8(value: u8) -> Self {
+    pub const fn try_from_u8(value: u8) -> Option<Self> {
         match value {
-            0 => State::Initial,
-            1 => State::NonResident,
-            2 => State::ValidNoWriteNeeded,
-            3 => State::NeedsWrite,
-            _ => panic!("Invalid state value"),
+            0 => Some(State::Initial),
+            1 => Some(State::NonResident),
+            2 => Some(State::ValidNoWriteNeeded),
+            3 => Some(State::NeedsWrite),
+            _ => None,
         }
+    }
+}
+
+#[repr(transparent)]
+pub(crate) struct AtomicState {
+    inner: AtomicU8,
+}
+
+impl AtomicState {
+    pub const fn new(init: State) -> Self {
+        Self {
+            inner: AtomicU8::new(init.into_u8()),
+        }
+    }
+
+    pub fn store(&self, val: State, order: Ordering) {
+        self.inner.store(val.into_u8(), order);
+    }
+
+    pub fn load(&self, order: Ordering) -> State {
+        // Safety: By construction we know the value of inner can only be valid
+        unsafe { State::try_from_u8(self.inner.load(order)).unwrap_unchecked() }
     }
 }
 
@@ -177,7 +196,7 @@ pub(crate) struct NodeHeader {
     pub(crate) key: &'static str,
     /// The current state of the node. See the [safety guide](crate::safety_guide)
     /// for rules regarding the "State" field.
-    pub(crate) state: AtomicU8,
+    pub(crate) state: AtomicState,
     /// This is the type-erased serialize/deserialize `VTable` that is
     /// unique to each `T`, and will be used by the worker task
     /// to access the `t` indirectly for loading and storing.
@@ -275,7 +294,7 @@ where
                 header: NodeHeader {
                     links: UnsafeCell::new(list::Links::new()),
                     key: path,
-                    state: AtomicU8::new(State::Initial.into_u8()),
+                    state: AtomicState::new(State::Initial),
                     vtable: VTable::for_ty::<T>(),
                 },
                 t: UnsafeCell::new(MaybeUninit::uninit()),
@@ -437,7 +456,7 @@ where
             .reading_done
             .wait_for_value(|| {
                 // We do NOT hold the lock, use Acquire ordering.
-                let state = State::from_u8(hdrref.state.load(Ordering::Acquire));
+                let state = hdrref.state.load(Ordering::Acquire);
                 if state != State::Initial {
                     Some(state)
                 } else {
@@ -467,9 +486,7 @@ where
                 let body: &mut MaybeUninit<T> = unsafe { &mut *body };
                 body.write(f());
                 // We do NOT hold the lock, use Relaxed ordering.
-                hdrref
-                    .state
-                    .store(State::NeedsWrite.into_u8(), Ordering::Release);
+                hdrref.state.store(State::NeedsWrite, Ordering::Release);
             }
             // This state is set by this function if the node is non resident
             State::NeedsWrite if !already_attached => {
@@ -581,7 +598,7 @@ where
         }
 
         // We know we have exclusive access to the node.
-        match State::from_u8(self.inner.header.state.load(Ordering::Acquire)) {
+        match self.inner.header.state.load(Ordering::Acquire) {
             // In these states, there is no data to drop
             State::Initial | State::NonResident => {}
             // In these states, there IS data to drop
@@ -599,7 +616,7 @@ where
         self.inner
             .header
             .state
-            .store(State::Initial.into_u8(), Ordering::Release);
+            .store(State::Initial, Ordering::Release);
 
         // SAFETY:
         // - Rule 2.3.3: We restore this to null on success
@@ -648,7 +665,7 @@ where
         // hydration. Later, only write() will change node.t, but it requires &mut self.
 
         // We DON'T hold a lock to the list, so use Acquire for load
-        let state = State::from_u8(self.inner.inner.header.state.load(Ordering::Acquire));
+        let state = self.inner.inner.header.state.load(Ordering::Acquire);
 
         // is T valid?
         match state {
@@ -681,7 +698,7 @@ where
         let _inner = self.list().inner.lock().await;
         let key: &'static str = self.key();
         // We DON'T hold a lock to the list, so use Acquire for load
-        let state = State::from_u8(self.inner.inner.header.state.load(Ordering::Acquire));
+        let state = self.inner.inner.header.state.load(Ordering::Acquire);
 
         match state {
             // `Initial` and `NonResident` can not occur for the same reason as
@@ -715,7 +732,7 @@ where
                 .inner
                 .header
                 .state
-                .store(State::NeedsWrite.into_u8(), Ordering::Relaxed);
+                .store(State::NeedsWrite, Ordering::Relaxed);
         }
 
         // Let the write task know we have work
@@ -916,7 +933,7 @@ where
     let noderef: &Node<T> = unsafe { node.as_ref() };
     // We require the caller to hold a lock to the list, so use Relaxed
     debug_assert!(matches!(
-        State::from_u8(noderef.header.state.load(Ordering::Relaxed)),
+        noderef.header.state.load(Ordering::Relaxed),
         State::Initial
     ));
     let tptr: *mut MaybeUninit<T> = noderef.t.get();
