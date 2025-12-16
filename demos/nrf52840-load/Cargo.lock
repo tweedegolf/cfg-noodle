@@ -91,7 +91,7 @@ dependencies = [
  "cordyceps",
  "crc",
  "critical-section",
- "defmt 1.0.1",
+ "defmt",
  "embassy-futures",
  "embassy-sync",
  "embassy-time",
@@ -149,9 +149,9 @@ dependencies = [
 
 [[package]]
 name = "crc"
-version = "3.3.0"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9710d3b3739c2e349eb44fe848ad0b7c8cb1e42bd87ee49371df2f7acaf3e675"
+checksum = "5eb8a2a1cd12ab0d987a5d5e825195d372001a4094a0376319d5a0ad71c1ba0d"
 dependencies = [
  "crc-catalog",
 ]
@@ -211,15 +211,6 @@ dependencies = [
 
 [[package]]
 name = "defmt"
-version = "0.3.100"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0963443817029b2024136fc4dd07a5107eb8f977eaf18fcd1fdeb11306b64ad"
-dependencies = [
- "defmt 1.0.1",
-]
-
-[[package]]
-name = "defmt"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "548d977b6da32fa1d1fda2876453da1e7df63ad0304c8b3dae4dbe7b96f39b78"
@@ -257,7 +248,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2cac3b8a5644a9e02b75085ebad3b6deafdbdbdec04bb25086523828aa4dfd1"
 dependencies = [
  "critical-section",
- "defmt 1.0.1",
+ "defmt",
 ]
 
 [[package]]
@@ -275,7 +266,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "554e3e840696f54b4c9afcf28a0f24da431c927f4151040020416e7393d6d0d8"
 dependencies = [
- "defmt 1.0.1",
+ "defmt",
  "embassy-futures",
  "embassy-hal-internal",
  "embassy-sync",
@@ -296,7 +287,7 @@ checksum = "06070468370195e0e86f241c8e5004356d696590a678d47d6676795b2e439c6b"
 dependencies = [
  "cortex-m",
  "critical-section",
- "defmt 1.0.1",
+ "defmt",
  "document-features",
  "embassy-executor-macros",
  "embassy-executor-timer-queue",
@@ -326,7 +317,7 @@ version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc2d050bdc5c21e0862a89256ed8029ae6c290a93aecefc73084b3002cdebb01"
 dependencies = [
- "defmt 1.0.1",
+ "defmt",
 ]
 
 [[package]]
@@ -337,7 +328,7 @@ checksum = "95285007a91b619dc9f26ea8f55452aa6c60f7115a4edc05085cd2bd3127cd7a"
 dependencies = [
  "cortex-m",
  "critical-section",
- "defmt 1.0.1",
+ "defmt",
  "num-traits",
 ]
 
@@ -352,7 +343,7 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "critical-section",
- "defmt 1.0.1",
+ "defmt",
  "document-features",
  "embassy-embedded-hal",
  "embassy-hal-internal",
@@ -382,7 +373,7 @@ checksum = "73974a3edbd0bd286759b3d483540f0ebef705919a5f56f4fc7709066f71689b"
 dependencies = [
  "cfg-if",
  "critical-section",
- "defmt 1.0.1",
+ "defmt",
  "embedded-io-async",
  "futures-core",
  "futures-sink",
@@ -397,7 +388,7 @@ checksum = "f4fa65b9284d974dad7a23bb72835c4ec85c0b540d86af7fc4098c88cff51d65"
 dependencies = [
  "cfg-if",
  "critical-section",
- "defmt 1.0.1",
+ "defmt",
  "document-features",
  "embassy-time-driver",
  "embedded-hal 0.2.7",
@@ -431,7 +422,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "17119855ccc2d1f7470a39756b12068454ae27a3eabb037d940b5c03d9c77b7a"
 dependencies = [
- "defmt 1.0.1",
+ "defmt",
  "embedded-io-async",
 ]
 
@@ -685,7 +676,7 @@ version = "1.0.0"
 source = "git+https://github.com/xgroleau/mx25r-rs?rev=7fb07f92f33a33f369c3d9dc86795c2e61963312#7fb07f92f33a33f369c3d9dc86795c2e61963312"
 dependencies = [
  "bit",
- "defmt 1.0.1",
+ "defmt",
  "embassy-futures",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
@@ -721,7 +712,7 @@ dependencies = [
  "cfg-noodle",
  "cortex-m",
  "cortex-m-rt",
- "defmt 1.0.1",
+ "defmt",
  "defmt-rtt",
  "embassy-embedded-hal",
  "embassy-executor",
@@ -780,7 +771,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd402d00b0fb94c5aee000029204a46884b1262e0c443f166d86d2c0747e1a1a"
 dependencies = [
  "cortex-m",
- "defmt 1.0.1",
+ "defmt",
 ]
 
 [[package]]
@@ -925,11 +916,11 @@ checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
 
 [[package]]
 name = "sequential-storage"
-version = "5.0.1"
+version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0779e7aa11fe1e0a6a0bfb6abcdcc8852c6b74e3946d2ce93d24963dafc4a271"
+checksum = "634c2d26969edcb6b2c24c35cce4849c42199cd3ad32c69f6e5e02365ab60e76"
 dependencies = [
- "defmt 0.3.100",
+ "defmt",
  "embedded-storage-async",
 ]
 

@@ -24,7 +24,7 @@ defmt                   = "1.0.1"
 defmt-rtt               = "1.0.0"
 embassy-embedded-hal    = "0.5.0"
 embassy-futures         = "0.1.2"
-sequential-storage      = "5.0.1"
+sequential-storage      = "7.0.0"
 static_cell             = "2.1"
 maitake-sync = { version = "0.2.2", default-features = false, features = ["critical-section"] }
 

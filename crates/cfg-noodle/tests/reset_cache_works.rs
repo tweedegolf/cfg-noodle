@@ -1,10 +1,6 @@
 use std::num::NonZeroU32;
 
-use cfg_noodle::{
-    StorageList, StorageListNode,
-    error::LoadStoreError,
-    test_utils::{TestStorage, TestStorageError, get_mock_flash},
-};
+use cfg_noodle::{StorageList, StorageListNode, error::LoadStoreError, test_utils::TestStorage};
 use minicbor::{CborLen, Decode, Encode};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use tokio::task::{LocalSet, yield_now};
@@ -80,7 +76,7 @@ async fn bad_with_test_storage() {
             flash = TestStorage::default();
             // LIST.reset_cache().await;
 
-            let node_c_hdl = tokio::task::spawn_local(async {
+            let _node_c_hdl = tokio::task::spawn_local(async {
                 let hdl = NODE_C.attach(&LIST).await.unwrap();
                 let val = hdl.load();
                 (hdl, val)

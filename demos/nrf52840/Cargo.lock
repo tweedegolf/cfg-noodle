@@ -149,9 +149,9 @@ dependencies = [
 
 [[package]]
 name = "crc"
-version = "3.3.0"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9710d3b3739c2e349eb44fe848ad0b7c8cb1e42bd87ee49371df2f7acaf3e675"
+checksum = "5eb8a2a1cd12ab0d987a5d5e825195d372001a4094a0376319d5a0ad71c1ba0d"
 dependencies = [
  "crc-catalog",
 ]
@@ -919,11 +919,11 @@ checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
 
 [[package]]
 name = "sequential-storage"
-version = "5.0.1"
+version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0779e7aa11fe1e0a6a0bfb6abcdcc8852c6b74e3946d2ce93d24963dafc4a271"
+checksum = "634c2d26969edcb6b2c24c35cce4849c42199cd3ad32c69f6e5e02365ab60e76"
 dependencies = [
- "defmt 0.3.100",
+ "defmt 1.0.1",
  "embedded-storage-async",
 ]
 
