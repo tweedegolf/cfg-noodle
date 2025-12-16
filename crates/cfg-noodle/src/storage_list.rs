@@ -32,7 +32,7 @@ use mutex_traits::{ConstInit, ScopedRawMutex};
 ///    role of loading data FROM flash (and putting it in the Nodes),
 ///    as well as the role of deciding when to write data TO flash
 ///    (retrieving it from each node).
-pub struct StorageList<R: ScopedRawMutex, const KEPT_RECORDS: usize> {
+pub struct StorageList<R: ScopedRawMutex, const KEPT_RECORDS: usize = 3> {
     /// The type parameter `R` allows us to be generic over kinds of mutex
     /// impls, allowing for use of a `std` mutex on `std`, and for things
     /// like `CriticalSectionRawMutex` or `ThreadModeRawMutex` on no-std
