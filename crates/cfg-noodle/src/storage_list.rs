@@ -397,7 +397,6 @@ impl<R: ScopedRawMutex, const KEPT_RECORDS: usize> StorageList<R, KEPT_RECORDS> 
         // The write must have succeeded. So mark all nodes accordingly.
         for hdrref in inner.list.iter() {
             let state = hdrref.state.load(Ordering::Acquire);
-            let state = State::from_u8(state);
             let update = match state {
                 // We DO NOT update any Initial nodes
                 State::Initial => false,
@@ -414,7 +413,7 @@ impl<R: ScopedRawMutex, const KEPT_RECORDS: usize> StorageList<R, KEPT_RECORDS> 
                 // Rule 4.1.3: We can move from NeedsWrite -> ValidNoWriteNeeded because we hold the lock
                 hdrref
                     .state
-                    .store(State::ValidNoWriteNeeded.into_u8(), Ordering::Release);
+                    .store(State::ValidNoWriteNeeded, Ordering::Release);
             }
         }
 
@@ -818,7 +817,7 @@ impl<const KEPT_RECORDS: usize> StorageListInner<KEPT_RECORDS> {
             let header_meta = {
                 // SAFETY: Rule 1: NodeHeader access is ALWAYS shared
                 let node_header = unsafe { node_header.as_ref() };
-                match State::from_u8(node_header.state.load(Ordering::Acquire)) {
+                match node_header.state.load(Ordering::Acquire) {
                     State::Initial => Some(node_header.vtable),
                     State::NonResident => None,
                     State::ValidNoWriteNeeded => None,
@@ -849,7 +848,7 @@ impl<const KEPT_RECORDS: usize> StorageListInner<KEPT_RECORDS> {
                     //
                     hdrref
                         .state
-                        .store(State::ValidNoWriteNeeded.into_u8(), Ordering::Release);
+                        .store(State::ValidNoWriteNeeded, Ordering::Release);
                 } else {
                     // If there WAS a key, but the deser failed, this means that either the data
                     // was corrupted, or there was a breaking schema change. Either way, we can't
@@ -860,9 +859,7 @@ impl<const KEPT_RECORDS: usize> StorageListInner<KEPT_RECORDS> {
                         "Key {:?} exists and was wanted, but deserialization failed",
                         kvpair.key
                     );
-                    hdrref
-                        .state
-                        .store(State::NonResident.into_u8(), Ordering::Release);
+                    hdrref.state.store(State::NonResident, Ordering::Release);
                 }
             }
         }
@@ -909,8 +906,7 @@ impl<const KEPT_RECORDS: usize> StorageListInner<KEPT_RECORDS> {
             let state = {
                 // SAFETY: Rule 1: NodeHeader access is ALWAYS shared
                 let state_ref = unsafe { &*addr_of!((*hdrptr.ptr.as_ptr()).state) };
-                let state = state_ref.load(Ordering::Acquire);
-                State::from_u8(state)
+                state_ref.load(Ordering::Acquire)
             };
 
             match state {
@@ -973,14 +969,9 @@ impl<const KEPT_RECORDS: usize> StorageListInner<KEPT_RECORDS> {
     fn mark_initial_nonresident(&mut self) {
         // Set nodes in initial states to non resident
         for hdrref in self.list.iter() {
-            if matches!(
-                State::from_u8(hdrref.state.load(Ordering::Acquire)),
-                State::Initial
-            ) {
+            if matches!(hdrref.state.load(Ordering::Acquire), State::Initial) {
                 // Initial -> NonResident is always a safe transition for a node
-                hdrref
-                    .state
-                    .store(State::NonResident.into_u8(), Ordering::Release);
+                hdrref.state.store(State::NonResident, Ordering::Release);
             }
         }
     }
@@ -993,7 +984,7 @@ impl<const KEPT_RECORDS: usize> StorageListInner<KEPT_RECORDS> {
         // is in an invalid state.
         for header in self.list.iter() {
             // The node may be spinning to populate itself right now, so use acquire ordering
-            match State::from_u8(header.state.load(Ordering::Acquire)) {
+            match header.state.load(Ordering::Acquire) {
                 // If no write is needed, we obviously won't write.
                 State::ValidNoWriteNeeded => {}
                 // The node has been changed (including default write-backs) but not
