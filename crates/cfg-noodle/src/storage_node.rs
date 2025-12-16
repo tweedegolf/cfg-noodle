@@ -267,14 +267,14 @@ where
     ///
     ///   MY_CONFIG.attach(&MY_LIST).await;
     /// # };
-    pub async fn attach<R, const KEPT_RECORDS: usize>(
+    pub fn attach<R, const KEPT_RECORDS: usize>(
         &'static self,
         list: &'static StorageList<R, KEPT_RECORDS>,
-    ) -> Result<StorageListNodeHandle<T, R, KEPT_RECORDS>, Error>
+    ) -> impl Future<Output = Result<StorageListNodeHandle<T, R, KEPT_RECORDS>, Error>>
     where
         R: ScopedRawMutex + 'static,
     {
-        self.attach_with_default(list, Default::default).await
+        self.attach_with_default(list, Default::default)
     }
 }
 
