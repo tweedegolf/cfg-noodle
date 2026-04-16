@@ -5,7 +5,7 @@
 use core::{fmt::Write as _, num::NonZeroU32};
 use std::{collections::VecDeque, sync::Arc};
 
-use embassy_executor as _; // Required to compile on windows
+// use embassy_executor as _; // Required to compile on windows
 use log::{debug, error, info, warn};
 use maitake_sync::WaitQueue;
 use minicbor::encode::write::{Cursor, EndOfSlice};

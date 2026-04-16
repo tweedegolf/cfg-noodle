@@ -27,9 +27,9 @@ default = [
     "disable-cache-padding",
 ]
 std = [
-    "embassy-sync/std",
-    "embassy-time/std",
-    "embassy-futures/log",
+    "embassy-sync?/std",
+    "embassy-time?/std",
+    "embassy-futures?/log",
     "minicbor/std",
     "sequential-storage/std",
     "sequential-storage/_test",
@@ -37,17 +37,22 @@ std = [
     "critical-section/std",
     "maitake-sync/std",
     "mutex-traits/std",
+    "dep:embassy-futures",
     "dep:log",
     "dep:simple_logger",
     "dep:tokio",
-    "dep:embassy-executor",
 ]
 defmt = [
     "dep:defmt",
     "embassy-futures/defmt",
     "embassy-sync/defmt",
-    "embassy-time/defmt",
+    "embassy-time?/defmt",
     "sequential-storage/defmt",
+]
+default-worker = [
+    "dep:embassy-time",
+    "dep:embassy-sync",
+    "dep:embassy-futures",
 ]
 
 # disable cache padding for cordyceps + maitake-sync, this drastically reduces the size
@@ -58,13 +63,16 @@ disable-cache-padding = [
     "cordyceps/no-cache-pad",
     "maitake-sync/no-cache-pad",
 ]
+# Turn on the generic queue feature of embassy-time.
+# This makes the crate compile if no embassy-executor is present.
+et-generic-queue-8 = ["embassy-time?/generic-queue-8"]
 
 [dependencies]
 crc                     = "3.4.0"
 critical-section        = "1.2.0"
-embassy-futures         = "0.1.1"
-embassy-sync            = "0.8"
-embassy-time            = "0.5.0"
+embassy-futures         = { version = "0.1.1", optional = true }
+embassy-sync            = { version = "0.8", optional = true }
+embassy-time            = { version = "0.5.0", optional = true }
 embedded-storage-async  = "0.4.1"
 mutex-traits            = "1.0.0"
 pin-project             = "1.1.10"
@@ -73,12 +81,11 @@ sequential-storage      = "7.0.0"
 cordyceps        = { version = "0.3.4", default-features = false }
 defmt            = { version = "1.0.1", optional = true }
 log              = { version = "0.4.29", optional = true }
-maitake-sync     = { version = "0.2.1", default-features = false }
+maitake-sync     = { version = "0.3.0", default-features = false }
 minicbor         = { version = "2.0.0", default-features = false, features = ["derive"] }
 mutex            = { version = "1.0.0", features = ["impl-critical-section"] }
 simple_logger    = { version = "5.1.0", optional = true }
 tokio            = { version = "1.48.0", optional = true, features = ["macros", "rt-multi-thread", "time"] }
-embassy-executor = { version = "0.10", optional = true, features = ["platform-std", "executor-thread"] } # Required to get this crate compiled on windows under std
 
 [dev-dependencies]
 approx          = "0.5.1"

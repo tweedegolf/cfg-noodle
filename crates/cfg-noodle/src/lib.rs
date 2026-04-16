@@ -14,6 +14,7 @@ pub mod data_portability;
 pub mod error;
 pub mod flash;
 pub mod safety_guide;
+#[cfg(feature = "default-worker")]
 pub mod worker_task;
 
 // re-export some dependencies
