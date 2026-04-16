@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## 0.7.0 16-04-26
+
+- *Breaking:* Updated embassy dependencies
+- *Breaking:* Default worker tasks is now behind a feature flag
+- Added new feature flag that forwards the embassy-time generic-queue flag
+
 ## 0.6.0 16-12-25
 
 - *Breaking:* Added const generic to list that controls how much redundancy is stored. To keep the same behavior as before, use the value 3.
