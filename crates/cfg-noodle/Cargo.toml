@@ -29,7 +29,6 @@ default = [
 std = [
     "embassy-sync?/std",
     "embassy-time?/std",
-    "embassy-futures?/log",
     "minicbor/std",
     "sequential-storage/std",
     "sequential-storage/_test",
@@ -44,7 +43,6 @@ std = [
 ]
 defmt = [
     "dep:defmt",
-    "embassy-futures/defmt",
     "embassy-sync/defmt",
     "embassy-time?/defmt",
     "sequential-storage/defmt",
